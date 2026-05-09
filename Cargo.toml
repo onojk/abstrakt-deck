@@ -22,6 +22,9 @@ log = "0.4"
 # Math (used later for matrices, vectors)
 glam = "0.29"
 
+# Zero-copy byte casting for GPU buffer uploads
+bytemuck = { version = "1.19", features = ["derive"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

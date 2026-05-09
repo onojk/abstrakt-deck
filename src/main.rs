@@ -1,19 +1,32 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-/// State that owns the wgpu device, queue, and swapchain.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GlobalUniforms {
+    time_seconds: f32,
+    resolution_x: f32,
+    resolution_y: f32,
+    _pad: f32,
+}
+
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+    uniforms_buffer: wgpu::Buffer,
+    uniforms_bind_group: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
+    start_time: Instant,
 }
 
 impl GpuState {
@@ -71,7 +84,112 @@ impl GpuState {
 
         surface.configure(&device, &config);
 
-        Self { surface, device, queue, config, size }
+        // Shader
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Fullscreen shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/fullscreen.wgsl").into(),
+            ),
+        });
+
+        // Uniform buffer
+        let initial_uniforms = GlobalUniforms {
+            time_seconds: 0.0,
+            resolution_x: size.width as f32,
+            resolution_y: size.height as f32,
+            _pad: 0.0,
+        };
+
+        let uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Globals uniform buffer"),
+            contents: bytemuck::cast_slice(&[initial_uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Bind group layout
+        let uniforms_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Uniforms bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        // Bind group
+        let uniforms_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniforms bind group"),
+            layout: &uniforms_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Pipeline layout
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Pipeline layout"),
+                bind_group_layouts: &[&uniforms_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        // Render pipeline
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Fullscreen pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            surface,
+            device,
+            queue,
+            config,
+            size,
+            uniforms_buffer,
+            uniforms_bind_group,
+            pipeline,
+            start_time: Instant::now(),
+        }
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -84,26 +202,35 @@ impl GpuState {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // Upload uniforms for this frame
+        let uniforms = GlobalUniforms {
+            time_seconds: self.start_time.elapsed().as_secs_f32(),
+            resolution_x: self.size.width as f32,
+            resolution_y: self.size.height as f32,
+            _pad: 0.0,
+        };
+        self.queue.write_buffer(
+            &self.uniforms_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
+        let mut encoder =
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear Pass"),
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Fullscreen Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.04,
-                            g: 0.04,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -111,6 +238,10 @@ impl GpuState {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.uniforms_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -120,7 +251,6 @@ impl GpuState {
     }
 }
 
-/// FPS counter using a rolling 1-second window.
 struct FpsCounter {
     frames: u32,
     last_report: Instant,
@@ -146,7 +276,6 @@ impl FpsCounter {
     }
 }
 
-/// Application state. Window/GPU are created lazily on resumed event.
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -155,11 +284,7 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        Self {
-            window: None,
-            gpu: None,
-            fps: FpsCounter::new(),
-        }
+        Self { window: None, gpu: None, fps: FpsCounter::new() }
     }
 }
 
@@ -170,12 +295,11 @@ impl ApplicationHandler for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 1")
+            .with_title("abstrakt-deck — slice 2")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = Arc::new(
-            event_loop.create_window(attrs)
-                .expect("Failed to create window")
+            event_loop.create_window(attrs).expect("Failed to create window"),
         );
 
         let gpu = pollster::block_on(GpuState::new(window.clone()));
@@ -230,7 +354,10 @@ impl ApplicationHandler for App {
                 }
 
                 if let Some(fps) = self.fps.tick() {
-                    window.set_title(&format!("abstrakt-deck — slice 1 — {:.1} fps", fps));
+                    window.set_title(&format!(
+                        "abstrakt-deck — slice 2 — {:.1} fps",
+                        fps
+                    ));
                 }
 
                 window.request_redraw();
