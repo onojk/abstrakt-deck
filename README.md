@@ -68,6 +68,7 @@ The visualizer opens in a 1280×720 window. Click the window for focus before us
 
 | Key | Action |
 |-----|--------|
+| `?` | toggle cheat sheet overlay (animated slide-in) |
 | `Tab` | cycle 3D shape (Cylinder → Sphere → Cube → Tetrahedron) |
 | `P` | cycle painter (HueStripe → Spiral → Plasma) |
 | `[` / `]` | decrease / increase kaleido fold count (2 to 24) |

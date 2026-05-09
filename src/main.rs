@@ -1,11 +1,15 @@
 mod audio;
+mod help_overlay;
 mod midi;
 mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
+use help_overlay::HelpOverlay;
 use midi::{MidiCapture, MidiEvent};
 use recorder::Recorder;
 use shape::{ShapeKind, Vertex};
+
+static CHEAT_SHEET_PNG: &[u8] = include_bytes!("../assets/cheat_sheet.png");
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
@@ -371,6 +375,8 @@ struct GpuState {
     readback_buffer: wgpu::Buffer,
     readback_padded_bytes_per_row: u32,
     recorder: Option<Recorder>,
+
+    help_overlay: HelpOverlay,
 
     start_time: Instant,
 
@@ -849,6 +855,8 @@ impl GpuState {
         let (readback_buffer, readback_padded_bytes_per_row) =
             Self::create_readback_buffer(&device, w, h);
 
+        let help_overlay = HelpOverlay::new(&device, &queue, config.format, CHEAT_SHEET_PNG);
+
         // ── Pipelines ─────────────────────────────────────────────────────────
         let painter_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1049,6 +1057,7 @@ impl GpuState {
             blit_bgl, blit_bind_group, blit_pipeline,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
+            help_overlay,
             start_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
             shake_velocity: glam::Vec3::ZERO,
@@ -1359,6 +1368,29 @@ impl GpuState {
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        // Pass 6: help overlay (animated slide-in, drawn on top of swapchain)
+        self.help_overlay.update_animation();
+        if self.help_overlay.should_render() {
+            self.help_overlay.write_uniforms(&self.queue, self.size.width, self.size.height);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Overlay pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &screen_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.help_overlay.pipeline);
+            pass.set_bind_group(0, &self.help_overlay.bind_group, &[]);
+            pass.draw(0..6, 0..1);
         }
 
         // If recording: copy scene texture to readback buffer in the same encoder submit.
@@ -1772,8 +1804,13 @@ impl ApplicationHandler for App {
                         log::info!("colorize_intensity = {:.2}", gpu.params.colorize_intensity);
                     }
                     KeyCode::Slash => {
-                        gpu.params.bass_zoom_strength = (gpu.params.bass_zoom_strength - 0.05).max(0.0);
-                        log::info!("bass_zoom_strength = {:.2}", gpu.params.bass_zoom_strength);
+                        if self.modifiers.shift_key() {
+                            gpu.help_overlay.toggle();
+                        } else {
+                            gpu.params.bass_zoom_strength =
+                                (gpu.params.bass_zoom_strength - 0.05).max(0.0);
+                            log::info!("bass_zoom_strength = {:.2}", gpu.params.bass_zoom_strength);
+                        }
                     }
                     KeyCode::Quote => {
                         gpu.params.bass_zoom_strength = (gpu.params.bass_zoom_strength + 0.05).min(1.0);
@@ -1900,6 +1937,7 @@ fn main() {
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
     println!("  P      cycle painter (HueStripe → Spiral → Plasma)");
+    println!("  ?      toggle help overlay");
     println!("  F11    toggle fullscreen");
     println!("  F12    toggle video recording (saves to ~/Videos/abstrakt-deck/)");
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
