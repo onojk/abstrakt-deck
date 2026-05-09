@@ -171,6 +171,8 @@ struct GpuState {
     frame_color_hue: f32,
     shake_enabled: bool,
     current_shape: ShapeKind,
+    bass_zoom_smoothed: f32,
+    bass_zoom_strength: f32,
 }
 
 impl GpuState {
@@ -700,6 +702,8 @@ impl GpuState {
             frame_color_hue: 195.0,
             shake_enabled: true,
             current_shape: ShapeKind::Cylinder,
+            bass_zoom_smoothed: 0.0,
+            bass_zoom_strength: 0.3,
         }
     }
 
@@ -796,7 +800,7 @@ impl GpuState {
                 resolution_x: self.size.width as f32,
                 resolution_y: self.size.height as f32,
                 fold_count: self.fold_count,
-                zoom: self.zoom,
+                zoom: self.zoom + self.bass_zoom_smoothed * self.bass_zoom_strength,
             }]),
         );
 
@@ -943,6 +947,16 @@ impl GpuState {
         let dir = glam::Vec3::new(angle.cos(), 0.0, angle.sin());
         self.shake_velocity += dir * strength * 0.75;
     }
+
+    pub fn update_bass_zoom(&mut self, raw_bass: f32) {
+        let attack = 0.4;
+        let decay  = 0.08;
+        if raw_bass > self.bass_zoom_smoothed {
+            self.bass_zoom_smoothed = self.bass_zoom_smoothed * (1.0 - attack) + raw_bass * attack;
+        } else {
+            self.bass_zoom_smoothed = self.bass_zoom_smoothed * (1.0 - decay) + raw_bass * decay;
+        }
+    }
 }
 
 struct FpsCounter {
@@ -978,6 +992,10 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                 1 => {
                     gpu.fold_count = (2.0 + v * 22.0).round();
                     log::debug!("MIDI CC1 → fold_count = {}", gpu.fold_count);
+                }
+                5 => {
+                    gpu.bass_zoom_strength = v;
+                    log::debug!("MIDI CC5 → bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
                 }
                 7 => {
                     gpu.zoom = 0.3 + v * 1.2;
@@ -1044,7 +1062,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 11 — Multi-shape")
+            .with_title("abstrakt-deck — slice 12 — Bass-reactive")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1165,6 +1183,14 @@ impl ApplicationHandler for App {
                         gpu.current_shape = gpu.current_shape.next();
                         log::info!("shape: {}", gpu.current_shape.name());
                     }
+                    KeyCode::Slash => {
+                        gpu.bass_zoom_strength = (gpu.bass_zoom_strength - 0.05).max(0.0);
+                        log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
+                    }
+                    KeyCode::Quote => {
+                        gpu.bass_zoom_strength = (gpu.bass_zoom_strength + 0.05).min(1.0);
+                        log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
+                    }
                     _ => {}
                 }
             }
@@ -1188,6 +1214,10 @@ impl ApplicationHandler for App {
                         apply_midi_event(gpu, event);
                     }
                 }
+                let bass_energy = self.audio.as_ref()
+                    .map(|a| a.state.lock().bass_energy)
+                    .unwrap_or(0.0);
+                gpu.update_bass_zoom(bass_energy);
                 match gpu.render() {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1203,7 +1233,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 11 — Multi-shape — {:.1} fps",
+                        "abstrakt-deck — slice 12 — Bass-reactive — {:.1} fps",
                         fps
                     ));
                 }
@@ -1228,12 +1258,14 @@ fn main() {
     println!("  R G B  cycle frame color hue");
     println!("  space  toggle beat-reactive shake");
     println!("  Tab    cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
+    println!("  / '   bass-zoom intensity (0 to 1)");
     println!("  esc    exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
     println!("  CC 7   zoom");
     println!("  CC 10  rotation speed");
     println!("  CC 64  cycle frame shape");
+    println!("  CC 5   bass-zoom intensity");
     println!("  CC 65  cycle shape (portamento)");
     println!("  CC 71  frame size");
     println!("  CC 74  frame color hue");
