@@ -1947,7 +1947,35 @@ impl ApplicationHandler for App {
                             return;
                         }
                         MenuAction::OpenSkin => {
-                            log::info!("Open Skin requested (dialog wiring in slice 23b)");
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Images", &["jpg", "jpeg", "png", "webp"])
+                                .set_title("Select skin image")
+                                .pick_file()
+                            {
+                                log::info!("Selected file: {}", path.display());
+                                match std::fs::metadata(&path) {
+                                    Ok(meta) if meta.len() > 50 * 1024 * 1024 => {
+                                        log::error!(
+                                            "skin rejected: file too large ({} MB, max 50 MB)",
+                                            meta.len() / 1024 / 1024
+                                        );
+                                    }
+                                    Ok(meta) => {
+                                        log::info!("File size: {} KB", meta.len() / 1024);
+                                        match image::open(&path) {
+                                            Ok(img) => {
+                                                let (w, h) = image::GenericImageView::dimensions(&img);
+                                                log::info!("Image decoded: {}x{} pixels", w, h);
+                                                log::info!("(Skin display coming in slice 23c — dialog test complete)");
+                                            }
+                                            Err(e) => log::error!("Failed to decode image: {}", e),
+                                        }
+                                    }
+                                    Err(e) => log::error!("Can't read file metadata: {}", e),
+                                }
+                            } else {
+                                log::info!("Open Skin canceled");
+                            }
                         }
                         MenuAction::SavePreset => {
                             if let Err(e) = save_preset(gpu) {
