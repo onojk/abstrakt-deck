@@ -1,0 +1,30 @@
+[package]
+name = "abstrakt-deck"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jonathan Kendall"]
+description = "Native Linux desktop audio-reactive kaleidoscope visualizer"
+
+[dependencies]
+# Window + event loop
+winit = "0.30"
+
+# Modern graphics API
+wgpu = "23.0"
+
+# Async runtime (wgpu requires it)
+pollster = "0.4"
+
+# Logging
+env_logger = "0.11"
+log = "0.4"
+
+# Math (used later for matrices, vectors)
+glam = "0.29"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev]
+opt-level = 1  # debug builds slightly optimized for usable framerate
