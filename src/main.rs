@@ -43,6 +43,15 @@ struct KaleidoUniforms {
     zoom: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ShapeEffects {
+    invert:           f32,   // 0.0 = off, 1.0 = on
+    colorize_enabled: f32,   // 0.0 = off, 1.0 = on
+    colorize_hue:     f32,   // 0..360 degrees
+    _pad:             f32,
+}
+
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=star
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -140,6 +149,8 @@ struct GpuState {
     transform_bind_group: wgpu::BindGroup,
     shape_pipeline: wgpu::RenderPipeline,
     shape_bind_group: wgpu::BindGroup,
+    shape_effects_buffer: wgpu::Buffer,
+    shape_effects_bind_group: wgpu::BindGroup,
 
     // Pass 3 — kaleido fold (shape FBO → kaleido FBO)
     #[allow(dead_code)]
@@ -173,6 +184,9 @@ struct GpuState {
     current_shape: ShapeKind,
     bass_zoom_smoothed: f32,
     bass_zoom_strength: f32,
+    invert_enabled: bool,
+    colorize_enabled: bool,
+    colorize_hue: f32,
 }
 
 impl GpuState {
@@ -444,6 +458,38 @@ impl GpuState {
             ],
         });
 
+        // ── Shape effects uniforms ────────────────────────────────────────────
+        let shape_effects_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Shape effects uniforms"),
+                contents: bytemuck::cast_slice(&[ShapeEffects {
+                    invert: 0.0, colorize_enabled: 0.0, colorize_hue: 0.0, _pad: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let shape_effects_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Shape effects BGL"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let shape_effects_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shape effects BG"),
+            layout: &shape_effects_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shape_effects_buffer.as_entire_binding(),
+            }],
+        });
+
         // ── Globals uniform (painter pass) ────────────────────────────────────
         let uniforms_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -581,7 +627,7 @@ impl GpuState {
                 label: Some("Shape pipeline"),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: None,
-                    bind_group_layouts: &[&transform_bgl, &tex2_bgl],
+                    bind_group_layouts: &[&transform_bgl, &tex2_bgl, &shape_effects_bgl],
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
@@ -687,6 +733,7 @@ impl GpuState {
             shape_buffers,
             transform_buffer, transform_bind_group,
             shape_pipeline, shape_bind_group,
+            shape_effects_buffer, shape_effects_bind_group,
             kaleido_texture, kaleido_view,
             kaleido_uniforms_buffer, kaleido_bgl, kaleido_bind_group, kaleido_pipeline,
             frame_uniforms_buffer, frame_bgl, frame_bind_group, frame_pipeline,
@@ -704,6 +751,9 @@ impl GpuState {
             current_shape: ShapeKind::Cylinder,
             bass_zoom_smoothed: 0.0,
             bass_zoom_strength: 0.3,
+            invert_enabled: false,
+            colorize_enabled: false,
+            colorize_hue: 0.0,
         }
     }
 
@@ -804,6 +854,16 @@ impl GpuState {
             }]),
         );
 
+        self.queue.write_buffer(
+            &self.shape_effects_buffer, 0,
+            bytemuck::cast_slice(&[ShapeEffects {
+                invert:           if self.invert_enabled { 1.0 } else { 0.0 },
+                colorize_enabled: if self.colorize_enabled { 1.0 } else { 0.0 },
+                colorize_hue:     self.colorize_hue,
+                _pad:             0.0,
+            }]),
+        );
+
         let (fr, fg, fb) = hsv_to_rgb(self.frame_color_hue, 0.85, 1.0);
         self.queue.write_buffer(
             &self.frame_uniforms_buffer, 0,
@@ -892,6 +952,7 @@ impl GpuState {
             pass.set_pipeline(&self.shape_pipeline);
             pass.set_bind_group(0, &self.transform_bind_group, &[]);
             pass.set_bind_group(1, &self.shape_bind_group, &[]);
+            pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
             let buffers = &self.shape_buffers[&self.current_shape];
             pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
             pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -1029,6 +1090,18 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                     gpu.frame_color_hue = v * 360.0;
                     log::debug!("MIDI CC74 → frame_color_hue = {:.0}°", gpu.frame_color_hue);
                 }
+                76 => {
+                    gpu.colorize_hue = v * 360.0;
+                    log::debug!("MIDI CC76 → colorize_hue = {:.0}°", gpu.colorize_hue);
+                }
+                91 => {
+                    gpu.invert_enabled = value >= 64;
+                    log::debug!("MIDI CC91 → invert = {}", gpu.invert_enabled);
+                }
+                93 => {
+                    gpu.colorize_enabled = value >= 64;
+                    log::debug!("MIDI CC93 → colorize = {}", gpu.colorize_enabled);
+                }
                 _ => {
                     log::trace!("MIDI CC {} value {} (unmapped)", cc, value);
                 }
@@ -1062,7 +1135,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 12 — Bass-reactive")
+            .with_title("abstrakt-deck — slice 13 — Color FX")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1183,6 +1256,18 @@ impl ApplicationHandler for App {
                         gpu.current_shape = gpu.current_shape.next();
                         log::info!("shape: {}", gpu.current_shape.name());
                     }
+                    KeyCode::KeyI => {
+                        gpu.invert_enabled = !gpu.invert_enabled;
+                        log::info!("invert = {}", gpu.invert_enabled);
+                    }
+                    KeyCode::KeyT => {
+                        gpu.colorize_enabled = !gpu.colorize_enabled;
+                        log::info!("colorize = {}", gpu.colorize_enabled);
+                    }
+                    KeyCode::Semicolon => {
+                        gpu.colorize_hue = (gpu.colorize_hue + 30.0) % 360.0;
+                        log::info!("colorize_hue = {:.0}°", gpu.colorize_hue);
+                    }
                     KeyCode::Slash => {
                         gpu.bass_zoom_strength = (gpu.bass_zoom_strength - 0.05).max(0.0);
                         log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
@@ -1233,7 +1318,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 12 — Bass-reactive — {:.1} fps",
+                        "abstrakt-deck — slice 13 — Color FX — {:.1} fps",
                         fps
                     ));
                 }
@@ -1259,6 +1344,9 @@ fn main() {
     println!("  space  toggle beat-reactive shake");
     println!("  Tab    cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
     println!("  / '   bass-zoom intensity (0 to 1)");
+    println!("  I      toggle color invert");
+    println!("  T      toggle colorize tint");
+    println!("  ;      cycle colorize hue (+30°)");
     println!("  esc    exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
@@ -1266,6 +1354,9 @@ fn main() {
     println!("  CC 10  rotation speed");
     println!("  CC 64  cycle frame shape");
     println!("  CC 5   bass-zoom intensity");
+    println!("  CC 76  colorize hue");
+    println!("  CC 91  invert toggle");
+    println!("  CC 93  colorize toggle");
     println!("  CC 65  cycle shape (portamento)");
     println!("  CC 71  frame size");
     println!("  CC 74  frame color hue");
