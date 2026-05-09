@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 
 WIDTH = 800
-HEIGHT = 700
+HEIGHT = 760
 BG = (0, 0, 0, 220)        # dark translucent background
 HEADER = (255, 220, 80)     # gold for category headers
 KEY = (120, 220, 255)       # cyan for key labels
