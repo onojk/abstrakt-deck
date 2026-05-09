@@ -87,7 +87,7 @@ impl FrameUniforms {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum FrameShape {
+pub enum FrameShape {
     None    = 0,
     Circle  = 1,
     Square  = 2,
@@ -99,6 +99,49 @@ enum FrameShape {
 
 impl FrameShape {
     fn as_f32(self) -> f32 { self as i32 as f32 }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualParams {
+    pub current_shape: ShapeKind,
+    pub fold_count: f32,
+    pub zoom: f32,
+    pub rotation_speed_scale: f32,
+    pub frame_shape: FrameShape,
+    pub frame_size: f32,
+    pub frame_color_hue: f32,
+    pub invert_enabled: bool,
+    pub colorize_enabled: bool,
+    pub colorize_hue: f32,
+    pub colorize_intensity: f32,
+    pub distortion_enabled: bool,
+    pub distortion_amplitude: f32,
+    pub distortion_frequency: f32,
+    pub shake_enabled: bool,
+    pub bass_zoom_strength: f32,
+}
+
+impl Default for VisualParams {
+    fn default() -> Self {
+        Self {
+            current_shape: ShapeKind::Cylinder,
+            fold_count: 12.0,
+            zoom: 0.6,
+            rotation_speed_scale: 1.0,
+            frame_shape: FrameShape::Hexagon,
+            frame_size: 0.85,
+            frame_color_hue: 195.0,
+            invert_enabled: false,
+            colorize_enabled: false,
+            colorize_hue: 0.0,
+            colorize_intensity: 0.5,
+            distortion_enabled: false,
+            distortion_amplitude: 0.05,
+            distortion_frequency: 3.0,
+            shake_enabled: true,
+            bass_zoom_strength: 0.3,
+        }
+    }
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
@@ -139,38 +182,38 @@ struct Preset {
 }
 
 impl Preset {
-    fn from_gpu(gpu: &GpuState) -> Self {
+    pub fn from_params(params: &VisualParams) -> Self {
         Self {
-            current_shape: gpu.current_shape.name().to_string(),
-            fold_count: gpu.fold_count,
-            zoom: gpu.zoom,
-            rotation_speed_scale: gpu.rotation_speed_scale,
-            frame_shape: format!("{:?}", gpu.frame_shape),
-            frame_size: gpu.frame_size,
-            frame_color_hue: gpu.frame_color_hue,
-            invert_enabled: gpu.invert_enabled,
-            colorize_enabled: gpu.colorize_enabled,
-            colorize_hue: gpu.colorize_hue,
-            colorize_intensity: gpu.colorize_intensity,
-            distortion_enabled: gpu.distortion_enabled,
-            distortion_amplitude: gpu.distortion_amplitude,
-            distortion_frequency: gpu.distortion_frequency,
-            shake_enabled: gpu.shake_enabled,
-            bass_zoom_strength: gpu.bass_zoom_strength,
+            current_shape: params.current_shape.name().to_string(),
+            fold_count: params.fold_count,
+            zoom: params.zoom,
+            rotation_speed_scale: params.rotation_speed_scale,
+            frame_shape: format!("{:?}", params.frame_shape),
+            frame_size: params.frame_size,
+            frame_color_hue: params.frame_color_hue,
+            invert_enabled: params.invert_enabled,
+            colorize_enabled: params.colorize_enabled,
+            colorize_hue: params.colorize_hue,
+            colorize_intensity: params.colorize_intensity,
+            distortion_enabled: params.distortion_enabled,
+            distortion_amplitude: params.distortion_amplitude,
+            distortion_frequency: params.distortion_frequency,
+            shake_enabled: params.shake_enabled,
+            bass_zoom_strength: params.bass_zoom_strength,
         }
     }
 
-    fn apply_to_gpu(&self, gpu: &mut GpuState) {
-        gpu.current_shape = match self.current_shape.as_str() {
+    pub fn apply_to_params(&self, params: &mut VisualParams) {
+        params.current_shape = match self.current_shape.as_str() {
             "Sphere"      => ShapeKind::Sphere,
             "Cube"        => ShapeKind::Cube,
             "Tetrahedron" => ShapeKind::Tetrahedron,
             _             => ShapeKind::Cylinder,
         };
-        gpu.fold_count = self.fold_count;
-        gpu.zoom = self.zoom;
-        gpu.rotation_speed_scale = self.rotation_speed_scale;
-        gpu.frame_shape = match self.frame_shape.as_str() {
+        params.fold_count = self.fold_count;
+        params.zoom = self.zoom;
+        params.rotation_speed_scale = self.rotation_speed_scale;
+        params.frame_shape = match self.frame_shape.as_str() {
             "None"    => FrameShape::None,
             "Circle"  => FrameShape::Circle,
             "Square"  => FrameShape::Square,
@@ -179,17 +222,17 @@ impl Preset {
             "Star"    => FrameShape::Star,
             _         => FrameShape::Hexagon,
         };
-        gpu.frame_size = self.frame_size;
-        gpu.frame_color_hue = self.frame_color_hue;
-        gpu.invert_enabled = self.invert_enabled;
-        gpu.colorize_enabled = self.colorize_enabled;
-        gpu.colorize_hue = self.colorize_hue;
-        gpu.colorize_intensity = self.colorize_intensity;
-        gpu.distortion_enabled = self.distortion_enabled;
-        gpu.distortion_amplitude = self.distortion_amplitude;
-        gpu.distortion_frequency = self.distortion_frequency;
-        gpu.shake_enabled = self.shake_enabled;
-        gpu.bass_zoom_strength = self.bass_zoom_strength;
+        params.frame_size = self.frame_size;
+        params.frame_color_hue = self.frame_color_hue;
+        params.invert_enabled = self.invert_enabled;
+        params.colorize_enabled = self.colorize_enabled;
+        params.colorize_hue = self.colorize_hue;
+        params.colorize_intensity = self.colorize_intensity;
+        params.distortion_enabled = self.distortion_enabled;
+        params.distortion_amplitude = self.distortion_amplitude;
+        params.distortion_frequency = self.distortion_frequency;
+        params.shake_enabled = self.shake_enabled;
+        params.bass_zoom_strength = self.bass_zoom_strength;
     }
 }
 
@@ -206,7 +249,7 @@ fn save_preset(gpu: &GpuState) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create config dir: {}", e))?;
     }
-    let preset = Preset::from_gpu(gpu);
+    let preset = Preset::from_params(&gpu.params);
     let json = serde_json::to_string_pretty(&preset)
         .map_err(|e| format!("Serialize: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Write: {}", e))?;
@@ -220,7 +263,7 @@ fn load_preset(gpu: &mut GpuState) -> Result<(), String> {
         .map_err(|e| format!("Read: {}", e))?;
     let preset: Preset = serde_json::from_str(&json)
         .map_err(|e| format!("Parse: {}", e))?;
-    preset.apply_to_gpu(gpu);
+    preset.apply_to_params(&mut gpu.params);
     log::info!("Preset loaded from {}", path.display());
     Ok(())
 }
@@ -284,25 +327,9 @@ struct GpuState {
 
     shake_offset: glam::Vec3,
     shake_velocity: glam::Vec3,
-
-    // Runtime-mutable parameters (keyboard-controlled)
-    fold_count: f32,
-    zoom: f32,
-    rotation_speed_scale: f32,
-    frame_shape: FrameShape,
-    frame_size: f32,
-    frame_color_hue: f32,
-    shake_enabled: bool,
-    current_shape: ShapeKind,
     bass_zoom_smoothed: f32,
-    bass_zoom_strength: f32,
-    invert_enabled: bool,
-    colorize_enabled: bool,
-    colorize_hue: f32,
-    colorize_intensity: f32,
-    distortion_enabled: bool,
-    distortion_amplitude: f32,
-    distortion_frequency: f32,
+
+    pub params: VisualParams,
 }
 
 impl GpuState {
@@ -859,23 +886,8 @@ impl GpuState {
             start_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
             shake_velocity: glam::Vec3::ZERO,
-            fold_count: 12.0,
-            zoom: 0.6,
-            rotation_speed_scale: 1.0,
-            frame_shape: FrameShape::Hexagon,
-            frame_size: 0.85,
-            frame_color_hue: 195.0,
-            shake_enabled: true,
-            current_shape: ShapeKind::Cylinder,
             bass_zoom_smoothed: 0.0,
-            bass_zoom_strength: 0.3,
-            invert_enabled: false,
-            colorize_enabled: false,
-            colorize_hue: 0.0,
-            colorize_intensity: 0.5,
-            distortion_enabled: false,
-            distortion_amplitude: 0.05,
-            distortion_frequency: 3.0,
+            params: VisualParams::default(),
         }
     }
 
@@ -971,26 +983,26 @@ impl GpuState {
             bytemuck::cast_slice(&[KaleidoUniforms {
                 resolution_x: self.size.width as f32,
                 resolution_y: self.size.height as f32,
-                fold_count: self.fold_count,
-                zoom: self.zoom + self.bass_zoom_smoothed * self.bass_zoom_strength,
+                fold_count: self.params.fold_count,
+                zoom: self.params.zoom + self.bass_zoom_smoothed * self.params.bass_zoom_strength,
             }]),
         );
 
         self.queue.write_buffer(
             &self.shape_effects_buffer, 0,
             bytemuck::cast_slice(&[ShapeEffects {
-                invert:               if self.invert_enabled { 1.0 } else { 0.0 },
-                colorize_enabled:     if self.colorize_enabled { 1.0 } else { 0.0 },
-                colorize_hue:         self.colorize_hue,
-                colorize_intensity:   self.colorize_intensity,
-                distortion_enabled:   if self.distortion_enabled { 1.0 } else { 0.0 },
-                distortion_amplitude: self.distortion_amplitude,
-                distortion_frequency: self.distortion_frequency,
+                invert:               if self.params.invert_enabled { 1.0 } else { 0.0 },
+                colorize_enabled:     if self.params.colorize_enabled { 1.0 } else { 0.0 },
+                colorize_hue:         self.params.colorize_hue,
+                colorize_intensity:   self.params.colorize_intensity,
+                distortion_enabled:   if self.params.distortion_enabled { 1.0 } else { 0.0 },
+                distortion_amplitude: self.params.distortion_amplitude,
+                distortion_frequency: self.params.distortion_frequency,
                 time_seconds:         elapsed,
             }]),
         );
 
-        let (fr, fg, fb) = hsv_to_rgb(self.frame_color_hue, 0.85, 1.0);
+        let (fr, fg, fb) = hsv_to_rgb(self.params.frame_color_hue, 0.85, 1.0);
         self.queue.write_buffer(
             &self.frame_uniforms_buffer, 0,
             bytemuck::cast_slice(&[FrameUniforms {
@@ -1000,8 +1012,8 @@ impl GpuState {
                 frame_color_g: fg,
                 frame_color_b: fb,
                 frame_color_a: 1.0,
-                frame_shape:   self.frame_shape.as_f32(),
-                frame_size:    self.frame_size,
+                frame_shape:   self.params.frame_shape.as_f32(),
+                frame_size:    self.params.frame_size,
             }]),
         );
 
@@ -1020,8 +1032,8 @@ impl GpuState {
 
         let base_rotation_speed = std::f32::consts::TAU / 30.0;
         let model = glam::Mat4::from_translation(self.shake_offset)
-            * glam::Mat4::from_rotation_y(elapsed * base_rotation_speed * self.rotation_speed_scale)
-            * glam::Mat4::from_scale(glam::Vec3::splat(self.current_shape.model_scale()));
+            * glam::Mat4::from_rotation_y(elapsed * base_rotation_speed * self.params.rotation_speed_scale)
+            * glam::Mat4::from_scale(glam::Vec3::splat(self.params.current_shape.model_scale()));
         self.queue.write_buffer(
             &self.transform_buffer, 0,
             bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]),
@@ -1054,7 +1066,7 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 2: cylinder → shape FBO
+        // Pass 2: shape → shape FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shape pass"),
@@ -1079,7 +1091,7 @@ impl GpuState {
             pass.set_bind_group(0, &self.transform_bind_group, &[]);
             pass.set_bind_group(1, &self.shape_bind_group, &[]);
             pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
-            let buffers = &self.shape_buffers[&self.current_shape];
+            let buffers = &self.shape_buffers[&self.params.current_shape];
             pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
             pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             pass.draw_indexed(0..buffers.index_count, 0, 0..1);
@@ -1177,27 +1189,27 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
             let v = value as f32 / 127.0;
             match cc {
                 1 => {
-                    gpu.fold_count = (2.0 + v * 22.0).round();
-                    log::debug!("MIDI CC1 → fold_count = {}", gpu.fold_count);
+                    gpu.params.fold_count = (2.0 + v * 22.0).round();
+                    log::debug!("MIDI CC1 → fold_count = {}", gpu.params.fold_count);
                 }
                 5 => {
-                    gpu.bass_zoom_strength = v;
-                    log::debug!("MIDI CC5 → bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
+                    gpu.params.bass_zoom_strength = v;
+                    log::debug!("MIDI CC5 → bass_zoom_strength = {:.2}", gpu.params.bass_zoom_strength);
                 }
                 7 => {
-                    gpu.zoom = 0.3 + v * 1.2;
-                    log::debug!("MIDI CC7 → zoom = {:.2}", gpu.zoom);
+                    gpu.params.zoom = 0.3 + v * 1.2;
+                    log::debug!("MIDI CC7 → zoom = {:.2}", gpu.params.zoom);
                 }
                 10 => {
-                    gpu.rotation_speed_scale = v * 4.0;
-                    log::debug!("MIDI CC10 → rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
+                    gpu.params.rotation_speed_scale = v * 4.0;
+                    log::debug!("MIDI CC10 → rotation_speed_scale = {:.2}", gpu.params.rotation_speed_scale);
                 }
                 65 if value >= 64 => {
-                    gpu.current_shape = gpu.current_shape.next();
-                    log::debug!("MIDI CC65 → shape cycled to {}", gpu.current_shape.name());
+                    gpu.params.current_shape = gpu.params.current_shape.next();
+                    log::debug!("MIDI CC65 → shape cycled to {}", gpu.params.current_shape.name());
                 }
                 64 if value >= 64 => {
-                    gpu.frame_shape = match gpu.frame_shape {
+                    gpu.params.frame_shape = match gpu.params.frame_shape {
                         FrameShape::None    => FrameShape::Circle,
                         FrameShape::Circle  => FrameShape::Square,
                         FrameShape::Square  => FrameShape::Rounded,
@@ -1206,43 +1218,43 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                         FrameShape::Octagon => FrameShape::Star,
                         FrameShape::Star    => FrameShape::None,
                     };
-                    log::debug!("MIDI CC64 → frame_shape cycled to {:?}", gpu.frame_shape);
+                    log::debug!("MIDI CC64 → frame_shape cycled to {:?}", gpu.params.frame_shape);
                 }
                 71 => {
-                    gpu.frame_size = 0.4 + v * 0.6;
-                    log::debug!("MIDI CC71 → frame_size = {:.2}", gpu.frame_size);
+                    gpu.params.frame_size = 0.4 + v * 0.6;
+                    log::debug!("MIDI CC71 → frame_size = {:.2}", gpu.params.frame_size);
                 }
                 74 => {
-                    gpu.frame_color_hue = v * 360.0;
-                    log::debug!("MIDI CC74 → frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                    gpu.params.frame_color_hue = v * 360.0;
+                    log::debug!("MIDI CC74 → frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                 }
                 76 => {
-                    gpu.colorize_hue = v * 360.0;
-                    log::debug!("MIDI CC76 → colorize_hue = {:.0}°", gpu.colorize_hue);
+                    gpu.params.colorize_hue = v * 360.0;
+                    log::debug!("MIDI CC76 → colorize_hue = {:.0}°", gpu.params.colorize_hue);
                 }
                 91 => {
-                    gpu.invert_enabled = value >= 64;
-                    log::debug!("MIDI CC91 → invert = {}", gpu.invert_enabled);
+                    gpu.params.invert_enabled = value >= 64;
+                    log::debug!("MIDI CC91 → invert = {}", gpu.params.invert_enabled);
                 }
                 92 => {
-                    gpu.colorize_intensity = v;
-                    log::debug!("MIDI CC92 → colorize_intensity = {:.2}", gpu.colorize_intensity);
+                    gpu.params.colorize_intensity = v;
+                    log::debug!("MIDI CC92 → colorize_intensity = {:.2}", gpu.params.colorize_intensity);
                 }
                 93 => {
-                    gpu.colorize_enabled = value >= 64;
-                    log::debug!("MIDI CC93 → colorize = {}", gpu.colorize_enabled);
+                    gpu.params.colorize_enabled = value >= 64;
+                    log::debug!("MIDI CC93 → colorize = {}", gpu.params.colorize_enabled);
                 }
                 80 => {
-                    gpu.distortion_enabled = value >= 64;
-                    log::debug!("MIDI CC80 → distortion = {}", gpu.distortion_enabled);
+                    gpu.params.distortion_enabled = value >= 64;
+                    log::debug!("MIDI CC80 → distortion = {}", gpu.params.distortion_enabled);
                 }
                 81 => {
-                    gpu.distortion_amplitude = v * 0.5;
-                    log::debug!("MIDI CC81 → distortion_amplitude = {:.3}", gpu.distortion_amplitude);
+                    gpu.params.distortion_amplitude = v * 0.5;
+                    log::debug!("MIDI CC81 → distortion_amplitude = {:.3}", gpu.params.distortion_amplitude);
                 }
                 82 => {
-                    gpu.distortion_frequency = 0.5 + v * 7.5;
-                    log::debug!("MIDI CC82 → distortion_frequency = {:.1}", gpu.distortion_frequency);
+                    gpu.params.distortion_frequency = 0.5 + v * 7.5;
+                    log::debug!("MIDI CC82 → distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                 }
                 _ => {
                     log::trace!("MIDI CC {} value {} (unmapped)", cc, value);
@@ -1285,7 +1297,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 15 — Preset save/load")
+            .with_title("abstrakt-deck — slice 16 — Tests + CI")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1366,111 +1378,111 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                     }
                     KeyCode::BracketLeft => {
-                        gpu.fold_count = (gpu.fold_count - 1.0).max(2.0);
-                        log::info!("fold_count = {}", gpu.fold_count);
+                        gpu.params.fold_count = (gpu.params.fold_count - 1.0).max(2.0);
+                        log::info!("fold_count = {}", gpu.params.fold_count);
                     }
                     KeyCode::BracketRight => {
-                        gpu.fold_count = (gpu.fold_count + 1.0).min(24.0);
-                        log::info!("fold_count = {}", gpu.fold_count);
+                        gpu.params.fold_count = (gpu.params.fold_count + 1.0).min(24.0);
+                        log::info!("fold_count = {}", gpu.params.fold_count);
                     }
                     KeyCode::KeyZ => {
-                        gpu.zoom = (gpu.zoom - 0.05).max(0.3);
-                        log::info!("zoom = {:.2}", gpu.zoom);
+                        gpu.params.zoom = (gpu.params.zoom - 0.05).max(0.3);
+                        log::info!("zoom = {:.2}", gpu.params.zoom);
                     }
                     KeyCode::KeyX => {
-                        gpu.zoom = (gpu.zoom + 0.05).min(1.5);
-                        log::info!("zoom = {:.2}", gpu.zoom);
+                        gpu.params.zoom = (gpu.params.zoom + 0.05).min(1.5);
+                        log::info!("zoom = {:.2}", gpu.params.zoom);
                     }
                     KeyCode::Comma => {
-                        gpu.rotation_speed_scale = (gpu.rotation_speed_scale - 0.25).max(0.0);
-                        log::info!("rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
+                        gpu.params.rotation_speed_scale = (gpu.params.rotation_speed_scale - 0.25).max(0.0);
+                        log::info!("rotation_speed_scale = {:.2}", gpu.params.rotation_speed_scale);
                     }
                     KeyCode::Period => {
-                        gpu.rotation_speed_scale = (gpu.rotation_speed_scale + 0.25).min(4.0);
-                        log::info!("rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
+                        gpu.params.rotation_speed_scale = (gpu.params.rotation_speed_scale + 0.25).min(4.0);
+                        log::info!("rotation_speed_scale = {:.2}", gpu.params.rotation_speed_scale);
                     }
-                    KeyCode::Digit1 => { gpu.frame_shape = FrameShape::None;    log::info!("frame: None"); }
-                    KeyCode::Digit2 => { gpu.frame_shape = FrameShape::Circle;  log::info!("frame: Circle"); }
-                    KeyCode::Digit3 => { gpu.frame_shape = FrameShape::Square;  log::info!("frame: Square"); }
-                    KeyCode::Digit4 => { gpu.frame_shape = FrameShape::Rounded; log::info!("frame: Rounded"); }
-                    KeyCode::Digit5 => { gpu.frame_shape = FrameShape::Hexagon; log::info!("frame: Hexagon"); }
-                    KeyCode::Digit6 => { gpu.frame_shape = FrameShape::Octagon; log::info!("frame: Octagon"); }
-                    KeyCode::Digit7 => { gpu.frame_shape = FrameShape::Star;    log::info!("frame: Star"); }
+                    KeyCode::Digit1 => { gpu.params.frame_shape = FrameShape::None;    log::info!("frame: None"); }
+                    KeyCode::Digit2 => { gpu.params.frame_shape = FrameShape::Circle;  log::info!("frame: Circle"); }
+                    KeyCode::Digit3 => { gpu.params.frame_shape = FrameShape::Square;  log::info!("frame: Square"); }
+                    KeyCode::Digit4 => { gpu.params.frame_shape = FrameShape::Rounded; log::info!("frame: Rounded"); }
+                    KeyCode::Digit5 => { gpu.params.frame_shape = FrameShape::Hexagon; log::info!("frame: Hexagon"); }
+                    KeyCode::Digit6 => { gpu.params.frame_shape = FrameShape::Octagon; log::info!("frame: Octagon"); }
+                    KeyCode::Digit7 => { gpu.params.frame_shape = FrameShape::Star;    log::info!("frame: Star"); }
                     KeyCode::Minus => {
-                        gpu.frame_size = (gpu.frame_size - 0.05).max(0.4);
-                        log::info!("frame_size = {:.2}", gpu.frame_size);
+                        gpu.params.frame_size = (gpu.params.frame_size - 0.05).max(0.4);
+                        log::info!("frame_size = {:.2}", gpu.params.frame_size);
                     }
                     KeyCode::Equal => {
-                        gpu.frame_size = (gpu.frame_size + 0.05).min(1.0);
-                        log::info!("frame_size = {:.2}", gpu.frame_size);
+                        gpu.params.frame_size = (gpu.params.frame_size + 0.05).min(1.0);
+                        log::info!("frame_size = {:.2}", gpu.params.frame_size);
                     }
                     KeyCode::KeyR => {
-                        gpu.frame_color_hue = (gpu.frame_color_hue + 30.0) % 360.0;
-                        log::info!("frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                        gpu.params.frame_color_hue = (gpu.params.frame_color_hue + 30.0) % 360.0;
+                        log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                     }
                     KeyCode::KeyG => {
-                        gpu.frame_color_hue = (gpu.frame_color_hue + 120.0) % 360.0;
-                        log::info!("frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                        gpu.params.frame_color_hue = (gpu.params.frame_color_hue + 120.0) % 360.0;
+                        log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                     }
                     KeyCode::KeyB => {
-                        gpu.frame_color_hue = (gpu.frame_color_hue + 60.0) % 360.0;
-                        log::info!("frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                        gpu.params.frame_color_hue = (gpu.params.frame_color_hue + 60.0) % 360.0;
+                        log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                     }
                     KeyCode::Space => {
-                        gpu.shake_enabled = !gpu.shake_enabled;
-                        log::info!("shake_enabled = {}", gpu.shake_enabled);
+                        gpu.params.shake_enabled = !gpu.params.shake_enabled;
+                        log::info!("shake_enabled = {}", gpu.params.shake_enabled);
                     }
                     KeyCode::Tab => {
-                        gpu.current_shape = gpu.current_shape.next();
-                        log::info!("shape: {}", gpu.current_shape.name());
+                        gpu.params.current_shape = gpu.params.current_shape.next();
+                        log::info!("shape: {}", gpu.params.current_shape.name());
                     }
                     KeyCode::KeyI => {
-                        gpu.invert_enabled = !gpu.invert_enabled;
-                        log::info!("invert = {}", gpu.invert_enabled);
+                        gpu.params.invert_enabled = !gpu.params.invert_enabled;
+                        log::info!("invert = {}", gpu.params.invert_enabled);
                     }
                     KeyCode::KeyT => {
-                        gpu.colorize_enabled = !gpu.colorize_enabled;
-                        log::info!("colorize = {}", gpu.colorize_enabled);
+                        gpu.params.colorize_enabled = !gpu.params.colorize_enabled;
+                        log::info!("colorize = {}", gpu.params.colorize_enabled);
                     }
                     KeyCode::Semicolon => {
-                        gpu.colorize_hue = (gpu.colorize_hue + 30.0) % 360.0;
-                        log::info!("colorize_hue = {:.0}°", gpu.colorize_hue);
+                        gpu.params.colorize_hue = (gpu.params.colorize_hue + 30.0) % 360.0;
+                        log::info!("colorize_hue = {:.0}°", gpu.params.colorize_hue);
                     }
                     KeyCode::Digit9 => {
-                        gpu.colorize_intensity = (gpu.colorize_intensity - 0.1).max(0.0);
-                        log::info!("colorize_intensity = {:.2}", gpu.colorize_intensity);
+                        gpu.params.colorize_intensity = (gpu.params.colorize_intensity - 0.1).max(0.0);
+                        log::info!("colorize_intensity = {:.2}", gpu.params.colorize_intensity);
                     }
                     KeyCode::Digit0 => {
-                        gpu.colorize_intensity = (gpu.colorize_intensity + 0.1).min(1.0);
-                        log::info!("colorize_intensity = {:.2}", gpu.colorize_intensity);
+                        gpu.params.colorize_intensity = (gpu.params.colorize_intensity + 0.1).min(1.0);
+                        log::info!("colorize_intensity = {:.2}", gpu.params.colorize_intensity);
                     }
                     KeyCode::Slash => {
-                        gpu.bass_zoom_strength = (gpu.bass_zoom_strength - 0.05).max(0.0);
-                        log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
+                        gpu.params.bass_zoom_strength = (gpu.params.bass_zoom_strength - 0.05).max(0.0);
+                        log::info!("bass_zoom_strength = {:.2}", gpu.params.bass_zoom_strength);
                     }
                     KeyCode::Quote => {
-                        gpu.bass_zoom_strength = (gpu.bass_zoom_strength + 0.05).min(1.0);
-                        log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
+                        gpu.params.bass_zoom_strength = (gpu.params.bass_zoom_strength + 0.05).min(1.0);
+                        log::info!("bass_zoom_strength = {:.2}", gpu.params.bass_zoom_strength);
                     }
                     KeyCode::KeyD => {
-                        gpu.distortion_enabled = !gpu.distortion_enabled;
-                        log::info!("distortion = {}", gpu.distortion_enabled);
+                        gpu.params.distortion_enabled = !gpu.params.distortion_enabled;
+                        log::info!("distortion = {}", gpu.params.distortion_enabled);
                     }
                     KeyCode::KeyQ => {
-                        gpu.distortion_amplitude = (gpu.distortion_amplitude - 0.01).max(0.0);
-                        log::info!("distortion_amplitude = {:.3}", gpu.distortion_amplitude);
+                        gpu.params.distortion_amplitude = (gpu.params.distortion_amplitude - 0.01).max(0.0);
+                        log::info!("distortion_amplitude = {:.3}", gpu.params.distortion_amplitude);
                     }
                     KeyCode::KeyW => {
-                        gpu.distortion_amplitude = (gpu.distortion_amplitude + 0.01).min(0.5);
-                        log::info!("distortion_amplitude = {:.3}", gpu.distortion_amplitude);
+                        gpu.params.distortion_amplitude = (gpu.params.distortion_amplitude + 0.01).min(0.5);
+                        log::info!("distortion_amplitude = {:.3}", gpu.params.distortion_amplitude);
                     }
                     KeyCode::KeyE => {
-                        gpu.distortion_frequency = (gpu.distortion_frequency - 0.5).max(0.5);
-                        log::info!("distortion_frequency = {:.1}", gpu.distortion_frequency);
+                        gpu.params.distortion_frequency = (gpu.params.distortion_frequency - 0.5).max(0.5);
+                        log::info!("distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                     }
                     KeyCode::KeyF => {
-                        gpu.distortion_frequency = (gpu.distortion_frequency + 0.5).min(8.0);
-                        log::info!("distortion_frequency = {:.1}", gpu.distortion_frequency);
+                        gpu.params.distortion_frequency = (gpu.params.distortion_frequency + 0.5).min(8.0);
+                        log::info!("distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                     }
                     _ => {}
                 }
@@ -1486,7 +1498,7 @@ impl ApplicationHandler for App {
                     while let Ok(event) = audio.event_rx.try_recv() {
                         match event {
                             AudioEvent::Beat(strength) => {
-                                if gpu.shake_enabled {
+                                if gpu.params.shake_enabled {
                                     gpu.kick_shake(strength);
                                 }
                             }
@@ -1517,7 +1529,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 15 — Preset save/load — {:.1} fps",
+                        "abstrakt-deck — slice 16 — Tests + CI — {:.1} fps",
                         fps
                     ));
                 }
@@ -1580,4 +1592,93 @@ fn main() {
     event_loop.run_app(&mut app).expect("Event loop failed");
 
     log::info!("abstrakt-deck shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn non_default_params() -> VisualParams {
+        VisualParams {
+            current_shape: ShapeKind::Tetrahedron,
+            fold_count: 18.0,
+            zoom: 1.2,
+            rotation_speed_scale: 2.5,
+            frame_shape: FrameShape::Star,
+            frame_size: 0.7,
+            frame_color_hue: 90.0,
+            invert_enabled: true,
+            colorize_enabled: true,
+            colorize_hue: 270.0,
+            colorize_intensity: 0.75,
+            distortion_enabled: true,
+            distortion_amplitude: 0.3,
+            distortion_frequency: 6.0,
+            shake_enabled: false,
+            bass_zoom_strength: 0.8,
+        }
+    }
+
+    #[test]
+    fn preset_roundtrip_preserves_all_fields() {
+        let original = non_default_params();
+        let preset = Preset::from_params(&original);
+
+        let json = serde_json::to_string(&preset).expect("serialize");
+        let parsed: Preset = serde_json::from_str(&json).expect("parse");
+
+        let mut restored = VisualParams::default();
+        parsed.apply_to_params(&mut restored);
+
+        assert_eq!(restored.current_shape, original.current_shape, "current_shape failed");
+        assert_eq!(restored.fold_count, original.fold_count, "fold_count failed");
+        assert_eq!(restored.zoom, original.zoom, "zoom failed");
+        assert_eq!(restored.rotation_speed_scale, original.rotation_speed_scale, "rotation_speed_scale failed");
+        assert_eq!(restored.frame_shape, original.frame_shape, "frame_shape failed");
+        assert_eq!(restored.frame_size, original.frame_size, "frame_size failed");
+        assert_eq!(restored.frame_color_hue, original.frame_color_hue, "frame_color_hue failed");
+        assert_eq!(restored.invert_enabled, original.invert_enabled, "invert_enabled failed");
+        assert_eq!(restored.colorize_enabled, original.colorize_enabled, "colorize_enabled failed");
+        assert_eq!(restored.colorize_hue, original.colorize_hue, "colorize_hue failed");
+        assert_eq!(restored.colorize_intensity, original.colorize_intensity, "colorize_intensity failed");
+        assert_eq!(restored.distortion_enabled, original.distortion_enabled, "distortion_enabled failed");
+        assert_eq!(restored.distortion_amplitude, original.distortion_amplitude, "distortion_amplitude failed");
+        assert_eq!(restored.distortion_frequency, original.distortion_frequency, "distortion_frequency failed");
+        assert_eq!(restored.shake_enabled, original.shake_enabled, "shake_enabled failed");
+        assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
+    }
+
+    #[test]
+    fn shape_kind_name_roundtrip() {
+        for kind in [ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron] {
+            let name = kind.name();
+            let parsed = match name {
+                "Sphere"      => ShapeKind::Sphere,
+                "Cube"        => ShapeKind::Cube,
+                "Tetrahedron" => ShapeKind::Tetrahedron,
+                _             => ShapeKind::Cylinder,
+            };
+            assert_eq!(parsed, kind, "ShapeKind {:?} did not round-trip via name()", kind);
+        }
+    }
+
+    #[test]
+    fn frame_shape_debug_roundtrip() {
+        for shape in [
+            FrameShape::None, FrameShape::Circle, FrameShape::Square,
+            FrameShape::Rounded, FrameShape::Hexagon, FrameShape::Octagon, FrameShape::Star,
+        ] {
+            let debug_str = format!("{:?}", shape);
+            let parsed = match debug_str.as_str() {
+                "None"    => FrameShape::None,
+                "Circle"  => FrameShape::Circle,
+                "Square"  => FrameShape::Square,
+                "Rounded" => FrameShape::Rounded,
+                "Octagon" => FrameShape::Octagon,
+                "Star"    => FrameShape::Star,
+                _         => FrameShape::Hexagon,
+            };
+            assert_eq!(parsed, shape, "FrameShape {:?} did not round-trip via Debug format", shape);
+        }
+    }
 }
