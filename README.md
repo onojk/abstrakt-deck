@@ -36,6 +36,7 @@ Native Linux desktop audio-reactive kaleidoscope visualizer built with Rust + wg
 - Keyboard parameter control
 - MIDI Control Change routing (works with VMPK or any USB MIDI controller)
 - Save/load preset to `~/.config/abstrakt-deck/preset.json`
+- Press `F12` to record the visualizer to MP4 (saves to `~/Videos/abstrakt-deck/`)
 
 ## Requirements
 
@@ -50,7 +51,8 @@ System libraries:
         libasound2-dev libudev-dev \
         libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev \
         libwayland-dev libxkbcommon-dev \
-        pipewire-alsa
+        pipewire-alsa \
+        ffmpeg
 
 ## Build and run
 
@@ -83,6 +85,7 @@ The visualizer opens in a 1280×720 window. Click the window for focus before us
 | `E` / `F` | decrease / increase distortion frequency |
 | `/` / `'` | decrease / increase bass-zoom intensity |
 | `Space` | toggle beat-reactive shake |
+| `F12` | toggle video recording (saves to `~/Videos/abstrakt-deck/`) |
 | `Ctrl+S` | save preset to `~/.config/abstrakt-deck/preset.json` |
 | `Ctrl+L` | load preset |
 | `Esc` | exit |
@@ -109,20 +112,21 @@ Plug in any USB MIDI controller, or use a virtual one like [VMPK](https://vmpk.s
 
 ## Architecture
 
-The render pipeline is four passes per frame:
+The render pipeline is five passes per frame:
 
 1. **Painter pass** — selected painter shader writes to a 2048×1024 RGBA8 offscreen texture
 2. **Shape pass** — 3D mesh is rendered with the painter texture wrapped on its surface, output to a screen-resolution shape FBO. Distortion, invert, and colorize effects apply here in the fragment shader.
 3. **Kaleido pass** — fragment shader samples the shape FBO with polar-coordinate folding. Zoom is modulated by smoothed bass energy from the audio analyzer.
-4. **Frame pass** — fragment shader samples the kaleido FBO and applies an SDF-based frame mask in the same pass that writes to the swapchain.
+4. **Frame pass** — fragment shader samples the kaleido FBO and applies an SDF-based frame mask, writing to an intermediate scene texture (not directly to the swapchain).
+5. **Blit pass** — copies the scene texture to the swapchain. When recording is active, the scene texture is also copied to a CPU-readable buffer in the same encoder submit, then mapped, stripped of row padding, and piped to an `ffmpeg` subprocess as raw RGBA frames.
 
 Audio runs on a separate thread (cpal callback). Beat events flow to the render thread via crossbeam-channel. MIDI runs on its own thread (midir callback) with the same pattern.
 
 ## Status
 
-Slices 1–17 complete. The visualizer is feature-complete for the experimental version goals (audio + MIDI + keyboard control over a multi-shape multi-painter kaleido pipeline).
+Slices 1–19 complete. The visualizer is feature-complete for the experimental version goals (audio + MIDI + keyboard control over a multi-shape multi-painter kaleido pipeline with video export).
 
-Possible future slices: video recording / export, multi-monitor support, additional painters (Audio Paint, Print Head), additional shapes.
+Possible future slices: multi-monitor support, additional painters (Audio Paint, Print Head), additional shapes.
 
 ## License
 

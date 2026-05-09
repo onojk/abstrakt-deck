@@ -1,8 +1,10 @@
 mod audio;
 mod midi;
+mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
 use midi::{MidiCapture, MidiEvent};
+use recorder::Recorder;
 use shape::{ShapeKind, Vertex};
 use serde::{Deserialize, Serialize};
 
@@ -355,7 +357,20 @@ struct GpuState {
     frame_bgl: wgpu::BindGroupLayout,
     frame_bind_group: wgpu::BindGroup,
     frame_pipeline: wgpu::RenderPipeline,
-    shape_sampler: wgpu::Sampler,   // ClampToEdge sampler reused by kaleido + frame passes
+    shape_sampler: wgpu::Sampler,   // ClampToEdge sampler reused by kaleido + frame + blit passes
+
+    // Scene FBO: frame pass renders here; blit copies to swapchain; COPY_SRC for readback
+    #[allow(dead_code)]
+    scene_texture: wgpu::Texture,
+    scene_view: wgpu::TextureView,
+    blit_bgl: wgpu::BindGroupLayout,
+    blit_bind_group: wgpu::BindGroup,
+    blit_pipeline: wgpu::RenderPipeline,
+
+    // CPU readback for recording
+    readback_buffer: wgpu::Buffer,
+    readback_padded_bytes_per_row: u32,
+    recorder: Option<Recorder>,
 
     start_time: Instant,
 
@@ -447,6 +462,23 @@ impl GpuState {
                 },
             ],
         })
+    }
+
+    fn align_up(value: u32, alignment: u32) -> u32 {
+        value.div_ceil(alignment) * alignment
+    }
+
+    fn create_readback_buffer(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Buffer, u32) {
+        let padded_bytes_per_row =
+            Self::align_up(width * 4, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let size = (padded_bytes_per_row as u64) * (height as u64);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Readback buffer"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        (buffer, padded_bytes_per_row)
     }
 
     async fn new(window: Arc<Window>) -> Self {
@@ -764,6 +796,59 @@ impl GpuState {
             ],
         });
 
+        // ── Scene FBO + blit resources ────────────────────────────────────────
+        let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Scene FBO"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING
+                 | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Blit BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blit BG"),
+            layout: &blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
+                },
+            ],
+        });
+
+        let (readback_buffer, readback_padded_bytes_per_row) =
+            Self::create_readback_buffer(&device, w, h);
+
         // ── Pipelines ─────────────────────────────────────────────────────────
         let painter_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -914,6 +999,38 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Blit shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+        });
+        let blit_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Blit pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None, bind_group_layouts: &[&blit_bgl], push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &blit_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blit_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         Self {
             surface, device, queue, config, size,
             uniforms_buffer,
@@ -928,6 +1045,10 @@ impl GpuState {
             kaleido_uniforms_buffer, kaleido_bgl, kaleido_bind_group, kaleido_pipeline,
             frame_uniforms_buffer, frame_bgl, frame_bind_group, frame_pipeline,
             shape_sampler,
+            scene_texture, scene_view,
+            blit_bgl, blit_bind_group, blit_pipeline,
+            readback_buffer, readback_padded_bytes_per_row,
+            recorder: None,
             start_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
             shake_velocity: glam::Vec3::ZERO,
@@ -938,6 +1059,12 @@ impl GpuState {
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 { return; }
+        if self.recorder.is_some() {
+            log::warn!("Window resized during recording — stopping");
+            if let Some(rec) = self.recorder.take() {
+                let _ = rec.finalize();
+            }
+        }
         let w = new_size.width;
         let h = new_size.height;
         self.size = new_size;
@@ -1008,6 +1135,40 @@ impl GpuState {
             &self.frame_uniforms_buffer, 0,
             bytemuck::cast_slice(&[FrameUniforms::default_for(w as f32, h as f32)]),
         );
+
+        // Recreate scene FBO (different size).
+        let new_scene_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Scene FBO"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING
+                 | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        self.scene_view = new_scene_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.scene_texture = new_scene_tex;
+
+        self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blit BG"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                },
+            ],
+        });
+
+        let (rb, rp) = Self::create_readback_buffer(&self.device, w, h);
+        self.readback_buffer = rb;
+        self.readback_padded_bytes_per_row = rp;
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -1162,12 +1323,12 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 4: frame overlay (SDF mask) → sRGB swapchain
+        // Pass 4: frame overlay (SDF mask) → scene FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Frame pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &screen_view, resolve_target: None,
+                    view: &self.scene_view, resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
@@ -1181,7 +1342,91 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
+        // Pass 5: blit scene FBO → swapchain
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &screen_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.blit_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // If recording: copy scene texture to readback buffer in the same encoder submit.
+        if self.recorder.is_some() {
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &self.scene_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &self.readback_buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.readback_padded_bytes_per_row),
+                        rows_per_image: Some(self.size.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.size.width,
+                    height: self.size.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map readback buffer and feed frame to recorder.
+        if self.recorder.is_some() {
+            let frame_bytes = {
+                let buffer_slice = self.readback_buffer.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer_slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+                self.device.poll(wgpu::Maintain::Wait);
+                rx.recv().expect("map_async channel").expect("buffer map failed");
+                let mapped = buffer_slice.get_mapped_range();
+                let ubpr = (self.size.width * 4) as usize;
+                let pbpr = self.readback_padded_bytes_per_row as usize;
+                let mut bytes = Vec::with_capacity(ubpr * self.size.height as usize);
+                for row in 0..self.size.height as usize {
+                    let src = row * pbpr;
+                    bytes.extend_from_slice(&mapped[src..src + ubpr]);
+                }
+                bytes
+            };
+            self.readback_buffer.unmap();
+
+            let mut frame_bytes = frame_bytes;
+            if matches!(
+                self.config.format,
+                wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+            ) {
+                for chunk in frame_bytes.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                }
+            }
+
+            let result = self.recorder.as_mut().unwrap().submit_frame(&frame_bytes);
+            if let Err(e) = result {
+                log::error!("Failed to write frame to ffmpeg: {}", e);
+                if let Some(rec) = self.recorder.take() {
+                    let _ = rec.finalize();
+                }
+            }
+        }
+
         output.present();
         Ok(())
     }
@@ -1200,6 +1445,24 @@ impl GpuState {
             self.bass_zoom_smoothed = self.bass_zoom_smoothed * (1.0 - attack) + raw_bass * attack;
         } else {
             self.bass_zoom_smoothed = self.bass_zoom_smoothed * (1.0 - decay) + raw_bass * decay;
+        }
+    }
+
+    pub fn toggle_recording(&mut self) {
+        if self.recorder.is_some() {
+            if let Some(rec) = self.recorder.take() {
+                match rec.finalize() {
+                    Ok(path) => log::info!("Recording saved: {}", path.display()),
+                    Err(e)   => log::error!("Recording finalize failed: {}", e),
+                }
+            }
+        } else {
+            match Recorder::start(self.size.width, self.size.height) {
+                Ok(rec) => {
+                    self.recorder = Some(rec);
+                }
+                Err(e) => log::error!("Failed to start recording: {}", e),
+            }
         }
     }
 }
@@ -1347,7 +1610,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 17 — Multi-painter")
+            .with_title("abstrakt-deck — slice 19 — Recording")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1538,6 +1801,9 @@ impl ApplicationHandler for App {
                         gpu.params.painter_kind = gpu.params.painter_kind.next();
                         log::info!("painter: {}", gpu.params.painter_kind.name());
                     }
+                    KeyCode::F12 => {
+                        gpu.toggle_recording();
+                    }
                     _ => {}
                 }
             }
@@ -1582,10 +1848,16 @@ impl ApplicationHandler for App {
                     }
                 }
                 if let Some(fps) = self.fps.tick() {
-                    window.set_title(&format!(
-                        "abstrakt-deck — slice 17 — Multi-painter — {:.1} fps",
-                        fps
-                    ));
+                    let title = if let Some(rec) = gpu.recorder.as_ref() {
+                        let secs = rec.elapsed().as_secs();
+                        format!(
+                            "abstrakt-deck — slice 19 — ● REC {}:{:02} — {:.1} fps",
+                            secs / 60, secs % 60, fps
+                        )
+                    } else {
+                        format!("abstrakt-deck — slice 19 — Recording — {:.1} fps", fps)
+                    };
+                    window.set_title(&title);
                 }
                 window.request_redraw();
             }
@@ -1617,6 +1889,7 @@ fn main() {
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
     println!("  P      cycle painter (HueStripe → Spiral → Plasma)");
+    println!("  F12    toggle video recording (saves to ~/Videos/abstrakt-deck/)");
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
     println!("  Ctrl+L load preset from same file");
     println!("  esc    exit");
