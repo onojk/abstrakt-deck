@@ -29,6 +29,15 @@ struct Transform {
     mvp: [[f32; 4]; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct KaleidoUniforms {
+    resolution_x: f32,
+    resolution_y: f32,
+    fold_count: f32,
+    zoom: f32,
+}
+
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -38,21 +47,21 @@ struct GpuState {
 
     uniforms_buffer: wgpu::Buffer,
 
-    // Pass 1 — painter (procedural → fixed-size offscreen texture)
+    // Pass 1 — painter (procedural Hue Stripe → fixed-size offscreen texture)
     painter_uniforms_bind_group: wgpu::BindGroup,
     painter_pipeline: wgpu::RenderPipeline,
     #[allow(dead_code)]
     painter_texture: wgpu::Texture,
     painter_view: wgpu::TextureView,
-    #[allow(dead_code)] // bind group holds the GPU ref; field prevents early drop
+    #[allow(dead_code)] // bind group holds GPU ref; field keeps it alive
     painter_sampler: wgpu::Sampler,
 
-    // Pass 2 — shape (cylinder rendered with painter as surface → screen-res FBO)
-    #[allow(dead_code)]
-    shape_texture: wgpu::Texture,     // replaced on resize; kept to prevent GPU resource drop
+    // Pass 2 — shape (cylinder with painter surface → screen-res FBO, depth-tested)
+    #[allow(dead_code)] // resource lifetime anchor; replaced on resize
+    shape_texture: wgpu::Texture,
     shape_view: wgpu::TextureView,
     #[allow(dead_code)]
-    shape_depth: wgpu::Texture,       // same: depth buffer lifetime anchor
+    shape_depth: wgpu::Texture,
     shape_depth_view: wgpu::TextureView,
     cylinder_vertex_buffer: wgpu::Buffer,
     cylinder_index_buffer: wgpu::Buffer,
@@ -62,9 +71,18 @@ struct GpuState {
     shape_pipeline: wgpu::RenderPipeline,
     shape_bind_group: wgpu::BindGroup,
 
-    // Pass 3 — composite (shape FBO → swapchain)
-    composite_bind_group_layout: wgpu::BindGroupLayout, // kept for resize bind-group recreation
-    shape_sampler: wgpu::Sampler,
+    // Pass 3 — kaleido fold (shape FBO → kaleido FBO, radially mirrored)
+    #[allow(dead_code)]
+    kaleido_texture: wgpu::Texture,
+    kaleido_view: wgpu::TextureView,
+    kaleido_uniforms_buffer: wgpu::Buffer,
+    kaleido_bgl: wgpu::BindGroupLayout,   // kept for bind-group recreation on resize
+    kaleido_bind_group: wgpu::BindGroup,
+    kaleido_pipeline: wgpu::RenderPipeline,
+
+    // Pass 4 — composite (kaleido FBO → sRGB swapchain, trivial blit)
+    composite_bgl: wgpu::BindGroupLayout, // kept for bind-group recreation on resize
+    shape_sampler: wgpu::Sampler,         // reused across kaleido + composite passes
     composite_pipeline: wgpu::RenderPipeline,
     composite_bind_group: wgpu::BindGroup,
 
@@ -72,7 +90,7 @@ struct GpuState {
 }
 
 impl GpuState {
-    /// Allocate the screen-resolution shape FBO (color + depth). Called from new() and resize().
+    /// Create (or recreate) the screen-resolution shape FBO: color + depth.
     fn create_shape_fbo(
         device: &wgpu::Device,
         width: u32,
@@ -103,6 +121,26 @@ impl GpuState {
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
         (color, color_view, depth, depth_view)
+    }
+
+    /// Create (or recreate) the screen-resolution kaleido FBO: color only.
+    fn create_kaleido_fbo(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Kaleido FBO"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
     }
 
     async fn new(window: Arc<Window>) -> Self {
@@ -161,7 +199,10 @@ impl GpuState {
         };
         surface.configure(&device, &config);
 
-        // ── Painter texture (fixed 2048×1024, never resized) ──────────────────
+        let w = size.width.max(1);
+        let h = size.height.max(1);
+
+        // ── Painter texture (fixed 2048×1024) ─────────────────────────────────
         let painter_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Painter texture"),
             size: wgpu::Extent3d {
@@ -177,8 +218,6 @@ impl GpuState {
             view_formats: &[],
         });
         let painter_view = painter_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // U repeats so the cylinder seam doesn't show a hard edge.
         let painter_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Painter sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -190,12 +229,14 @@ impl GpuState {
             ..Default::default()
         });
 
-        // ── Shape FBO (screen-resolution, recreated on resize) ─────────────────
+        // ── Screen-res FBOs ────────────────────────────────────────────────────
         let (shape_texture, shape_view, shape_depth, shape_depth_view) =
-            Self::create_shape_fbo(&device, size.width.max(1), size.height.max(1));
+            Self::create_shape_fbo(&device, w, h);
+        let (kaleido_texture, kaleido_view) = Self::create_kaleido_fbo(&device, w, h);
 
+        // Shared ClampToEdge sampler for shape + kaleido + composite reads.
         let shape_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Shape sampler"),
+            label: Some("Shape/kaleido sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -221,7 +262,7 @@ impl GpuState {
             });
         let cylinder_index_count = mesh.indices.len() as u32;
 
-        // ── Transform uniform (MVP matrix, updated per-frame) ─────────────────
+        // ── Transform uniform ──────────────────────────────────────────────────
         let transform_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Transform buffer"),
@@ -230,7 +271,6 @@ impl GpuState {
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-
         let transform_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Transform BGL"),
@@ -245,7 +285,6 @@ impl GpuState {
                     count: None,
                 }],
             });
-
         let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Transform BG"),
             layout: &transform_bgl,
@@ -255,10 +294,151 @@ impl GpuState {
             }],
         });
 
-        // ── Texture bind group layout (reused by shape and composite) ──────────
-        let tex_bgl =
+        // ── Texture bind group layout (shape pipeline's group 1, and shape BG) ─
+        let tex2_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Texture BGL"),
+                label: Some("Tex2 BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        // Shape pass samples the painter texture.
+        let shape_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shape BG (samples painter)"),
+            layout: &tex2_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&painter_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&painter_sampler),
+                },
+            ],
+        });
+
+        // ── Globals uniform (painter pass) ────────────────────────────────────
+        let uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Globals uniform buffer"),
+                contents: bytemuck::cast_slice(&[GlobalUniforms {
+                    time_seconds: 0.0,
+                    resolution_x: w as f32,
+                    resolution_y: h as f32,
+                    _pad: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let uniforms_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Uniforms BGL"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let painter_uniforms_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Painter uniforms BG"),
+                layout: &uniforms_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms_buffer.as_entire_binding(),
+                }],
+            });
+
+        // ── Kaleido uniforms ──────────────────────────────────────────────────
+        let kaleido_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Kaleido uniforms"),
+                contents: bytemuck::cast_slice(&[KaleidoUniforms {
+                    resolution_x: w as f32,
+                    resolution_y: h as f32,
+                    fold_count: 12.0,
+                    zoom: 0.6,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        // ── Kaleido bind group layout (uniform + texture + sampler in group 0) ─
+        let kaleido_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Kaleido BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let kaleido_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Kaleido BG"),
+            layout: &kaleido_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: kaleido_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shape_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
+                },
+            ],
+        });
+
+        // ── Composite bind group layout (texture + sampler) ───────────────────
+        let composite_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Composite BGL"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -279,61 +459,24 @@ impl GpuState {
                 ],
             });
 
-        // Shape pass samples the painter texture.
-        let shape_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shape BG (samples painter)"),
-            layout: &tex_bgl,
+        // Composite reads from the kaleido FBO.
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Composite BG"),
+            layout: &composite_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&painter_view),
+                    resource: wgpu::BindingResource::TextureView(&kaleido_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&painter_sampler),
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
                 },
             ],
         });
 
-        // ── Uniforms (painter pass) ────────────────────────────────────────────
-        let uniforms_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Globals uniform buffer"),
-                contents: bytemuck::cast_slice(&[GlobalUniforms {
-                    time_seconds: 0.0,
-                    resolution_x: size.width as f32,
-                    resolution_y: size.height as f32,
-                    _pad: 0.0,
-                }]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+        // ── Pipelines ─────────────────────────────────────────────────────────
 
-        let uniforms_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Uniforms BGL"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let painter_uniforms_bind_group =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Painter uniforms BG"),
-                layout: &uniforms_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms_buffer.as_entire_binding(),
-                }],
-            });
-
-        // ── Painter pipeline ───────────────────────────────────────────────────
         let painter_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Painter shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fullscreen.wgsl").into()),
@@ -373,7 +516,6 @@ impl GpuState {
                 cache: None,
             });
 
-        // ── Shape pipeline ─────────────────────────────────────────────────────
         let shape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shape shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shape.wgsl").into()),
@@ -383,7 +525,7 @@ impl GpuState {
                 label: Some("Shape pipeline"),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: None,
-                    bind_group_layouts: &[&transform_bgl, &tex_bgl],
+                    bind_group_layouts: &[&transform_bgl, &tex2_bgl],
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
@@ -420,45 +562,44 @@ impl GpuState {
                 cache: None,
             });
 
-        // ── Composite pipeline (shape FBO → swapchain) ────────────────────────
-        // Keep the layout as a field so resize() can recreate the bind group.
-        let composite_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Composite BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Composite BG"),
-            layout: &composite_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&shape_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
-                },
-            ],
+        let kaleido_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Kaleido shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/kaleido.wgsl").into()),
         });
+        let kaleido_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Kaleido pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&kaleido_bgl],
+                    push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &kaleido_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &kaleido_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Composite shader"),
@@ -469,7 +610,7 @@ impl GpuState {
                 label: Some("Composite pipeline"),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: None,
-                    bind_group_layouts: &[&composite_bind_group_layout],
+                    bind_group_layouts: &[&composite_bgl],
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
@@ -522,7 +663,13 @@ impl GpuState {
             transform_bind_group,
             shape_pipeline,
             shape_bind_group,
-            composite_bind_group_layout,
+            kaleido_texture,
+            kaleido_view,
+            kaleido_uniforms_buffer,
+            kaleido_bgl,
+            kaleido_bind_group,
+            kaleido_pipeline,
+            composite_bgl,
             shape_sampler,
             composite_pipeline,
             composite_bind_group,
@@ -534,28 +681,55 @@ impl GpuState {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
+        let w = new_size.width;
+        let h = new_size.height;
+
         self.size = new_size;
-        self.config.width = new_size.width;
-        self.config.height = new_size.height;
+        self.config.width = w;
+        self.config.height = h;
         self.surface.configure(&self.device, &self.config);
 
-        // Recreate the screen-resolution shape FBO at the new size.
-        let (color, color_view, depth, depth_view) =
-            Self::create_shape_fbo(&self.device, new_size.width, new_size.height);
-        self.shape_texture = color;
-        self.shape_view = color_view;
-        self.shape_depth = depth;
-        self.shape_depth_view = depth_view;
+        // Recreate screen-resolution FBOs.
+        let (sc, sv, sd, sdv) = Self::create_shape_fbo(&self.device, w, h);
+        self.shape_texture = sc;
+        self.shape_view = sv;
+        self.shape_depth = sd;
+        self.shape_depth_view = sdv;
 
-        // Composite bind group references the shape view — must be recreated.
-        self.composite_bind_group =
+        let (kc, kv) = Self::create_kaleido_fbo(&self.device, w, h);
+        self.kaleido_texture = kc;
+        self.kaleido_view = kv;
+
+        // Kaleido bind group references shape_view → recreate.
+        self.kaleido_bind_group =
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Composite BG"),
-                layout: &self.composite_bind_group_layout,
+                label: Some("Kaleido BG"),
+                layout: &self.kaleido_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
+                        resource: self.kaleido_uniforms_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
                         resource: wgpu::BindingResource::TextureView(&self.shape_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
+
+        // Composite bind group references kaleido_view → recreate.
+        self.composite_bind_group =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Composite BG"),
+                layout: &self.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.kaleido_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -563,6 +737,18 @@ impl GpuState {
                     },
                 ],
             });
+
+        // Update kaleido resolution uniform.
+        self.queue.write_buffer(
+            &self.kaleido_uniforms_buffer,
+            0,
+            bytemuck::cast_slice(&[KaleidoUniforms {
+                resolution_x: w as f32,
+                resolution_y: h as f32,
+                fold_count: 12.0,
+                zoom: 0.6,
+            }]),
+        );
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -580,7 +766,7 @@ impl GpuState {
             }]),
         );
 
-        // Upload MVP transform for cylinder
+        // Upload cylinder MVP
         let aspect = self.size.width as f32 / self.size.height as f32;
         let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
         let cam = glam::Mat4::look_at_rh(
@@ -600,13 +786,12 @@ impl GpuState {
         let output = self.surface.get_current_texture()?;
         let screen_view =
             output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let mut encoder =
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Frame encoder"),
             });
 
-        // Pass 1: painter → painter FBO (Rgba8Unorm, fixed size)
+        // Pass 1: Hue Stripe painter → painter FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Painter pass"),
@@ -627,7 +812,7 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 2: cylinder with painter surface → shape FBO (screen-res, depth-tested)
+        // Pass 2: cylinder with painter surface → shape FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shape pass"),
@@ -661,7 +846,28 @@ impl GpuState {
             pass.draw_indexed(0..self.cylinder_index_count, 0, 0..1);
         }
 
-        // Pass 3: shape FBO → swapchain (trivial blit via composite shader)
+        // Pass 3: kaleido fold → kaleido FBO
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Kaleido pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.kaleido_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.kaleido_pipeline);
+            pass.set_bind_group(0, &self.kaleido_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass 4: composite kaleido FBO → sRGB swapchain
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Composite pass"),
@@ -733,7 +939,7 @@ impl ApplicationHandler for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 5")
+            .with_title("abstrakt-deck — slice 6")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = Arc::new(
@@ -793,7 +999,7 @@ impl ApplicationHandler for App {
 
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 5 — Cylinder — {:.1} fps",
+                        "abstrakt-deck — slice 6 — Kaleido 12 — {:.1} fps",
                         fps
                     ));
                 }
