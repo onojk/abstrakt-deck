@@ -2,59 +2,127 @@
 
 [![CI](https://github.com/onojk/abstrakt-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/onojk/abstrakt-deck/actions/workflows/ci.yml)
 
-Native Linux desktop audio-reactive kaleidoscope visualizer. Sister project to [onojk/abstrakt-engine](https://github.com/onojk/abstrakt-engine), which is the Android version.
+Native Linux desktop audio-reactive kaleidoscope visualizer built with Rust + wgpu. Multi-shape 3D geometry wrapped with procedural painters, folded through configurable kaleido symmetry, with audio-driven beat detection and bass-energy reactivity. Real-time control via keyboard, MIDI, or audio input. Sister project to [abstrakt-engine](https://github.com/onojk/abstrakt-engine) (the Android version).
 
-Built with Rust + wgpu. Targets Linux (Vulkan).
+## Features
 
-## Run
+### Geometry
+- 4 shape types: Cylinder, Sphere, Cube, Tetrahedron
+- Configurable kaleido fold count (2–24)
+- Variable kaleido zoom (0.3–1.5) with bass-reactive modulation
+- Variable rotation speed (0–4×, freezable)
 
+### Frame
+- 7 frame variants: None, Circle, Square, Rounded, Hexagon, Octagon, Star
+- Variable frame size (0.4–1.0)
+- Hue-shiftable frame color
+
+### Painters
+- **HueStripe**: scrolling rainbow vertical bands
+- **Spiral**: radial color spiral with arm rotation
+- **Plasma**: flowing demoscene-style color blobs
+
+### Effects
+- Color invert
+- Colorize tint with intensity blend
+- Sine-wave UV distortion (animated, amplitude + frequency control)
+
+### Audio reactivity
+- System audio capture via PipeWire monitor source
+- FFT-based beat detection → shape shake
+- Bass energy (60–200 Hz) → kaleido zoom pulse
+
+### Input
+- Keyboard parameter control
+- MIDI Control Change routing (works with VMPK or any USB MIDI controller)
+- Save/load preset to `~/.config/abstrakt-deck/preset.json`
+
+## Requirements
+
+- Linux with PipeWire (Ubuntu 25.10+ recommended)
+- Vulkan-capable GPU (Intel integrated graphics work fine)
+- Rust 1.83+ (install via [rustup](https://rustup.rs/))
+
+System libraries:
+
+    sudo apt install -y \
+        build-essential pkg-config \
+        libasound2-dev libudev-dev \
+        libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev \
+        libwayland-dev libxkbcommon-dev \
+        pipewire-alsa
+
+## Build and run
+
+    git clone https://github.com/onojk/abstrakt-deck.git
+    cd abstrakt-deck
     cargo run --release
 
-Press Escape or close the window to exit.
+The visualizer opens in a 1280×720 window. Click the window for focus before using keyboard controls.
 
-## Keyboard controls
+## Controls
+
+### Keyboard
 
 | Key | Action |
 |-----|--------|
-| `[ ]` | Fold count (2–24) |
-| `Z X` | Kaleido zoom (0.30–1.50) |
-| `, .` | Rotation speed (0–4×) |
-| `1–7` | Frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star) |
-| `- =` | Frame size |
-| `R G B` | Cycle frame color hue |
-| `Space` | Toggle beat-reactive shake |
-| `Tab` | Cycle shape (Cylinder → Sphere → Cube → Tetrahedron) |
-| `/ '` | Bass-zoom intensity |
-| `I` | Toggle color invert |
-| `T` | Toggle colorize tint |
-| `;` | Cycle colorize hue (+30°) |
-| `9 0` | Colorize intensity |
-| `D` | Toggle distortion |
-| `Q W` | Distortion amplitude (0–0.5) |
-| `E F` | Distortion frequency (0.5–8) |
-| `Ctrl+S` | Save preset to `~/.config/abstrakt-deck/preset.json` |
-| `Ctrl+L` | Load preset from same file |
-| `Esc` | Exit |
+| `Tab` | cycle 3D shape (Cylinder → Sphere → Cube → Tetrahedron) |
+| `P` | cycle painter (HueStripe → Spiral → Plasma) |
+| `[` / `]` | decrease / increase kaleido fold count (2 to 24) |
+| `Z` / `X` | decrease / increase kaleido zoom (0.3 to 1.5) |
+| `,` / `.` | decrease / increase rotation speed (0 to 4×) |
+| `1` – `7` | frame shape (None, Circle, Square, Rounded, Hexagon, Octagon, Star) |
+| `-` / `=` | decrease / increase frame size |
+| `R` / `G` / `B` | shift frame color hue |
+| `I` | toggle color invert |
+| `T` | toggle colorize tint |
+| `;` | cycle colorize hue (+30°) |
+| `9` / `0` | decrease / increase colorize intensity |
+| `D` | toggle distortion |
+| `Q` / `W` | decrease / increase distortion amplitude |
+| `E` / `F` | decrease / increase distortion frequency |
+| `/` / `'` | decrease / increase bass-zoom intensity |
+| `Space` | toggle beat-reactive shake |
+| `Ctrl+S` | save preset to `~/.config/abstrakt-deck/preset.json` |
+| `Ctrl+L` | load preset |
+| `Esc` | exit |
 
-## Slices completed
+### MIDI
 
-- [x] Slice 1: window + wgpu clear color + FPS in title
-- [x] Slice 2: fullscreen triangle + WGSL shader + uniforms
-- [x] Slice 3: Hue Stripe painter shader
-- [x] Slice 4: painter FBO (2048×1024) + composite blit pass
-- [x] Slice 5: 3D cylinder mesh + painter surface texture + depth + MVP
-- [x] Slice 6: kaleido fold pass (polar-coordinate fold)
-- [x] Slice 7: frame mask overlay (hexagon SDF, neon cyan, anti-aliased)
-- [x] Slice 8: audio capture (cpal/ALSA/PipeWire) + FFT beat detection + shake
-- [x] Slice 9: keyboard-driven runtime control
-- [x] Slice 10: MIDI input via midir (VMPK CC→params, Note On→shake)
-- [x] Slice 11: multi-shape (cylinder, sphere, cube, tetrahedron)
-- [x] Slice 12: bass-reactive kaleido zoom (attack/decay envelope)
-- [x] Slice 13: color invert + colorize tint in shape shader
-- [x] Slice 13.5: colorize intensity blend
-- [x] Slice 14: distortion effect (sine-wave UV warp)
-- [x] Slice 15: preset save/load (`~/.config/abstrakt-deck/preset.json`)
-- [x] Slice 16: unit tests + GitHub Actions CI
+Plug in any USB MIDI controller, or use a virtual one like [VMPK](https://vmpk.sourceforge.io/). The first connected port is auto-selected. Default CC mappings:
+
+| CC | Action | Notes |
+|----|--------|-------|
+| 1 | fold count | mod wheel |
+| 5 | bass-zoom intensity | |
+| 7 | kaleido zoom | volume |
+| 10 | rotation speed | pan |
+| 64 | cycle frame shape (≥ 64 triggers) | sustain |
+| 65 | cycle 3D shape | portamento |
+| 66 | cycle painter | sostenuto |
+| 71 | frame size | resonance |
+| 74 | frame color hue | cutoff |
+| 76 | colorize hue | vibrato rate |
+| 80 / 81 / 82 | distortion toggle / amplitude / frequency | |
+| 91 / 93 / 92 | invert toggle / colorize toggle / colorize intensity | |
+| Note On | trigger shake | velocity = strength |
+
+## Architecture
+
+The render pipeline is four passes per frame:
+
+1. **Painter pass** — selected painter shader writes to a 2048×1024 RGBA8 offscreen texture
+2. **Shape pass** — 3D mesh is rendered with the painter texture wrapped on its surface, output to a screen-resolution shape FBO. Distortion, invert, and colorize effects apply here in the fragment shader.
+3. **Kaleido pass** — fragment shader samples the shape FBO with polar-coordinate folding. Zoom is modulated by smoothed bass energy from the audio analyzer.
+4. **Frame pass** — fragment shader samples the kaleido FBO and applies an SDF-based frame mask in the same pass that writes to the swapchain.
+
+Audio runs on a separate thread (cpal callback). Beat events flow to the render thread via crossbeam-channel. MIDI runs on its own thread (midir callback) with the same pattern.
+
+## Status
+
+Slices 1–17 complete. The visualizer is feature-complete for the experimental version goals (audio + MIDI + keyboard control over a multi-shape multi-painter kaleido pipeline).
+
+Possible future slices: video recording / export, multi-monitor support, additional painters (Audio Paint, Print Head), additional shapes.
 
 ## License
 
