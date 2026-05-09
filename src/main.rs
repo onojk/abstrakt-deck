@@ -23,8 +23,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const PAINTER_TEXTURE_WIDTH: u32 = 2048;
-const PAINTER_TEXTURE_HEIGHT: u32 = 1024;
+const PAINTER_TEXTURE_WIDTH: u32 = 4096;
+const PAINTER_TEXTURE_HEIGHT: u32 = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -323,7 +323,7 @@ struct GpuState {
 
     uniforms_buffer: wgpu::Buffer,
 
-    // Pass 1 — painter (procedural → fixed 2048×1024)
+    // Pass 1 — painter (procedural → fixed 4096×256)
     painter_uniforms_bind_group: wgpu::BindGroup,
     painter_pipelines: HashMap<PainterKind, wgpu::RenderPipeline>,
     #[allow(dead_code)]
@@ -540,7 +540,7 @@ impl GpuState {
         let w = size.width.max(1);
         let h = size.height.max(1);
 
-        // ── Painter texture (fixed 2048×1024) ─────────────────────────────────
+        // ── Painter texture (fixed 4096×256, 16:1 strip to match abstrakt-engine) ──
         let painter_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Painter texture"),
             size: wgpu::Extent3d {
