@@ -3,10 +3,14 @@ struct Transform {
 };
 
 struct ShapeEffects {
-    invert:             f32,
-    colorize_enabled:   f32,
-    colorize_hue:       f32,
-    colorize_intensity: f32,
+    invert:               f32,
+    colorize_enabled:     f32,
+    colorize_hue:         f32,
+    colorize_intensity:   f32,
+    distortion_enabled:   f32,
+    distortion_amplitude: f32,
+    distortion_frequency: f32,
+    time_seconds:         f32,
 };
 
 @group(0) @binding(0) var<uniform> transform: Transform;
@@ -51,7 +55,14 @@ fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    var color = textureSample(painter_tex, painter_sampler, in.uv);
+    var warped_uv = in.uv;
+    if effects.distortion_enabled > 0.5 {
+        let freq = effects.distortion_frequency * 6.2831853;
+        let wave_u = sin(in.uv.y * freq + effects.time_seconds) * effects.distortion_amplitude;
+        let wave_v = sin(in.uv.x * freq + effects.time_seconds) * effects.distortion_amplitude;
+        warped_uv = vec2<f32>(in.uv.x + wave_u, in.uv.y + wave_v);
+    }
+    var color = textureSample(painter_tex, painter_sampler, warped_uv);
 
     // Invert: flip RGB
     let inverted = vec3<f32>(1.0) - color.rgb;

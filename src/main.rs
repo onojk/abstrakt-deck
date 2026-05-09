@@ -46,10 +46,14 @@ struct KaleidoUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ShapeEffects {
-    invert:             f32,   // 0.0 = off, 1.0 = on
-    colorize_enabled:   f32,   // 0.0 = off, 1.0 = on
-    colorize_hue:       f32,   // 0..360 degrees
-    colorize_intensity: f32,   // 0..1 mix between original and colorized
+    invert:               f32,
+    colorize_enabled:     f32,
+    colorize_hue:         f32,
+    colorize_intensity:   f32,
+    distortion_enabled:   f32,
+    distortion_amplitude: f32,
+    distortion_frequency: f32,
+    time_seconds:         f32,
 }
 
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=star
@@ -188,6 +192,9 @@ struct GpuState {
     colorize_enabled: bool,
     colorize_hue: f32,
     colorize_intensity: f32,
+    distortion_enabled: bool,
+    distortion_amplitude: f32,
+    distortion_frequency: f32,
 }
 
 impl GpuState {
@@ -465,6 +472,8 @@ impl GpuState {
                 label: Some("Shape effects uniforms"),
                 contents: bytemuck::cast_slice(&[ShapeEffects {
                     invert: 0.0, colorize_enabled: 0.0, colorize_hue: 0.0, colorize_intensity: 0.5,
+                    distortion_enabled: 0.0, distortion_amplitude: 0.05, distortion_frequency: 3.0,
+                    time_seconds: 0.0,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -756,6 +765,9 @@ impl GpuState {
             colorize_enabled: false,
             colorize_hue: 0.0,
             colorize_intensity: 0.5,
+            distortion_enabled: false,
+            distortion_amplitude: 0.05,
+            distortion_frequency: 3.0,
         }
     }
 
@@ -859,10 +871,14 @@ impl GpuState {
         self.queue.write_buffer(
             &self.shape_effects_buffer, 0,
             bytemuck::cast_slice(&[ShapeEffects {
-                invert:             if self.invert_enabled { 1.0 } else { 0.0 },
-                colorize_enabled:   if self.colorize_enabled { 1.0 } else { 0.0 },
-                colorize_hue:       self.colorize_hue,
-                colorize_intensity: self.colorize_intensity,
+                invert:               if self.invert_enabled { 1.0 } else { 0.0 },
+                colorize_enabled:     if self.colorize_enabled { 1.0 } else { 0.0 },
+                colorize_hue:         self.colorize_hue,
+                colorize_intensity:   self.colorize_intensity,
+                distortion_enabled:   if self.distortion_enabled { 1.0 } else { 0.0 },
+                distortion_amplitude: self.distortion_amplitude,
+                distortion_frequency: self.distortion_frequency,
+                time_seconds:         elapsed,
             }]),
         );
 
@@ -1108,6 +1124,18 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                     gpu.colorize_enabled = value >= 64;
                     log::debug!("MIDI CC93 → colorize = {}", gpu.colorize_enabled);
                 }
+                80 => {
+                    gpu.distortion_enabled = value >= 64;
+                    log::debug!("MIDI CC80 → distortion = {}", gpu.distortion_enabled);
+                }
+                81 => {
+                    gpu.distortion_amplitude = v * 0.5;
+                    log::debug!("MIDI CC81 → distortion_amplitude = {:.3}", gpu.distortion_amplitude);
+                }
+                82 => {
+                    gpu.distortion_frequency = 0.5 + v * 7.5;
+                    log::debug!("MIDI CC82 → distortion_frequency = {:.1}", gpu.distortion_frequency);
+                }
                 _ => {
                     log::trace!("MIDI CC {} value {} (unmapped)", cc, value);
                 }
@@ -1141,7 +1169,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 13.5 — Colorize blend")
+            .with_title("abstrakt-deck — slice 14 — Distortion")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1290,6 +1318,26 @@ impl ApplicationHandler for App {
                         gpu.bass_zoom_strength = (gpu.bass_zoom_strength + 0.05).min(1.0);
                         log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
                     }
+                    KeyCode::KeyD => {
+                        gpu.distortion_enabled = !gpu.distortion_enabled;
+                        log::info!("distortion = {}", gpu.distortion_enabled);
+                    }
+                    KeyCode::KeyQ => {
+                        gpu.distortion_amplitude = (gpu.distortion_amplitude - 0.01).max(0.0);
+                        log::info!("distortion_amplitude = {:.3}", gpu.distortion_amplitude);
+                    }
+                    KeyCode::KeyW => {
+                        gpu.distortion_amplitude = (gpu.distortion_amplitude + 0.01).min(0.5);
+                        log::info!("distortion_amplitude = {:.3}", gpu.distortion_amplitude);
+                    }
+                    KeyCode::KeyE => {
+                        gpu.distortion_frequency = (gpu.distortion_frequency - 0.5).max(0.5);
+                        log::info!("distortion_frequency = {:.1}", gpu.distortion_frequency);
+                    }
+                    KeyCode::KeyF => {
+                        gpu.distortion_frequency = (gpu.distortion_frequency + 0.5).min(8.0);
+                        log::info!("distortion_frequency = {:.1}", gpu.distortion_frequency);
+                    }
                     _ => {}
                 }
             }
@@ -1332,7 +1380,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 13.5 — Colorize blend — {:.1} fps",
+                        "abstrakt-deck — slice 14 — Distortion — {:.1} fps",
                         fps
                     ));
                 }
@@ -1362,6 +1410,9 @@ fn main() {
     println!("  T      toggle colorize tint");
     println!("  ;      cycle colorize hue (+30°)");
     println!("  9 0    colorize intensity (0 to 1)");
+    println!("  D      toggle distortion");
+    println!("  Q W    distortion amplitude (0 to 0.5)");
+    println!("  E F    distortion frequency (0.5 to 8)");
     println!("  esc    exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
@@ -1376,6 +1427,9 @@ fn main() {
     println!("  CC 65  cycle shape (portamento)");
     println!("  CC 71  frame size");
     println!("  CC 74  frame color hue");
+    println!("  CC 80  distortion toggle");
+    println!("  CC 81  distortion amplitude");
+    println!("  CC 82  distortion frequency");
     println!("  Note On  trigger shake (like a beat)\n");
 
     log::info!("abstrakt-deck starting");
