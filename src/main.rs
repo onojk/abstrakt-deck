@@ -46,10 +46,10 @@ struct KaleidoUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ShapeEffects {
-    invert:           f32,   // 0.0 = off, 1.0 = on
-    colorize_enabled: f32,   // 0.0 = off, 1.0 = on
-    colorize_hue:     f32,   // 0..360 degrees
-    _pad:             f32,
+    invert:             f32,   // 0.0 = off, 1.0 = on
+    colorize_enabled:   f32,   // 0.0 = off, 1.0 = on
+    colorize_hue:       f32,   // 0..360 degrees
+    colorize_intensity: f32,   // 0..1 mix between original and colorized
 }
 
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=star
@@ -187,6 +187,7 @@ struct GpuState {
     invert_enabled: bool,
     colorize_enabled: bool,
     colorize_hue: f32,
+    colorize_intensity: f32,
 }
 
 impl GpuState {
@@ -463,7 +464,7 @@ impl GpuState {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Shape effects uniforms"),
                 contents: bytemuck::cast_slice(&[ShapeEffects {
-                    invert: 0.0, colorize_enabled: 0.0, colorize_hue: 0.0, _pad: 0.0,
+                    invert: 0.0, colorize_enabled: 0.0, colorize_hue: 0.0, colorize_intensity: 0.5,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -754,6 +755,7 @@ impl GpuState {
             invert_enabled: false,
             colorize_enabled: false,
             colorize_hue: 0.0,
+            colorize_intensity: 0.5,
         }
     }
 
@@ -857,10 +859,10 @@ impl GpuState {
         self.queue.write_buffer(
             &self.shape_effects_buffer, 0,
             bytemuck::cast_slice(&[ShapeEffects {
-                invert:           if self.invert_enabled { 1.0 } else { 0.0 },
-                colorize_enabled: if self.colorize_enabled { 1.0 } else { 0.0 },
-                colorize_hue:     self.colorize_hue,
-                _pad:             0.0,
+                invert:             if self.invert_enabled { 1.0 } else { 0.0 },
+                colorize_enabled:   if self.colorize_enabled { 1.0 } else { 0.0 },
+                colorize_hue:       self.colorize_hue,
+                colorize_intensity: self.colorize_intensity,
             }]),
         );
 
@@ -1098,6 +1100,10 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                     gpu.invert_enabled = value >= 64;
                     log::debug!("MIDI CC91 → invert = {}", gpu.invert_enabled);
                 }
+                92 => {
+                    gpu.colorize_intensity = v;
+                    log::debug!("MIDI CC92 → colorize_intensity = {:.2}", gpu.colorize_intensity);
+                }
                 93 => {
                     gpu.colorize_enabled = value >= 64;
                     log::debug!("MIDI CC93 → colorize = {}", gpu.colorize_enabled);
@@ -1135,7 +1141,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 13 — Color FX")
+            .with_title("abstrakt-deck — slice 13.5 — Colorize blend")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1268,6 +1274,14 @@ impl ApplicationHandler for App {
                         gpu.colorize_hue = (gpu.colorize_hue + 30.0) % 360.0;
                         log::info!("colorize_hue = {:.0}°", gpu.colorize_hue);
                     }
+                    KeyCode::Digit9 => {
+                        gpu.colorize_intensity = (gpu.colorize_intensity - 0.1).max(0.0);
+                        log::info!("colorize_intensity = {:.2}", gpu.colorize_intensity);
+                    }
+                    KeyCode::Digit0 => {
+                        gpu.colorize_intensity = (gpu.colorize_intensity + 0.1).min(1.0);
+                        log::info!("colorize_intensity = {:.2}", gpu.colorize_intensity);
+                    }
                     KeyCode::Slash => {
                         gpu.bass_zoom_strength = (gpu.bass_zoom_strength - 0.05).max(0.0);
                         log::info!("bass_zoom_strength = {:.2}", gpu.bass_zoom_strength);
@@ -1318,7 +1332,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 13 — Color FX — {:.1} fps",
+                        "abstrakt-deck — slice 13.5 — Colorize blend — {:.1} fps",
                         fps
                     ));
                 }
@@ -1347,6 +1361,7 @@ fn main() {
     println!("  I      toggle color invert");
     println!("  T      toggle colorize tint");
     println!("  ;      cycle colorize hue (+30°)");
+    println!("  9 0    colorize intensity (0 to 1)");
     println!("  esc    exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
@@ -1356,6 +1371,7 @@ fn main() {
     println!("  CC 5   bass-zoom intensity");
     println!("  CC 76  colorize hue");
     println!("  CC 91  invert toggle");
+    println!("  CC 92  colorize intensity");
     println!("  CC 93  colorize toggle");
     println!("  CC 65  cycle shape (portamento)");
     println!("  CC 71  frame size");

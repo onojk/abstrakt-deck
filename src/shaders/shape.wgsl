@@ -3,10 +3,10 @@ struct Transform {
 };
 
 struct ShapeEffects {
-    invert:           f32,
-    colorize_enabled: f32,
-    colorize_hue:     f32,
-    _pad:             f32,
+    invert:             f32,
+    colorize_enabled:   f32,
+    colorize_hue:       f32,
+    colorize_intensity: f32,
 };
 
 @group(0) @binding(0) var<uniform> transform: Transform;
@@ -57,11 +57,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let inverted = vec3<f32>(1.0) - color.rgb;
     color = vec4<f32>(mix(color.rgb, inverted, effects.invert), color.a);
 
-    // Colorize: replace hue while preserving saturation and value
+    // Colorize: replace hue then mix back toward original by intensity
     if effects.colorize_enabled > 0.5 {
         let hsv = rgb2hsv(color.rgb);
         let target_hue = effects.colorize_hue / 360.0;
-        color = vec4<f32>(hsv2rgb(vec3<f32>(target_hue, hsv.y, hsv.z)), color.a);
+        let colorized = hsv2rgb(vec3<f32>(target_hue, hsv.y, hsv.z));
+        color = vec4<f32>(mix(color.rgb, colorized, effects.colorize_intensity), color.a);
     }
 
     return color;
