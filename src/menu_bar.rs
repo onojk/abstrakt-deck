@@ -29,12 +29,41 @@ impl MenuBar {
         Self { ctx, state, renderer, quit_requested: false }
     }
 
+    /// Returns true if egui currently wants keyboard input (e.g., a text field is focused).
+    #[allow(dead_code)]
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.ctx.wants_keyboard_input()
+    }
+
+    /// Returns true if egui currently wants pointer input (mouse over a menu, etc).
+    #[allow(dead_code)]
+    pub fn wants_pointer_input(&self) -> bool {
+        self.ctx.wants_pointer_input()
+    }
+
+    /// Forward a window event to egui and return whether the visualizer should ignore it.
     pub fn handle_event(
         &mut self,
         window: &Window,
         event: &winit::event::WindowEvent,
-    ) -> egui_winit::EventResponse {
-        self.state.on_window_event(window, event)
+    ) -> bool {
+        // Always let egui see the event so menus and hover states update.
+        let response = self.state.on_window_event(window, event);
+
+        // Only block the visualizer from events egui actually needs.
+        match event {
+            winit::event::WindowEvent::KeyboardInput { .. } => {
+                // Only consume keyboard when a text field is focused.
+                self.ctx.wants_keyboard_input()
+            }
+            winit::event::WindowEvent::MouseInput { .. }
+            | winit::event::WindowEvent::CursorMoved { .. }
+            | winit::event::WindowEvent::MouseWheel { .. } => {
+                // Consume mouse when the pointer is over a menu or dropdown.
+                response.consumed && self.ctx.wants_pointer_input()
+            }
+            _ => response.consumed,
+        }
     }
 
     pub fn render(
