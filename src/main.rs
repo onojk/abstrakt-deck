@@ -4,6 +4,7 @@ mod shape;
 use audio::{AudioCapture, AudioEvent};
 use midi::{MidiCapture, MidiEvent};
 use shape::{ShapeKind, Vertex};
+use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,6 +116,113 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     };
     let m = v - c;
     (r + m, g + m, b + m)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Preset {
+    current_shape: String,
+    fold_count: f32,
+    zoom: f32,
+    rotation_speed_scale: f32,
+    frame_shape: String,
+    frame_size: f32,
+    frame_color_hue: f32,
+    invert_enabled: bool,
+    colorize_enabled: bool,
+    colorize_hue: f32,
+    colorize_intensity: f32,
+    distortion_enabled: bool,
+    distortion_amplitude: f32,
+    distortion_frequency: f32,
+    shake_enabled: bool,
+    bass_zoom_strength: f32,
+}
+
+impl Preset {
+    fn from_gpu(gpu: &GpuState) -> Self {
+        Self {
+            current_shape: gpu.current_shape.name().to_string(),
+            fold_count: gpu.fold_count,
+            zoom: gpu.zoom,
+            rotation_speed_scale: gpu.rotation_speed_scale,
+            frame_shape: format!("{:?}", gpu.frame_shape),
+            frame_size: gpu.frame_size,
+            frame_color_hue: gpu.frame_color_hue,
+            invert_enabled: gpu.invert_enabled,
+            colorize_enabled: gpu.colorize_enabled,
+            colorize_hue: gpu.colorize_hue,
+            colorize_intensity: gpu.colorize_intensity,
+            distortion_enabled: gpu.distortion_enabled,
+            distortion_amplitude: gpu.distortion_amplitude,
+            distortion_frequency: gpu.distortion_frequency,
+            shake_enabled: gpu.shake_enabled,
+            bass_zoom_strength: gpu.bass_zoom_strength,
+        }
+    }
+
+    fn apply_to_gpu(&self, gpu: &mut GpuState) {
+        gpu.current_shape = match self.current_shape.as_str() {
+            "Sphere"      => ShapeKind::Sphere,
+            "Cube"        => ShapeKind::Cube,
+            "Tetrahedron" => ShapeKind::Tetrahedron,
+            _             => ShapeKind::Cylinder,
+        };
+        gpu.fold_count = self.fold_count;
+        gpu.zoom = self.zoom;
+        gpu.rotation_speed_scale = self.rotation_speed_scale;
+        gpu.frame_shape = match self.frame_shape.as_str() {
+            "None"    => FrameShape::None,
+            "Circle"  => FrameShape::Circle,
+            "Square"  => FrameShape::Square,
+            "Rounded" => FrameShape::Rounded,
+            "Octagon" => FrameShape::Octagon,
+            "Star"    => FrameShape::Star,
+            _         => FrameShape::Hexagon,
+        };
+        gpu.frame_size = self.frame_size;
+        gpu.frame_color_hue = self.frame_color_hue;
+        gpu.invert_enabled = self.invert_enabled;
+        gpu.colorize_enabled = self.colorize_enabled;
+        gpu.colorize_hue = self.colorize_hue;
+        gpu.colorize_intensity = self.colorize_intensity;
+        gpu.distortion_enabled = self.distortion_enabled;
+        gpu.distortion_amplitude = self.distortion_amplitude;
+        gpu.distortion_frequency = self.distortion_frequency;
+        gpu.shake_enabled = self.shake_enabled;
+        gpu.bass_zoom_strength = self.bass_zoom_strength;
+    }
+}
+
+fn preset_path() -> Option<std::path::PathBuf> {
+    let mut path = dirs::config_dir()?;
+    path.push("abstrakt-deck");
+    path.push("preset.json");
+    Some(path)
+}
+
+fn save_preset(gpu: &GpuState) -> Result<(), String> {
+    let path = preset_path().ok_or_else(|| "Could not find config dir".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create config dir: {}", e))?;
+    }
+    let preset = Preset::from_gpu(gpu);
+    let json = serde_json::to_string_pretty(&preset)
+        .map_err(|e| format!("Serialize: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("Write: {}", e))?;
+    log::info!("Preset saved to {}", path.display());
+    Ok(())
+}
+
+fn load_preset(gpu: &mut GpuState) -> Result<(), String> {
+    let path = preset_path().ok_or_else(|| "Could not find config dir".to_string())?;
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Read: {}", e))?;
+    let preset: Preset = serde_json::from_str(&json)
+        .map_err(|e| format!("Parse: {}", e))?;
+    preset.apply_to_gpu(gpu);
+    log::info!("Preset loaded from {}", path.display());
+    Ok(())
 }
 
 struct ShapeBufferSet {
@@ -1156,11 +1264,19 @@ struct App {
     fps: FpsCounter,
     audio: Option<AudioCapture>,
     midi: Option<MidiCapture>,
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl App {
     fn new() -> Self {
-        Self { window: None, gpu: None, fps: FpsCounter::new(), audio: None, midi: None }
+        Self {
+            window: None,
+            gpu: None,
+            fps: FpsCounter::new(),
+            audio: None,
+            midi: None,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+        }
     }
 }
 
@@ -1169,7 +1285,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 14 — Distortion")
+            .with_title("abstrakt-deck — slice 15 — Preset save/load")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1226,6 +1342,24 @@ impl ApplicationHandler for App {
                 },
                 ..
             } => {
+                let ctrl = self.modifiers.control_key();
+                if ctrl {
+                    match key_code {
+                        KeyCode::KeyS => {
+                            if let Err(e) = save_preset(gpu) {
+                                log::error!("Save failed: {}", e);
+                            }
+                            return;
+                        }
+                        KeyCode::KeyL => {
+                            if let Err(e) = load_preset(gpu) {
+                                log::warn!("Load failed: {} (no preset saved yet?)", e);
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 match key_code {
                     KeyCode::Escape => {
                         log::info!("Escape pressed");
@@ -1341,6 +1475,9 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
+            WindowEvent::ModifiersChanged(new_mods) => {
+                self.modifiers = new_mods.state();
+            }
             WindowEvent::Resized(physical_size) => {
                 gpu.resize(physical_size);
             }
@@ -1380,7 +1517,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 14 — Distortion — {:.1} fps",
+                        "abstrakt-deck — slice 15 — Preset save/load — {:.1} fps",
                         fps
                     ));
                 }
@@ -1413,6 +1550,8 @@ fn main() {
     println!("  D      toggle distortion");
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
+    println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
+    println!("  Ctrl+L load preset from same file");
     println!("  esc    exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
