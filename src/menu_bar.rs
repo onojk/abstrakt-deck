@@ -3,11 +3,22 @@ use egui_wgpu::Renderer;
 use egui_winit::State;
 use winit::window::Window;
 
+#[derive(Debug)]
+pub enum MenuAction {
+    OpenSkin,
+    SavePreset,
+    LoadPreset,
+    Quit,
+    ToggleFullscreen,
+    ToggleCheatSheet,
+    ToggleRecording,
+}
+
 pub struct MenuBar {
     pub ctx: Context,
     state: State,
     renderer: Renderer,
-    pub quit_requested: bool,
+    pub pending_actions: Vec<MenuAction>,
 }
 
 impl MenuBar {
@@ -26,7 +37,7 @@ impl MenuBar {
             None,
         );
         let renderer = Renderer::new(device, surface_format, None, 1, false);
-        Self { ctx, state, renderer, quit_requested: false }
+        Self { ctx, state, renderer, pending_actions: Vec::new() }
     }
 
     /// Returns true if egui currently wants keyboard input (e.g., a text field is focused).
@@ -66,6 +77,11 @@ impl MenuBar {
         }
     }
 
+    /// Drain and return all pending actions accumulated since last call.
+    pub fn take_actions(&mut self) -> Vec<MenuAction> {
+        std::mem::take(&mut self.pending_actions)
+    }
+
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -78,35 +94,69 @@ impl MenuBar {
     ) {
         let raw_input = self.state.take_egui_input(window);
 
-        let mut quit_flag = false;
+        let mut frame_actions: Vec<MenuAction> = Vec::new();
         let full_output = self.ctx.run(raw_input, |ctx| {
             egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Open…").clicked() {
+                        if ui.button("Open Skin...").clicked() {
+                            frame_actions.push(MenuAction::OpenSkin);
                             ui.close_menu();
                         }
-                        if ui.button("Save").clicked() {
+                        ui.separator();
+                        if ui.button("Save Preset  Ctrl+S").clicked() {
+                            frame_actions.push(MenuAction::SavePreset);
                             ui.close_menu();
                         }
-                        if ui.button("Load").clicked() {
+                        if ui.button("Load Preset  Ctrl+L").clicked() {
+                            frame_actions.push(MenuAction::LoadPreset);
                             ui.close_menu();
                         }
                         ui.separator();
                         if ui.button("Quit").clicked() {
-                            quit_flag = true;
+                            frame_actions.push(MenuAction::Quit);
                             ui.close_menu();
                         }
                     });
-                    ui.menu_button("Edit", |_ui| {});
-                    ui.menu_button("View", |_ui| {});
-                    ui.menu_button("Tools", |_ui| {});
-                    ui.menu_button("Window", |_ui| {});
-                    ui.menu_button("Help", |_ui| {});
+
+                    ui.menu_button("Edit", |ui| {
+                        ui.label("(Coming in 24c)");
+                    });
+
+                    ui.menu_button("View", |ui| {
+                        if ui.button("Fullscreen  F11").clicked() {
+                            frame_actions.push(MenuAction::ToggleFullscreen);
+                            ui.close_menu();
+                        }
+                        if ui.button("Show Cheat Sheet  ?").clicked() {
+                            frame_actions.push(MenuAction::ToggleCheatSheet);
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button("Tools", |ui| {
+                        if ui.button("Toggle Recording  F12").clicked() {
+                            frame_actions.push(MenuAction::ToggleRecording);
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button("Window", |ui| {
+                        ui.label("(Panel toggles coming in 24c)");
+                    });
+
+                    ui.menu_button("Help", |ui| {
+                        ui.label("abstrakt-deck v0.1.0");
+                        ui.separator();
+                        if ui.button("Show Cheat Sheet  ?").clicked() {
+                            frame_actions.push(MenuAction::ToggleCheatSheet);
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
         });
-        self.quit_requested |= quit_flag;
+        self.pending_actions.append(&mut frame_actions);
 
         self.state.handle_platform_output(window, full_output.platform_output);
 

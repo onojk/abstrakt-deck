@@ -6,7 +6,7 @@ mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
 use help_overlay::HelpOverlay;
-use menu_bar::MenuBar;
+use menu_bar::{MenuAction, MenuBar};
 use midi::{MidiCapture, MidiEvent};
 use recorder::Recorder;
 use shape::{ShapeKind, Vertex};
@@ -1936,20 +1936,55 @@ impl ApplicationHandler for App {
                         log::warn!("Surface error: {:?}", e);
                     }
                 }
-                if self.menu_bar.as_ref().map_or(false, |m| m.quit_requested) {
-                    log::info!("Quit via menu");
-                    event_loop.exit();
-                    return;
+                // Drain and dispatch menu actions accumulated during this frame's render.
+                let actions = self.menu_bar.as_mut()
+                    .map_or_else(Vec::new, |m| m.take_actions());
+                for action in actions {
+                    match action {
+                        MenuAction::Quit => {
+                            log::info!("Quit via menu");
+                            event_loop.exit();
+                            return;
+                        }
+                        MenuAction::OpenSkin => {
+                            log::info!("Open Skin requested (dialog wiring in slice 23b)");
+                        }
+                        MenuAction::SavePreset => {
+                            if let Err(e) = save_preset(gpu) {
+                                log::error!("Save preset failed: {}", e);
+                            }
+                        }
+                        MenuAction::LoadPreset => {
+                            if let Err(e) = load_preset(gpu) {
+                                log::warn!("Load preset failed: {}", e);
+                            }
+                        }
+                        MenuAction::ToggleFullscreen => {
+                            self.is_fullscreen = !self.is_fullscreen;
+                            window.set_fullscreen(if self.is_fullscreen {
+                                Some(winit::window::Fullscreen::Borderless(None))
+                            } else {
+                                None
+                            });
+                            log::info!("Fullscreen: {}", self.is_fullscreen);
+                        }
+                        MenuAction::ToggleCheatSheet => {
+                            gpu.help_overlay.toggle();
+                        }
+                        MenuAction::ToggleRecording => {
+                            gpu.toggle_recording();
+                        }
+                    }
                 }
                 if let Some(fps) = self.fps.tick() {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24a — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24b — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24a — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24b — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
