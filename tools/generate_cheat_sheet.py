@@ -20,7 +20,7 @@ LINES = [
     ("HEADER", "ABSTRAKT-DECK CONTROLS"),
     ("BLANK", ""),
     ("CATEGORY", "GEOMETRY"),
-    ("ENTRY", ("Tab", "cycle 3D shape (Cylinder/Sphere/Cube/Tetrahedron)")),
+    ("ENTRY", ("Shift+Tab", "cycle 3D shape (Cylinder/Sphere/Cube/Tetrahedron)")),
     ("ENTRY", ("P", "cycle painter (HueStripe/Spiral/Plasma)")),
     ("ENTRY", ("[ ]", "fold count (2-24)")),
     ("ENTRY", ("Z X", "kaleido zoom (0.3-1.5)")),

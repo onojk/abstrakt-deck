@@ -1713,7 +1713,7 @@ impl ApplicationHandler for App {
         let egui_consumed = if let (Some(menu), Some(window)) =
             (self.menu_bar.as_mut(), self.window.as_ref())
         {
-            menu.handle_event(window, &event).consumed
+            menu.handle_event(window, &event)
         } else {
             false
         };
@@ -1818,7 +1818,7 @@ impl ApplicationHandler for App {
                         gpu.params.shake_enabled = !gpu.params.shake_enabled;
                         log::info!("shake_enabled = {}", gpu.params.shake_enabled);
                     }
-                    KeyCode::Tab => {
+                    KeyCode::Tab if self.modifiers.shift_key() => {
                         gpu.params.current_shape = gpu.params.current_shape.next();
                         log::info!("shape: {}", gpu.params.current_shape.name());
                     }
@@ -1973,7 +1973,7 @@ fn main() {
     println!("  - =    frame size");
     println!("  R G B  cycle frame color hue");
     println!("  space  toggle beat-reactive shake");
-    println!("  Tab    cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
+    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
     println!("  / '   bass-zoom intensity (0 to 1)");
     println!("  I      toggle color invert");
     println!("  T      toggle colorize tint");
