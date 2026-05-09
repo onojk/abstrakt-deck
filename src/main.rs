@@ -69,6 +69,38 @@ impl FrameUniforms {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FrameShape {
+    None    = 0,
+    Circle  = 1,
+    Square  = 2,
+    Rounded = 3,
+    Hexagon = 4,
+    Octagon = 5,
+    Star    = 6,
+}
+
+impl FrameShape {
+    fn as_f32(self) -> f32 { self as i32 as f32 }
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
+    let h = (h % 360.0 + 360.0) % 360.0;
+    let c = v * s;
+    let h6 = h / 60.0;
+    let x = c * (1.0 - ((h6 % 2.0) - 1.0).abs());
+    let (r, g, b) = match h6 as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (r + m, g + m, b + m)
+}
+
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -122,6 +154,15 @@ struct GpuState {
 
     shake_offset: glam::Vec3,
     shake_velocity: glam::Vec3,
+
+    // Runtime-mutable parameters (keyboard-controlled)
+    fold_count: f32,
+    zoom: f32,
+    rotation_speed_scale: f32,
+    frame_shape: FrameShape,
+    frame_size: f32,
+    frame_color_hue: f32,
+    shake_enabled: bool,
 }
 
 impl GpuState {
@@ -638,6 +679,13 @@ impl GpuState {
             start_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
             shake_velocity: glam::Vec3::ZERO,
+            fold_count: 12.0,
+            zoom: 0.6,
+            rotation_speed_scale: 1.0,
+            frame_shape: FrameShape::Hexagon,
+            frame_size: 0.85,
+            frame_color_hue: 195.0,
+            shake_enabled: true,
         }
     }
 
@@ -728,6 +776,31 @@ impl GpuState {
             }]),
         );
 
+        self.queue.write_buffer(
+            &self.kaleido_uniforms_buffer, 0,
+            bytemuck::cast_slice(&[KaleidoUniforms {
+                resolution_x: self.size.width as f32,
+                resolution_y: self.size.height as f32,
+                fold_count: self.fold_count,
+                zoom: self.zoom,
+            }]),
+        );
+
+        let (fr, fg, fb) = hsv_to_rgb(self.frame_color_hue, 0.85, 1.0);
+        self.queue.write_buffer(
+            &self.frame_uniforms_buffer, 0,
+            bytemuck::cast_slice(&[FrameUniforms {
+                resolution_x:  self.size.width as f32,
+                resolution_y:  self.size.height as f32,
+                frame_color_r: fr,
+                frame_color_g: fg,
+                frame_color_b: fb,
+                frame_color_a: 1.0,
+                frame_shape:   self.frame_shape.as_f32(),
+                frame_size:    self.frame_size,
+            }]),
+        );
+
         let aspect = self.size.width as f32 / self.size.height as f32;
         let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
         let cam = glam::Mat4::look_at_rh(
@@ -741,8 +814,9 @@ impl GpuState {
         self.shake_velocity += force * dt;
         self.shake_offset += self.shake_velocity * dt;
 
+        let base_rotation_speed = std::f32::consts::TAU / 30.0;
         let model = glam::Mat4::from_translation(self.shake_offset)
-            * glam::Mat4::from_rotation_y(elapsed * (std::f32::consts::TAU / 30.0));
+            * glam::Mat4::from_rotation_y(elapsed * base_rotation_speed * self.rotation_speed_scale);
         self.queue.write_buffer(
             &self.transform_buffer, 0,
             bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]),
@@ -898,7 +972,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 8 — Beat-reactive")
+            .with_title("abstrakt-deck — slice 9 — Keyboard control")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -938,13 +1012,73 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                    physical_key: PhysicalKey::Code(key_code),
                     ..
                 },
                 ..
             } => {
-                log::info!("Escape pressed");
-                event_loop.exit();
+                match key_code {
+                    KeyCode::Escape => {
+                        log::info!("Escape pressed");
+                        event_loop.exit();
+                    }
+                    KeyCode::BracketLeft => {
+                        gpu.fold_count = (gpu.fold_count - 1.0).max(2.0);
+                        log::info!("fold_count = {}", gpu.fold_count);
+                    }
+                    KeyCode::BracketRight => {
+                        gpu.fold_count = (gpu.fold_count + 1.0).min(24.0);
+                        log::info!("fold_count = {}", gpu.fold_count);
+                    }
+                    KeyCode::KeyZ => {
+                        gpu.zoom = (gpu.zoom - 0.05).max(0.3);
+                        log::info!("zoom = {:.2}", gpu.zoom);
+                    }
+                    KeyCode::KeyX => {
+                        gpu.zoom = (gpu.zoom + 0.05).min(1.5);
+                        log::info!("zoom = {:.2}", gpu.zoom);
+                    }
+                    KeyCode::Comma => {
+                        gpu.rotation_speed_scale = (gpu.rotation_speed_scale - 0.25).max(0.0);
+                        log::info!("rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
+                    }
+                    KeyCode::Period => {
+                        gpu.rotation_speed_scale = (gpu.rotation_speed_scale + 0.25).min(4.0);
+                        log::info!("rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
+                    }
+                    KeyCode::Digit1 => { gpu.frame_shape = FrameShape::None;    log::info!("frame: None"); }
+                    KeyCode::Digit2 => { gpu.frame_shape = FrameShape::Circle;  log::info!("frame: Circle"); }
+                    KeyCode::Digit3 => { gpu.frame_shape = FrameShape::Square;  log::info!("frame: Square"); }
+                    KeyCode::Digit4 => { gpu.frame_shape = FrameShape::Rounded; log::info!("frame: Rounded"); }
+                    KeyCode::Digit5 => { gpu.frame_shape = FrameShape::Hexagon; log::info!("frame: Hexagon"); }
+                    KeyCode::Digit6 => { gpu.frame_shape = FrameShape::Octagon; log::info!("frame: Octagon"); }
+                    KeyCode::Digit7 => { gpu.frame_shape = FrameShape::Star;    log::info!("frame: Star"); }
+                    KeyCode::Minus => {
+                        gpu.frame_size = (gpu.frame_size - 0.05).max(0.4);
+                        log::info!("frame_size = {:.2}", gpu.frame_size);
+                    }
+                    KeyCode::Equal => {
+                        gpu.frame_size = (gpu.frame_size + 0.05).min(1.0);
+                        log::info!("frame_size = {:.2}", gpu.frame_size);
+                    }
+                    KeyCode::KeyR => {
+                        gpu.frame_color_hue = (gpu.frame_color_hue + 30.0) % 360.0;
+                        log::info!("frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                    }
+                    KeyCode::KeyG => {
+                        gpu.frame_color_hue = (gpu.frame_color_hue + 120.0) % 360.0;
+                        log::info!("frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                    }
+                    KeyCode::KeyB => {
+                        gpu.frame_color_hue = (gpu.frame_color_hue + 60.0) % 360.0;
+                        log::info!("frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                    }
+                    KeyCode::Space => {
+                        gpu.shake_enabled = !gpu.shake_enabled;
+                        log::info!("shake_enabled = {}", gpu.shake_enabled);
+                    }
+                    _ => {}
+                }
             }
             WindowEvent::Resized(physical_size) => {
                 gpu.resize(physical_size);
@@ -953,7 +1087,11 @@ impl ApplicationHandler for App {
                 if let Some(audio) = &self.audio {
                     while let Ok(event) = audio.event_rx.try_recv() {
                         match event {
-                            AudioEvent::Beat(strength) => gpu.kick_shake(strength),
+                            AudioEvent::Beat(strength) => {
+                                if gpu.shake_enabled {
+                                    gpu.kick_shake(strength);
+                                }
+                            }
                         }
                     }
                 }
@@ -972,7 +1110,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 8 — Beat-reactive — {:.1} fps",
+                        "abstrakt-deck — slice 9 — Keyboard control — {:.1} fps",
                         fps
                     ));
                 }
@@ -987,6 +1125,16 @@ fn main() {
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();
+
+    println!("\nabstrakt-deck — keyboard controls:");
+    println!("  [ ]    fold count   (2 to 24)");
+    println!("  z x    kaleido zoom (0.30 to 1.50)");
+    println!("  , .    rotation speed (0 to 4×)");
+    println!("  1-7    frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star)");
+    println!("  - =    frame size");
+    println!("  R G B  cycle frame color hue");
+    println!("  space  toggle beat-reactive shake");
+    println!("  esc    exit\n");
 
     log::info!("abstrakt-deck starting");
 
