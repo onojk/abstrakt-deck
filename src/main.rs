@@ -1,10 +1,11 @@
 mod audio;
-mod cylinder;
 mod midi;
+mod shape;
 use audio::{AudioCapture, AudioEvent};
-use cylinder::{build_cylinder, Vertex};
 use midi::{MidiCapture, MidiEvent};
+use shape::{ShapeKind, Vertex};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -103,6 +104,12 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     (r + m, g + m, b + m)
 }
 
+struct ShapeBufferSet {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -121,16 +128,14 @@ struct GpuState {
     #[allow(dead_code)]
     painter_sampler: wgpu::Sampler,
 
-    // Pass 2 — shape (cylinder with painter surface → screen-res, depth-tested)
+    // Pass 2 — shape (3D mesh with painter surface → screen-res, depth-tested)
     #[allow(dead_code)]
     shape_texture: wgpu::Texture,
     shape_view: wgpu::TextureView,
     #[allow(dead_code)]
     shape_depth: wgpu::Texture,
     shape_depth_view: wgpu::TextureView,
-    cylinder_vertex_buffer: wgpu::Buffer,
-    cylinder_index_buffer: wgpu::Buffer,
-    cylinder_index_count: u32,
+    shape_buffers: HashMap<ShapeKind, ShapeBufferSet>,
     transform_buffer: wgpu::Buffer,
     transform_bind_group: wgpu::BindGroup,
     shape_pipeline: wgpu::RenderPipeline,
@@ -165,6 +170,7 @@ struct GpuState {
     frame_size: f32,
     frame_color_hue: f32,
     shake_enabled: bool,
+    current_shape: ShapeKind,
 }
 
 impl GpuState {
@@ -345,21 +351,26 @@ impl GpuState {
             ..Default::default()
         });
 
-        // ── Cylinder ──────────────────────────────────────────────────────────
-        let mesh = build_cylinder(64, 0.6, 1.0);
-        let cylinder_vertex_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Cylinder vertex buffer"),
+        // ── Shape meshes (all built at startup, switched at runtime) ──────────
+        let meshes = shape::build_all_shapes();
+        let mut shape_buffers = HashMap::new();
+        for (kind, mesh) in &meshes {
+            let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{:?} vertex buffer", kind)),
                 contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        let cylinder_index_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Cylinder index buffer"),
+            let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{:?} index buffer", kind)),
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let cylinder_index_count = mesh.indices.len() as u32;
+            shape_buffers.insert(*kind, ShapeBufferSet {
+                vertex_buffer: vb,
+                index_buffer: ib,
+                index_count: mesh.indices.len() as u32,
+            });
+        }
 
         // ── Transform uniform ──────────────────────────────────────────────────
         let transform_buffer =
@@ -671,7 +682,7 @@ impl GpuState {
             painter_uniforms_bind_group, painter_pipeline,
             painter_texture, painter_view, painter_sampler,
             shape_texture, shape_view, shape_depth, shape_depth_view,
-            cylinder_vertex_buffer, cylinder_index_buffer, cylinder_index_count,
+            shape_buffers,
             transform_buffer, transform_bind_group,
             shape_pipeline, shape_bind_group,
             kaleido_texture, kaleido_view,
@@ -688,6 +699,7 @@ impl GpuState {
             frame_size: 0.85,
             frame_color_hue: 195.0,
             shake_enabled: true,
+            current_shape: ShapeKind::Cylinder,
         }
     }
 
@@ -818,7 +830,8 @@ impl GpuState {
 
         let base_rotation_speed = std::f32::consts::TAU / 30.0;
         let model = glam::Mat4::from_translation(self.shake_offset)
-            * glam::Mat4::from_rotation_y(elapsed * base_rotation_speed * self.rotation_speed_scale);
+            * glam::Mat4::from_rotation_y(elapsed * base_rotation_speed * self.rotation_speed_scale)
+            * glam::Mat4::from_scale(glam::Vec3::splat(self.current_shape.model_scale()));
         self.queue.write_buffer(
             &self.transform_buffer, 0,
             bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]),
@@ -875,9 +888,10 @@ impl GpuState {
             pass.set_pipeline(&self.shape_pipeline);
             pass.set_bind_group(0, &self.transform_bind_group, &[]);
             pass.set_bind_group(1, &self.shape_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.cylinder_vertex_buffer.slice(..));
-            pass.set_index_buffer(self.cylinder_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..self.cylinder_index_count, 0, 0..1);
+            let buffers = &self.shape_buffers[&self.current_shape];
+            pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+            pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            pass.draw_indexed(0..buffers.index_count, 0, 0..1);
         }
 
         // Pass 3: kaleido fold → kaleido FBO
@@ -973,6 +987,10 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                     gpu.rotation_speed_scale = v * 4.0;
                     log::debug!("MIDI CC10 → rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
                 }
+                65 if value >= 64 => {
+                    gpu.current_shape = gpu.current_shape.next();
+                    log::debug!("MIDI CC65 → shape cycled to {}", gpu.current_shape.name());
+                }
                 64 if value >= 64 => {
                     gpu.frame_shape = match gpu.frame_shape {
                         FrameShape::None    => FrameShape::Circle,
@@ -1026,7 +1044,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 10 — MIDI control")
+            .with_title("abstrakt-deck — slice 11 — Multi-shape")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1143,6 +1161,10 @@ impl ApplicationHandler for App {
                         gpu.shake_enabled = !gpu.shake_enabled;
                         log::info!("shake_enabled = {}", gpu.shake_enabled);
                     }
+                    KeyCode::Tab => {
+                        gpu.current_shape = gpu.current_shape.next();
+                        log::info!("shape: {}", gpu.current_shape.name());
+                    }
                     _ => {}
                 }
             }
@@ -1181,7 +1203,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 10 — MIDI control — {:.1} fps",
+                        "abstrakt-deck — slice 11 — Multi-shape — {:.1} fps",
                         fps
                     ));
                 }
@@ -1205,12 +1227,14 @@ fn main() {
     println!("  - =    frame size");
     println!("  R G B  cycle frame color hue");
     println!("  space  toggle beat-reactive shake");
+    println!("  Tab    cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
     println!("  esc    exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
     println!("  CC 7   zoom");
     println!("  CC 10  rotation speed");
     println!("  CC 64  cycle frame shape");
+    println!("  CC 65  cycle shape (portamento)");
     println!("  CC 71  frame size");
     println!("  CC 74  frame color hue");
     println!("  Note On  trigger shake (like a beat)\n");
