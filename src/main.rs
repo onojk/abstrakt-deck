@@ -1199,7 +1199,8 @@ impl GpuState {
                 resolution_x: self.size.width as f32,
                 resolution_y: self.size.height as f32,
                 fold_count: self.params.fold_count,
-                zoom: self.params.zoom + self.bass_zoom_smoothed * self.params.bass_zoom_strength,
+                zoom: self.params.zoom * self.params.current_shape.kaleido_zoom()
+                    + self.bass_zoom_smoothed * self.params.bass_zoom_strength,
             }]),
         );
 
@@ -1245,10 +1246,14 @@ impl GpuState {
         self.shake_velocity += force * dt;
         self.shake_offset += self.shake_velocity * dt;
 
-        let base_rotation_speed = std::f32::consts::TAU / 30.0;
+        let shape = self.params.current_shape;
+        let angle = elapsed
+            * (std::f32::consts::TAU / shape.rotation_period_seconds())
+            * self.params.rotation_speed_scale;
+        let axis = glam::Vec3::from_array(shape.rotation_axis()).normalize();
         let model = glam::Mat4::from_translation(self.shake_offset)
-            * glam::Mat4::from_rotation_y(elapsed * base_rotation_speed * self.params.rotation_speed_scale)
-            * glam::Mat4::from_scale(glam::Vec3::splat(self.params.current_shape.model_scale()));
+            * glam::Mat4::from_axis_angle(axis, angle)
+            * glam::Mat4::from_scale(glam::Vec3::splat(shape.model_scale()));
         self.queue.write_buffer(
             &self.transform_buffer, 0,
             bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]),
@@ -2060,6 +2065,18 @@ mod tests {
                 _         => FrameShape::Hexagon,
             };
             assert_eq!(parsed, shape, "FrameShape {:?} did not round-trip via Debug format", shape);
+        }
+    }
+
+    #[test]
+    fn rotation_axes_are_normalized() {
+        for shape in [ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron] {
+            let [x, y, z] = shape.rotation_axis();
+            let length_sq = x * x + y * y + z * z;
+            assert!(
+                (length_sq - 1.0).abs() < 1e-5,
+                "{:?} rotation axis is not unit length: length²={}", shape, length_sq
+            );
         }
     }
 

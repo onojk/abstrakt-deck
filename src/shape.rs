@@ -57,9 +57,45 @@ impl ShapeKind {
     pub fn model_scale(self) -> f32 {
         match self {
             ShapeKind::Cylinder    => 1.0,
-            ShapeKind::Sphere      => 1.1,
-            ShapeKind::Cube        => 1.3,
+            ShapeKind::Sphere      => 2.0,
+            ShapeKind::Cube        => 1.4,
             ShapeKind::Tetrahedron => 1.5,
+        }
+    }
+
+    pub fn rotation_axis(self) -> [f32; 3] {
+        match self {
+            ShapeKind::Cylinder => [0.0, 1.0, 0.0],
+            ShapeKind::Sphere => {
+                let tilt = 23.4_f32.to_radians();
+                [tilt.sin(), tilt.cos(), 0.0]
+            }
+            ShapeKind::Cube => {
+                let n = 1.0_f32 / 3.0_f32.sqrt();
+                [n, n, n]
+            }
+            ShapeKind::Tetrahedron => {
+                let n = 1.0_f32 / 3.0_f32.sqrt();
+                [n, n, n]
+            }
+        }
+    }
+
+    pub fn rotation_period_seconds(self) -> f32 {
+        match self {
+            ShapeKind::Cylinder    => 30.0,
+            ShapeKind::Sphere      => 30.0,
+            ShapeKind::Cube        => 25.0,
+            ShapeKind::Tetrahedron => 22.0,
+        }
+    }
+
+    pub fn kaleido_zoom(self) -> f32 {
+        match self {
+            ShapeKind::Cylinder    => 0.6,
+            ShapeKind::Sphere      => 0.88,
+            ShapeKind::Cube        => 0.7,
+            ShapeKind::Tetrahedron => 0.65,
         }
     }
 }
