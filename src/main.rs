@@ -6,7 +6,7 @@ mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
 use help_overlay::HelpOverlay;
-use menu_bar::{MenuAction, MenuBar};
+use menu_bar::{MenuAction, MenuBar, ParamChange};
 use midi::{MidiCapture, MidiEvent};
 use recorder::Recorder;
 use shape::{ShapeKind, Vertex};
@@ -1400,7 +1400,7 @@ impl GpuState {
             pass.draw(0..6, 0..1);
         }
 
-        // egui menu bar pass (draws on top of the visualizer, below recording readback)
+        // egui menu bar + params panel pass
         if let Some((menu_bar, window)) = menu {
             menu_bar.render(
                 &self.device,
@@ -1410,6 +1410,7 @@ impl GpuState {
                 &screen_view,
                 self.size.width,
                 self.size.height,
+                &self.params,
             );
         }
 
@@ -1822,6 +1823,12 @@ impl ApplicationHandler for App {
                         gpu.params.current_shape = gpu.params.current_shape.next();
                         log::info!("shape: {}", gpu.params.current_shape.name());
                     }
+                    KeyCode::KeyM if !ctrl => {
+                        if let Some(menu) = self.menu_bar.as_mut() {
+                            menu.toggle_params_panel();
+                            log::info!("params panel: {}", menu.params_panel_visible);
+                        }
+                    }
                     KeyCode::KeyI => {
                         gpu.params.invert_enabled = !gpu.params.invert_enabled;
                         log::info!("invert = {}", gpu.params.invert_enabled);
@@ -2002,17 +2009,48 @@ impl ApplicationHandler for App {
                         MenuAction::ToggleRecording => {
                             gpu.toggle_recording();
                         }
+                        MenuAction::TogglePanels => {
+                            if let Some(menu) = self.menu_bar.as_mut() {
+                                menu.toggle_params_panel();
+                            }
+                        }
                     }
                 }
+
+                // Apply parameter changes collected from the panel widgets.
+                let changes = self.menu_bar.as_mut()
+                    .map_or_else(Vec::new, |m| m.take_param_changes());
+                for change in changes {
+                    match change {
+                        ParamChange::FoldCount(v)            => gpu.params.fold_count = v,
+                        ParamChange::Zoom(v)                 => gpu.params.zoom = v,
+                        ParamChange::RotationSpeedScale(v)   => gpu.params.rotation_speed_scale = v,
+                        ParamChange::FrameSize(v)            => gpu.params.frame_size = v,
+                        ParamChange::FrameColorHue(v)        => gpu.params.frame_color_hue = v,
+                        ParamChange::InvertEnabled(v)        => gpu.params.invert_enabled = v,
+                        ParamChange::ColorizeEnabled(v)      => gpu.params.colorize_enabled = v,
+                        ParamChange::ColorizeHue(v)          => gpu.params.colorize_hue = v,
+                        ParamChange::ColorizeIntensity(v)    => gpu.params.colorize_intensity = v,
+                        ParamChange::DistortionEnabled(v)    => gpu.params.distortion_enabled = v,
+                        ParamChange::DistortionAmplitude(v)  => gpu.params.distortion_amplitude = v,
+                        ParamChange::DistortionFrequency(v)  => gpu.params.distortion_frequency = v,
+                        ParamChange::ShakeEnabled(v)         => gpu.params.shake_enabled = v,
+                        ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength = v,
+                        ParamChange::CurrentShape(v)         => gpu.params.current_shape = v,
+                        ParamChange::FrameShape(v)           => gpu.params.frame_shape = v,
+                        ParamChange::PainterKind(v)          => gpu.params.painter_kind = v,
+                    }
+                }
+
                 if let Some(fps) = self.fps.tick() {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24b — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24c — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24b — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24c — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2046,6 +2084,7 @@ fn main() {
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
     println!("  P      cycle painter (HueStripe → Spiral → Plasma)");
+    println!("  M      toggle parameters panel");
     println!("  ?      toggle help overlay");
     println!("  F11    toggle fullscreen");
     println!("  F12    toggle video recording (saves to ~/Videos/abstrakt-deck/)");

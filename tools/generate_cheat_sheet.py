@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 
 WIDTH = 800
-HEIGHT = 760
+HEIGHT = 780
 BG = (0, 0, 0, 220)        # dark translucent background
 HEADER = (255, 220, 80)     # gold for category headers
 KEY = (120, 220, 255)       # cyan for key labels
@@ -47,6 +47,7 @@ LINES = [
     ("CATEGORY", "WINDOW & RECORDING"),
     ("ENTRY", ("F11", "fullscreen toggle")),
     ("ENTRY", ("F12", "video recording toggle")),
+    ("ENTRY", ("M", "toggle parameters panel")),
     ("BLANK", ""),
     ("CATEGORY", "PRESETS"),
     ("ENTRY", ("Ctrl+S", "save preset")),
