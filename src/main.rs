@@ -1,7 +1,9 @@
 mod audio;
 mod cylinder;
+mod midi;
 use audio::{AudioCapture, AudioEvent};
 use cylinder::{build_cylinder, Vertex};
+use midi::{MidiCapture, MidiEvent};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -954,16 +956,68 @@ impl FpsCounter {
     }
 }
 
+fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
+    match event {
+        MidiEvent::ControlChange(cc, value) => {
+            let v = value as f32 / 127.0;
+            match cc {
+                1 => {
+                    gpu.fold_count = (2.0 + v * 22.0).round();
+                    log::debug!("MIDI CC1 → fold_count = {}", gpu.fold_count);
+                }
+                7 => {
+                    gpu.zoom = 0.3 + v * 1.2;
+                    log::debug!("MIDI CC7 → zoom = {:.2}", gpu.zoom);
+                }
+                10 => {
+                    gpu.rotation_speed_scale = v * 4.0;
+                    log::debug!("MIDI CC10 → rotation_speed_scale = {:.2}", gpu.rotation_speed_scale);
+                }
+                64 if value >= 64 => {
+                    gpu.frame_shape = match gpu.frame_shape {
+                        FrameShape::None    => FrameShape::Circle,
+                        FrameShape::Circle  => FrameShape::Square,
+                        FrameShape::Square  => FrameShape::Rounded,
+                        FrameShape::Rounded => FrameShape::Hexagon,
+                        FrameShape::Hexagon => FrameShape::Octagon,
+                        FrameShape::Octagon => FrameShape::Star,
+                        FrameShape::Star    => FrameShape::None,
+                    };
+                    log::debug!("MIDI CC64 → frame_shape cycled to {:?}", gpu.frame_shape);
+                }
+                71 => {
+                    gpu.frame_size = 0.4 + v * 0.6;
+                    log::debug!("MIDI CC71 → frame_size = {:.2}", gpu.frame_size);
+                }
+                74 => {
+                    gpu.frame_color_hue = v * 360.0;
+                    log::debug!("MIDI CC74 → frame_color_hue = {:.0}°", gpu.frame_color_hue);
+                }
+                _ => {
+                    log::trace!("MIDI CC {} value {} (unmapped)", cc, value);
+                }
+            }
+        }
+        MidiEvent::NoteOn(note, velocity) => {
+            let strength = velocity as f32 / 127.0;
+            gpu.kick_shake(strength);
+            log::debug!("MIDI Note On {} vel {} → shake {:.2}", note, velocity, strength);
+        }
+        MidiEvent::NoteOff(_) => {}
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     fps: FpsCounter,
     audio: Option<AudioCapture>,
+    midi: Option<MidiCapture>,
 }
 
 impl App {
     fn new() -> Self {
-        Self { window: None, gpu: None, fps: FpsCounter::new(), audio: None }
+        Self { window: None, gpu: None, fps: FpsCounter::new(), audio: None, midi: None }
     }
 }
 
@@ -972,7 +1026,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 9 — Keyboard control")
+            .with_title("abstrakt-deck — slice 10 — MIDI control")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -993,6 +1047,18 @@ impl ApplicationHandler for App {
             }
         };
         self.audio = audio;
+
+        let midi = match MidiCapture::start() {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::warn!(
+                    "MIDI capture failed: {} — visualizer will run without MIDI control",
+                    e
+                );
+                None
+            }
+        };
+        self.midi = midi;
     }
 
     fn window_event(
@@ -1095,6 +1161,11 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                if let Some(midi) = &self.midi {
+                    while let Ok(event) = midi.event_rx.try_recv() {
+                        apply_midi_event(gpu, event);
+                    }
+                }
                 match gpu.render() {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1110,7 +1181,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 9 — Keyboard control — {:.1} fps",
+                        "abstrakt-deck — slice 10 — MIDI control — {:.1} fps",
                         fps
                     ));
                 }
@@ -1134,7 +1205,15 @@ fn main() {
     println!("  - =    frame size");
     println!("  R G B  cycle frame color hue");
     println!("  space  toggle beat-reactive shake");
-    println!("  esc    exit\n");
+    println!("  esc    exit");
+    println!("\nMIDI control (if device connected):");
+    println!("  CC 1   fold count");
+    println!("  CC 7   zoom");
+    println!("  CC 10  rotation speed");
+    println!("  CC 64  cycle frame shape");
+    println!("  CC 71  frame size");
+    println!("  CC 74  frame color hue");
+    println!("  Note On  trigger shake (like a beat)\n");
 
     log::info!("abstrakt-deck starting");
 
