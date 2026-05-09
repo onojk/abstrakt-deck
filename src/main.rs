@@ -1,10 +1,12 @@
 mod audio;
 mod help_overlay;
+mod menu_bar;
 mod midi;
 mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
 use help_overlay::HelpOverlay;
+use menu_bar::MenuBar;
 use midi::{MidiCapture, MidiEvent};
 use recorder::Recorder;
 use shape::{ShapeKind, Vertex};
@@ -1180,7 +1182,7 @@ impl GpuState {
         self.readback_padded_bytes_per_row = rp;
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) -> Result<(), wgpu::SurfaceError> {
         let elapsed = self.start_time.elapsed().as_secs_f32();
 
         self.queue.write_buffer(
@@ -1396,6 +1398,19 @@ impl GpuState {
             pass.set_pipeline(&self.help_overlay.pipeline);
             pass.set_bind_group(0, &self.help_overlay.bind_group, &[]);
             pass.draw(0..6, 0..1);
+        }
+
+        // egui menu bar pass (draws on top of the visualizer, below recording readback)
+        if let Some((menu_bar, window)) = menu {
+            menu_bar.render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                window,
+                &screen_view,
+                self.size.width,
+                self.size.height,
+            );
         }
 
         // If recording: copy scene texture to readback buffer in the same encoder submit.
@@ -1628,6 +1643,7 @@ struct App {
     midi: Option<MidiCapture>,
     modifiers: winit::keyboard::ModifiersState,
     is_fullscreen: bool,
+    menu_bar: Option<MenuBar>,
 }
 
 impl App {
@@ -1640,6 +1656,7 @@ impl App {
             midi: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             is_fullscreen: false,
+            menu_bar: None,
         }
     }
 }
@@ -1649,14 +1666,16 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 19 — Recording")
+            .with_title("abstrakt-deck")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
         );
         let gpu = pollster::block_on(GpuState::new(window.clone()));
+        let menu_bar = MenuBar::new(&gpu.device, gpu.config.format, &window);
         self.window = Some(window);
         self.gpu = Some(gpu);
+        self.menu_bar = Some(menu_bar);
         log::info!("Window and GPU initialized");
 
         let audio = match AudioCapture::start() {
@@ -1690,6 +1709,21 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Forward events to egui before application handling.
+        let egui_consumed = if let (Some(menu), Some(window)) =
+            (self.menu_bar.as_mut(), self.window.as_ref())
+        {
+            menu.handle_event(window, &event).consumed
+        } else {
+            false
+        };
+        // Let Resized and RedrawRequested through regardless.
+        match &event {
+            WindowEvent::RedrawRequested | WindowEvent::Resized(_) => {}
+            _ if egui_consumed => return,
+            _ => {}
+        }
+
         let Some(gpu) = self.gpu.as_mut() else { return };
         let Some(window) = self.window.as_ref() else { return };
 
@@ -1887,7 +1921,9 @@ impl ApplicationHandler for App {
                     .map(|a| a.state.lock().bass_energy)
                     .unwrap_or(0.0);
                 gpu.update_bass_zoom(bass_energy);
-                match gpu.render() {
+                let menu = self.menu_bar.as_mut()
+                    .map(|m| (m, window.as_ref()));
+                match gpu.render(menu) {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                         gpu.resize(gpu.size);
@@ -1900,15 +1936,20 @@ impl ApplicationHandler for App {
                         log::warn!("Surface error: {:?}", e);
                     }
                 }
+                if self.menu_bar.as_ref().map_or(false, |m| m.quit_requested) {
+                    log::info!("Quit via menu");
+                    event_loop.exit();
+                    return;
+                }
                 if let Some(fps) = self.fps.tick() {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 19 — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24a — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 19 — Recording — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24a — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
