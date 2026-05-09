@@ -25,6 +25,12 @@ glam = "0.29"
 # Zero-copy byte casting for GPU buffer uploads
 bytemuck = { version = "1.19", features = ["derive"] }
 
+# Audio capture + analysis
+cpal = "0.15"
+realfft = "3.4"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -1,4 +1,6 @@
+mod audio;
 mod cylinder;
+use audio::{AudioCapture, AudioEvent};
 use cylinder::{build_cylinder, Vertex};
 
 use std::sync::Arc;
@@ -117,6 +119,9 @@ struct GpuState {
     shape_sampler: wgpu::Sampler,   // ClampToEdge sampler reused by kaleido + frame passes
 
     start_time: Instant,
+
+    shake_offset: glam::Vec3,
+    shake_velocity: glam::Vec3,
 }
 
 impl GpuState {
@@ -631,6 +636,8 @@ impl GpuState {
             frame_uniforms_buffer, frame_bgl, frame_bind_group, frame_pipeline,
             shape_sampler,
             start_time: Instant::now(),
+            shake_offset: glam::Vec3::ZERO,
+            shake_velocity: glam::Vec3::ZERO,
         }
     }
 
@@ -726,7 +733,16 @@ impl GpuState {
         let cam = glam::Mat4::look_at_rh(
             glam::Vec3::new(0.0, 0.5, 3.0), glam::Vec3::ZERO, glam::Vec3::Y,
         );
-        let model = glam::Mat4::from_rotation_y(elapsed * (std::f32::consts::TAU / 30.0));
+        // Spring-damping decay of shake offset toward zero
+        let dt = 1.0 / 60.0;
+        let stiffness = 30.0_f32;
+        let damping = 8.0_f32;
+        let force = -stiffness * self.shake_offset - damping * self.shake_velocity;
+        self.shake_velocity += force * dt;
+        self.shake_offset += self.shake_velocity * dt;
+
+        let model = glam::Mat4::from_translation(self.shake_offset)
+            * glam::Mat4::from_rotation_y(elapsed * (std::f32::consts::TAU / 30.0));
         self.queue.write_buffer(
             &self.transform_buffer, 0,
             bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]),
@@ -830,6 +846,13 @@ impl GpuState {
         output.present();
         Ok(())
     }
+
+    pub fn kick_shake(&mut self, strength: f32) {
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+        let angle = (elapsed * 13.7) % std::f32::consts::TAU;
+        let dir = glam::Vec3::new(angle.cos(), 0.0, angle.sin());
+        self.shake_velocity += dir * strength * 0.75;
+    }
 }
 
 struct FpsCounter {
@@ -861,11 +884,12 @@ struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     fps: FpsCounter,
+    audio: Option<AudioCapture>,
 }
 
 impl App {
     fn new() -> Self {
-        Self { window: None, gpu: None, fps: FpsCounter::new() }
+        Self { window: None, gpu: None, fps: FpsCounter::new(), audio: None }
     }
 }
 
@@ -874,7 +898,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 7")
+            .with_title("abstrakt-deck — slice 8 — Beat-reactive")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -883,6 +907,18 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.gpu = Some(gpu);
         log::info!("Window and GPU initialized");
+
+        let audio = match AudioCapture::start() {
+            Ok(a) => Some(a),
+            Err(e) => {
+                log::warn!(
+                    "Audio capture failed: {} — visualizer will run without audio reactivity",
+                    e
+                );
+                None
+            }
+        };
+        self.audio = audio;
     }
 
     fn window_event(
@@ -914,6 +950,13 @@ impl ApplicationHandler for App {
                 gpu.resize(physical_size);
             }
             WindowEvent::RedrawRequested => {
+                if let Some(audio) = &self.audio {
+                    while let Ok(event) = audio.event_rx.try_recv() {
+                        match event {
+                            AudioEvent::Beat(strength) => gpu.kick_shake(strength),
+                        }
+                    }
+                }
                 match gpu.render() {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -929,7 +972,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 7 — Kaleido+Frame — {:.1} fps",
+                        "abstrakt-deck — slice 8 — Beat-reactive — {:.1} fps",
                         fps
                     ));
                 }
