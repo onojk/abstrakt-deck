@@ -3,9 +3,6 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-// Matches the Rust GlobalUniforms struct exactly (all f32, 16 bytes total).
-// Using separate f32 fields rather than vec2 avoids the vec2 8-byte alignment
-// offset that would mismatch the Rust-side layout.
 struct GlobalUniforms {
     time_seconds: f32,
     resolution_x: f32,
@@ -17,8 +14,6 @@ struct GlobalUniforms {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Fullscreen triangle: 3 vertices form a triangle larger than the screen,
-    // clipped to the viewport — every pixel covered, zero overdraw.
     let x = f32((vertex_index << 1u) & 2u);
     let y = f32(vertex_index & 2u);
     var out: VertexOutput;
@@ -27,16 +22,35 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// HSV → RGB. h in [0,1) (not degrees), s and v in [0,1].
+fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let h6 = h * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - abs((h6 % 2.0) - 1.0));
+    let m = v - c;
+    var rgb: vec3<f32>;
+    if h6 < 1.0      { rgb = vec3<f32>(c, x, 0.0); }
+    else if h6 < 2.0 { rgb = vec3<f32>(x, c, 0.0); }
+    else if h6 < 3.0 { rgb = vec3<f32>(0.0, c, x); }
+    else if h6 < 4.0 { rgb = vec3<f32>(0.0, x, c); }
+    else if h6 < 5.0 { rgb = vec3<f32>(x, 0.0, c); }
+    else             { rgb = vec3<f32>(c, 0.0, x); }
+    return rgb + vec3<f32>(m);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.uv;
-    let t = globals.time_seconds;
+    let t  = globals.time_seconds;
 
-    // Animated UV gradient: each channel driven by a sine wave at a different
-    // frequency so all three cycle independently, confirming uniforms reach the shader.
-    let r = 0.5 + 0.5 * sin(uv.x * 6.28318 + t);
-    let g = 0.5 + 0.5 * sin(uv.y * 6.28318 + t * 1.3);
-    let b = 0.5 + 0.5 * sin((uv.x + uv.y) * 6.28318 + t * 0.7);
+    // Hue Stripe painter — vertical color bands scrolling left over time.
+    // Port of PAINTER_HUESTRIPE_FRAG from abstrakt-engine (GLSL → WGSL).
+    let stripe_count  = 6.0;
+    let scroll_speed  = 0.05;   // hue cycles per second
+    let hue = fract(uv.x * stripe_count - t * scroll_speed * stripe_count);
 
-    return vec4<f32>(r, g, b, 1.0);
+    // Brightness peaks at vertical centre, dims toward top/bottom edges.
+    let brightness = 1.0 - abs(uv.y - 0.5) * 0.6;
+
+    return vec4<f32>(hsv2rgb(hue, 1.0, brightness), 1.0);
 }

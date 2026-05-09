@@ -295,7 +295,7 @@ impl ApplicationHandler for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 2")
+            .with_title("abstrakt-deck — slice 3")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = Arc::new(
@@ -355,7 +355,7 @@ impl ApplicationHandler for App {
 
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 2 — {:.1} fps",
+                        "abstrakt-deck — slice 3 — Hue Stripe — {:.1} fps",
                         fps
                     ));
                 }
