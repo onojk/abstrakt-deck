@@ -101,6 +101,31 @@ impl FrameShape {
     fn as_f32(self) -> f32 { self as i32 as f32 }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PainterKind {
+    HueStripe,
+    Spiral,
+    Plasma,
+}
+
+impl PainterKind {
+    pub fn next(self) -> Self {
+        match self {
+            PainterKind::HueStripe => PainterKind::Spiral,
+            PainterKind::Spiral    => PainterKind::Plasma,
+            PainterKind::Plasma    => PainterKind::HueStripe,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PainterKind::HueStripe => "HueStripe",
+            PainterKind::Spiral    => "Spiral",
+            PainterKind::Plasma    => "Plasma",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisualParams {
     pub current_shape: ShapeKind,
@@ -119,6 +144,7 @@ pub struct VisualParams {
     pub distortion_frequency: f32,
     pub shake_enabled: bool,
     pub bass_zoom_strength: f32,
+    pub painter_kind: PainterKind,
 }
 
 impl Default for VisualParams {
@@ -140,6 +166,7 @@ impl Default for VisualParams {
             distortion_frequency: 3.0,
             shake_enabled: true,
             bass_zoom_strength: 0.3,
+            painter_kind: PainterKind::HueStripe,
         }
     }
 }
@@ -179,6 +206,7 @@ struct Preset {
     distortion_frequency: f32,
     shake_enabled: bool,
     bass_zoom_strength: f32,
+    painter_kind: String,
 }
 
 impl Preset {
@@ -200,6 +228,7 @@ impl Preset {
             distortion_frequency: params.distortion_frequency,
             shake_enabled: params.shake_enabled,
             bass_zoom_strength: params.bass_zoom_strength,
+            painter_kind: params.painter_kind.name().to_string(),
         }
     }
 
@@ -233,6 +262,11 @@ impl Preset {
         params.distortion_frequency = self.distortion_frequency;
         params.shake_enabled = self.shake_enabled;
         params.bass_zoom_strength = self.bass_zoom_strength;
+        params.painter_kind = match self.painter_kind.as_str() {
+            "Spiral" => PainterKind::Spiral,
+            "Plasma" => PainterKind::Plasma,
+            _        => PainterKind::HueStripe,
+        };
     }
 }
 
@@ -283,9 +317,9 @@ struct GpuState {
 
     uniforms_buffer: wgpu::Buffer,
 
-    // Pass 1 — painter (Hue Stripe procedural → fixed 2048×1024)
+    // Pass 1 — painter (procedural → fixed 2048×1024)
     painter_uniforms_bind_group: wgpu::BindGroup,
-    painter_pipeline: wgpu::RenderPipeline,
+    painter_pipelines: HashMap<PainterKind, wgpu::RenderPipeline>,
     #[allow(dead_code)]
     painter_texture: wgpu::Texture,
     painter_view: wgpu::TextureView,
@@ -731,37 +765,48 @@ impl GpuState {
         });
 
         // ── Pipelines ─────────────────────────────────────────────────────────
-        let painter_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Painter shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fullscreen.wgsl").into()),
-        });
-        let painter_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Painter pipeline"),
-                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None, bind_group_layouts: &[&uniforms_bgl], push_constant_ranges: &[],
-                })),
-                vertex: wgpu::VertexState {
-                    module: &painter_shader, entry_point: Some("vs_main"),
-                    buffers: &[], compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &painter_shader, entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None, cache: None,
+        let painter_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None, bind_group_layouts: &[&uniforms_bgl], push_constant_ranges: &[],
             });
+        let painter_shaders: &[(PainterKind, &str)] = &[
+            (PainterKind::HueStripe, include_str!("shaders/painter_huestripe.wgsl")),
+            (PainterKind::Spiral,    include_str!("shaders/painter_spiral.wgsl")),
+            (PainterKind::Plasma,    include_str!("shaders/painter_plasma.wgsl")),
+        ];
+        let mut painter_pipelines = HashMap::new();
+        for (kind, src) in painter_shaders {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(kind.name()),
+                source: wgpu::ShaderSource::Wgsl((*src).into()),
+            });
+            let pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(kind.name()),
+                    layout: Some(&painter_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module, entry_point: Some("vs_main"),
+                        buffers: &[], compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module, entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None, cache: None,
+                });
+            painter_pipelines.insert(*kind, pipeline);
+        }
 
         let shape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shape shader"),
@@ -872,7 +917,7 @@ impl GpuState {
         Self {
             surface, device, queue, config, size,
             uniforms_buffer,
-            painter_uniforms_bind_group, painter_pipeline,
+            painter_uniforms_bind_group, painter_pipelines,
             painter_texture, painter_view, painter_sampler,
             shape_texture, shape_view, shape_depth, shape_depth_view,
             shape_buffers,
@@ -1047,7 +1092,7 @@ impl GpuState {
                 label: Some("Frame encoder"),
             });
 
-        // Pass 1: Hue Stripe → painter FBO
+        // Pass 1: painter → painter FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Painter pass"),
@@ -1061,7 +1106,8 @@ impl GpuState {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            pass.set_pipeline(&self.painter_pipeline);
+            let painter_pipeline = &self.painter_pipelines[&self.params.painter_kind];
+            pass.set_pipeline(painter_pipeline);
             pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -1256,6 +1302,10 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                     gpu.params.distortion_frequency = 0.5 + v * 7.5;
                     log::debug!("MIDI CC82 → distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                 }
+                66 if value >= 64 => {
+                    gpu.params.painter_kind = gpu.params.painter_kind.next();
+                    log::debug!("MIDI CC66 → painter: {}", gpu.params.painter_kind.name());
+                }
                 _ => {
                     log::trace!("MIDI CC {} value {} (unmapped)", cc, value);
                 }
@@ -1297,7 +1347,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() { return; }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 16 — Tests + CI")
+            .with_title("abstrakt-deck — slice 17 — Multi-painter")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
@@ -1484,6 +1534,10 @@ impl ApplicationHandler for App {
                         gpu.params.distortion_frequency = (gpu.params.distortion_frequency + 0.5).min(8.0);
                         log::info!("distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                     }
+                    KeyCode::KeyP => {
+                        gpu.params.painter_kind = gpu.params.painter_kind.next();
+                        log::info!("painter: {}", gpu.params.painter_kind.name());
+                    }
                     _ => {}
                 }
             }
@@ -1529,7 +1583,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 16 — Tests + CI — {:.1} fps",
+                        "abstrakt-deck — slice 17 — Multi-painter — {:.1} fps",
                         fps
                     ));
                 }
@@ -1562,6 +1616,7 @@ fn main() {
     println!("  D      toggle distortion");
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
+    println!("  P      cycle painter (HueStripe → Spiral → Plasma)");
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
     println!("  Ctrl+L load preset from same file");
     println!("  esc    exit");
@@ -1581,6 +1636,7 @@ fn main() {
     println!("  CC 80  distortion toggle");
     println!("  CC 81  distortion amplitude");
     println!("  CC 82  distortion frequency");
+    println!("  CC 66  cycle painter (HueStripe → Spiral → Plasma)");
     println!("  Note On  trigger shake (like a beat)\n");
 
     log::info!("abstrakt-deck starting");
@@ -1616,6 +1672,7 @@ mod tests {
             distortion_frequency: 6.0,
             shake_enabled: false,
             bass_zoom_strength: 0.8,
+            painter_kind: PainterKind::Plasma,
         }
     }
 
@@ -1646,6 +1703,7 @@ mod tests {
         assert_eq!(restored.distortion_frequency, original.distortion_frequency, "distortion_frequency failed");
         assert_eq!(restored.shake_enabled, original.shake_enabled, "shake_enabled failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
+        assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");
     }
 
     #[test]
@@ -1679,6 +1737,19 @@ mod tests {
                 _         => FrameShape::Hexagon,
             };
             assert_eq!(parsed, shape, "FrameShape {:?} did not round-trip via Debug format", shape);
+        }
+    }
+
+    #[test]
+    fn painter_kind_name_roundtrip() {
+        for kind in [PainterKind::HueStripe, PainterKind::Spiral, PainterKind::Plasma] {
+            let name = kind.name();
+            let parsed = match name {
+                "Spiral" => PainterKind::Spiral,
+                "Plasma" => PainterKind::Plasma,
+                _        => PainterKind::HueStripe,
+            };
+            assert_eq!(parsed, kind, "PainterKind {:?} did not round-trip via name()", kind);
         }
     }
 }
