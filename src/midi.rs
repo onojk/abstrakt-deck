@@ -24,6 +24,12 @@ impl MidiCapture {
             return Err("No MIDI input ports available".to_string());
         }
 
+        for p in &ports {
+            let name = midi_in.port_name(p).unwrap_or_else(|_| "<unknown>".to_string());
+            log::info!("MIDI port available: {}", name);
+        }
+
+        // Priority: VMPK by name → "MIDI Out" (VMPK's actual port label) → non-Through → first port
         let port = ports
             .iter()
             .find(|p| {
@@ -31,6 +37,14 @@ impl MidiCapture {
                     .port_name(p)
                     .map(|n| n.to_lowercase().contains("vmpk"))
                     .unwrap_or(false)
+            })
+            .or_else(|| {
+                ports.iter().find(|p| {
+                    midi_in
+                        .port_name(p)
+                        .map(|n| n.to_lowercase().contains("midi out"))
+                        .unwrap_or(false)
+                })
             })
             .or_else(|| {
                 ports.iter().find(|p| {
@@ -45,7 +59,7 @@ impl MidiCapture {
         let port_name = midi_in
             .port_name(port)
             .unwrap_or_else(|_| "<unknown>".to_string());
-        log::info!("MIDI port: {}", port_name);
+        log::info!("MIDI port selected: {}", port_name);
 
         let (event_tx, event_rx) = bounded::<MidiEvent>(256);
 
@@ -54,20 +68,16 @@ impl MidiCapture {
                 port,
                 "abstrakt-deck-midi",
                 move |_timestamp, message, _| {
-                    if message.len() < 2 {
-                        return;
-                    }
+                    if message.is_empty() { return; }
                     let status = message[0] & 0xF0;
 
                     let event = match status {
-                        0x80 => Some(MidiEvent::NoteOff(message[1])),
-                        0x90 => {
-                            if message.len() >= 3 && message[2] == 0 {
+                        0x80 if message.len() >= 2 => Some(MidiEvent::NoteOff(message[1])),
+                        0x90 if message.len() >= 3 => {
+                            if message[2] == 0 {
                                 Some(MidiEvent::NoteOff(message[1]))
-                            } else if message.len() >= 3 {
-                                Some(MidiEvent::NoteOn(message[1], message[2]))
                             } else {
-                                None
+                                Some(MidiEvent::NoteOn(message[1], message[2]))
                             }
                         }
                         0xB0 if message.len() >= 3 => {
