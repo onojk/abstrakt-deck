@@ -1590,6 +1590,7 @@ struct App {
     audio: Option<AudioCapture>,
     midi: Option<MidiCapture>,
     modifiers: winit::keyboard::ModifiersState,
+    is_fullscreen: bool,
 }
 
 impl App {
@@ -1601,6 +1602,7 @@ impl App {
             audio: None,
             midi: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
+            is_fullscreen: false,
         }
     }
 }
@@ -1804,6 +1806,15 @@ impl ApplicationHandler for App {
                     KeyCode::F12 => {
                         gpu.toggle_recording();
                     }
+                    KeyCode::F11 => {
+                        self.is_fullscreen = !self.is_fullscreen;
+                        window.set_fullscreen(if self.is_fullscreen {
+                            Some(winit::window::Fullscreen::Borderless(None))
+                        } else {
+                            None
+                        });
+                        log::info!("Fullscreen: {}", self.is_fullscreen);
+                    }
                     _ => {}
                 }
             }
@@ -1889,6 +1900,7 @@ fn main() {
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
     println!("  P      cycle painter (HueStripe → Spiral → Plasma)");
+    println!("  F11    toggle fullscreen");
     println!("  F12    toggle video recording (saves to ~/Videos/abstrakt-deck/)");
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
     println!("  Ctrl+L load preset from same file");

@@ -85,6 +85,7 @@ The visualizer opens in a 1280×720 window. Click the window for focus before us
 | `E` / `F` | decrease / increase distortion frequency |
 | `/` / `'` | decrease / increase bass-zoom intensity |
 | `Space` | toggle beat-reactive shake |
+| `F11` | toggle fullscreen (borderless, current monitor) |
 | `F12` | toggle video recording (saves to `~/Videos/abstrakt-deck/`) |
 | `Ctrl+S` | save preset to `~/.config/abstrakt-deck/preset.json` |
 | `Ctrl+L` | load preset |
