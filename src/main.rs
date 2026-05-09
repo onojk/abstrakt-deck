@@ -8,6 +8,9 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+const PAINTER_TEXTURE_WIDTH: u32 = 2048;
+const PAINTER_TEXTURE_HEIGHT: u32 = 1024;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobalUniforms {
@@ -23,9 +26,19 @@ struct GpuState {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+    // Uniforms
     uniforms_buffer: wgpu::Buffer,
-    uniforms_bind_group: wgpu::BindGroup,
-    pipeline: wgpu::RenderPipeline,
+    // Pass 1 — painter renders procedural content to offscreen texture
+    painter_uniforms_bind_group: wgpu::BindGroup,
+    painter_pipeline: wgpu::RenderPipeline,
+    #[allow(dead_code)] // kept for resource lifetime; resize will recreate the view
+    painter_texture: wgpu::Texture,
+    painter_view: wgpu::TextureView,
+    #[allow(dead_code)] // kept for resource lifetime; bind group holds the GPU ref
+    painter_sampler: wgpu::Sampler,
+    // Pass 2 — composite blits the painter texture to the swapchain
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_bind_group: wgpu::BindGroup,
     start_time: Instant,
 }
 
@@ -38,7 +51,8 @@ impl GpuState {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window.clone())
+        let surface = instance
+            .create_surface(window.clone())
             .expect("Failed to create surface");
 
         let adapter = instance
@@ -66,7 +80,9 @@ impl GpuState {
             .expect("Failed to create device");
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter()
+        let surface_format = surface_caps
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
@@ -84,15 +100,36 @@ impl GpuState {
 
         surface.configure(&device, &config);
 
-        // Shader
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Fullscreen shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("shaders/fullscreen.wgsl").into(),
-            ),
+        // --- Painter offscreen texture ---
+        let painter_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Painter texture"),
+            size: wgpu::Extent3d {
+                width: PAINTER_TEXTURE_WIDTH,
+                height: PAINTER_TEXTURE_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
         });
 
-        // Uniform buffer
+        let painter_view = painter_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let painter_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Painter sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,   // wraps for future cylinder use
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // --- Uniforms (shared by painter pass) ---
         let initial_uniforms = GlobalUniforms {
             time_seconds: 0.0,
             resolution_x: size.width as f32,
@@ -106,7 +143,6 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Bind group layout
         let uniforms_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Uniforms bind group layout"),
@@ -122,62 +158,162 @@ impl GpuState {
                 }],
             });
 
-        // Bind group
-        let uniforms_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Uniforms bind group"),
-            layout: &uniforms_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms_buffer.as_entire_binding(),
-            }],
+        let painter_uniforms_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Painter uniforms bind group"),
+                layout: &uniforms_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms_buffer.as_entire_binding(),
+                }],
+            });
+
+        // --- Painter pipeline (procedural → Rgba8Unorm texture) ---
+        let painter_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Painter shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/fullscreen.wgsl").into(),
+            ),
         });
 
-        // Pipeline layout
-        let pipeline_layout =
+        let painter_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Pipeline layout"),
+                label: Some("Painter pipeline layout"),
                 bind_group_layouts: &[&uniforms_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
-        // Render pipeline
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Fullscreen pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
+        let painter_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Painter pipeline"),
+                layout: Some(&painter_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &painter_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &painter_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        // Must match painter_texture format exactly.
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            });
+
+        // --- Composite pipeline (painter texture → swapchain) ---
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Composite shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/composite.wgsl").into(),
+            ),
         });
+
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Composite bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Composite bind group"),
+            layout: &composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&painter_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&painter_sampler),
+                },
+            ],
+        });
+
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Composite pipeline layout"),
+                bind_group_layouts: &[&composite_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let composite_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Composite pipeline"),
+                layout: Some(&composite_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format, // composite → sRGB swapchain
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            });
 
         Self {
             surface,
@@ -186,8 +322,13 @@ impl GpuState {
             config,
             size,
             uniforms_buffer,
-            uniforms_bind_group,
-            pipeline,
+            painter_uniforms_bind_group,
+            painter_pipeline,
+            painter_texture,
+            painter_view,
+            painter_sampler,
+            composite_pipeline,
+            composite_bind_group,
             start_time: Instant::now(),
         }
     }
@@ -202,7 +343,7 @@ impl GpuState {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // Upload uniforms for this frame
+        // Upload uniforms
         let uniforms = GlobalUniforms {
             time_seconds: self.start_time.elapsed().as_secs_f32(),
             resolution_x: self.size.width as f32,
@@ -216,32 +357,56 @@ impl GpuState {
         );
 
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let screen_view =
+            output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder =
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
+                label: Some("Frame encoder"),
             });
 
+        // Pass 1: painter → offscreen Rgba8Unorm texture
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Fullscreen Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
+            let mut painter_pass =
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Painter pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.painter_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+            painter_pass.set_pipeline(&self.painter_pipeline);
+            painter_pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
+            painter_pass.draw(0..3, 0..1);
+        }
 
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.uniforms_bind_group, &[]);
-            render_pass.draw(0..3, 0..1);
+        // Pass 2: composite painter texture → swapchain
+        {
+            let mut composite_pass =
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Composite pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &screen_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+            composite_pass.set_pipeline(&self.composite_pipeline);
+            composite_pass.set_bind_group(0, &self.composite_bind_group, &[]);
+            composite_pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -295,7 +460,7 @@ impl ApplicationHandler for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("abstrakt-deck — slice 3")
+            .with_title("abstrakt-deck — slice 4")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = Arc::new(
@@ -355,7 +520,7 @@ impl ApplicationHandler for App {
 
                 if let Some(fps) = self.fps.tick() {
                     window.set_title(&format!(
-                        "abstrakt-deck — slice 3 — Hue Stripe — {:.1} fps",
+                        "abstrakt-deck — slice 4 — Hue Stripe — {:.1} fps",
                         fps
                     ));
                 }
