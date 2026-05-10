@@ -30,6 +30,7 @@ pub enum LockTarget {
 #[derive(Debug)]
 pub enum MenuAction {
     OpenSkin,
+    OpenAudio,
     SavePreset,
     LoadPreset,
     Quit,
@@ -207,6 +208,10 @@ impl MenuBar {
                     ui.menu_button("File", |ui| {
                         if ui.button("Open Skin...").clicked() {
                             frame_actions.push(MenuAction::OpenSkin);
+                            ui.close_menu();
+                        }
+                        if ui.button("Open Audio...").clicked() {
+                            frame_actions.push(MenuAction::OpenAudio);
                             ui.close_menu();
                         }
                         ui.separator();

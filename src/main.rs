@@ -521,6 +521,171 @@ fn decode_and_validate_skin(path: &std::path::Path) -> Result<image::DynamicImag
     image::open(path).map_err(|e| e.to_string())
 }
 
+pub struct LoadedAudio {
+    pub samples:          Vec<f32>,   // interleaved: L,R,L,R,... (or mono repeated for stereo)
+    pub sample_rate:      u32,
+    pub channels:         u16,
+    pub duration_seconds: f32,
+    pub source_path:      String,
+}
+
+impl LoadedAudio {
+    pub fn duration_samples(&self) -> usize {
+        self.samples.len() / self.channels as usize
+    }
+
+    pub fn sample_at_time(&self, time_seconds: f32) -> (f32, f32) {
+        let frame_index = time_seconds * self.sample_rate as f32;
+        let frame_floor = frame_index.floor() as usize;
+        if frame_floor >= self.duration_samples() {
+            return (0.0, 0.0);
+        }
+        let i = frame_floor * self.channels as usize;
+        if self.channels == 1 {
+            let s = self.samples.get(i).copied().unwrap_or(0.0);
+            (s, s)
+        } else {
+            let l = self.samples.get(i).copied().unwrap_or(0.0);
+            let r = self.samples.get(i + 1).copied().unwrap_or(0.0);
+            (l, r)
+        }
+    }
+}
+
+fn decode_audio_file(path: &std::path::Path) -> Result<LoadedAudio, String> {
+    use symphonia::core::audio::{AudioBufferRef, Signal};
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::errors::Error as SymphoniaError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    const MAX_FILE_BYTES: u64 = 200 * 1024 * 1024;
+
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("can't read file metadata: {}", e))?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "audio file too large ({} MB, max 200 MB)",
+            metadata.len() / 1024 / 1024
+        ));
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("can't open file: {}", e))?;
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("format probe failed: {}", e))?;
+
+    let mut format_reader = probed.format;
+
+    let track = format_reader
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| "no audio track found".to_string())?;
+
+    let track_id     = track.id;
+    let codec_params = track.codec_params.clone();
+
+    let sample_rate = codec_params.sample_rate
+        .ok_or_else(|| "no sample rate in codec params".to_string())?;
+    let channel_count = codec_params.channels
+        .ok_or_else(|| "no channels in codec params".to_string())?
+        .count() as u16;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("decoder creation failed: {}", e))?;
+
+    let mut samples: Vec<f32> = Vec::new();
+
+    loop {
+        let packet = match format_reader.next_packet() {
+            Ok(p) => p,
+            Err(SymphoniaError::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("packet read error: {}", e)),
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                let ch = channel_count as usize;
+                match decoded {
+                    AudioBufferRef::F32(buf) => {
+                        for f in 0..buf.frames() {
+                            for c in 0..ch { samples.push(buf.chan(c)[f]); }
+                        }
+                    }
+                    AudioBufferRef::F64(buf) => {
+                        for f in 0..buf.frames() {
+                            for c in 0..ch { samples.push(buf.chan(c)[f] as f32); }
+                        }
+                    }
+                    AudioBufferRef::S32(buf) => {
+                        for f in 0..buf.frames() {
+                            for c in 0..ch { samples.push(buf.chan(c)[f] as f32 / i32::MAX as f32); }
+                        }
+                    }
+                    AudioBufferRef::S24(buf) => {
+                        for f in 0..buf.frames() {
+                            for c in 0..ch { samples.push(buf.chan(c)[f].inner() as f32 / 8_388_607.0); }
+                        }
+                    }
+                    AudioBufferRef::S16(buf) => {
+                        for f in 0..buf.frames() {
+                            for c in 0..ch { samples.push(buf.chan(c)[f] as f32 / i16::MAX as f32); }
+                        }
+                    }
+                    AudioBufferRef::U8(buf) => {
+                        for f in 0..buf.frames() {
+                            for c in 0..ch { samples.push((buf.chan(c)[f] as f32 - 128.0) / 128.0); }
+                        }
+                    }
+                    _ => return Err("unsupported sample format".to_string()),
+                }
+            }
+            Err(SymphoniaError::DecodeError(e)) => {
+                log::warn!("decode error (skipping packet): {}", e);
+            }
+            Err(e) => return Err(format!("fatal decode error: {}", e)),
+        }
+    }
+
+    if samples.is_empty() {
+        return Err("decoded zero samples".to_string());
+    }
+
+    let duration_seconds = (samples.len() / channel_count as usize) as f32 / sample_rate as f32;
+
+    log::info!(
+        "Loaded audio: {} samples, {} channels, {} Hz, {:.2}s — {}",
+        samples.len(), channel_count, sample_rate, duration_seconds,
+        path.display()
+    );
+
+    Ok(LoadedAudio {
+        samples,
+        sample_rate,
+        channels: channel_count,
+        duration_seconds,
+        source_path: path.display().to_string(),
+    })
+}
+
 fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32) -> Vec<u8> {
     use image::GenericImageView;
     let (src_w, src_h) = img.dimensions();
@@ -665,6 +830,7 @@ struct GpuState {
 
     pub skin_source_image: Option<image::DynamicImage>,
     pub crop_y_offset: f32,
+    pub loaded_audio: Option<LoadedAudio>,
 
     // Autonomous mode state
     last_random_change:    std::time::Instant,
@@ -1456,6 +1622,7 @@ impl GpuState {
             painter_scroll_phase: 0.0,
             skin_source_image: None,
             crop_y_offset: 0.5,
+            loaded_audio: None,
             last_random_change:    Instant::now(),
             last_reactive_trigger: Instant::now(),
             last_party_trigger:    Instant::now(),
@@ -2584,6 +2751,24 @@ impl ApplicationHandler for App {
                                 }
                             } else {
                                 log::info!("Open Skin canceled");
+                            }
+                        }
+                        MenuAction::OpenAudio => {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Audio", &["mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "aiff", "wv"])
+                                .set_title("Select audio file")
+                                .pick_file()
+                            {
+                                log::info!("Loading audio from {}", path.display());
+                                match decode_audio_file(&path) {
+                                    Ok(audio) => {
+                                        gpu.loaded_audio = Some(audio);
+                                        log::info!("Audio loaded successfully");
+                                    }
+                                    Err(e) => log::error!("Audio load failed: {}", e),
+                                }
+                            } else {
+                                log::info!("Open Audio canceled");
                             }
                         }
                         MenuAction::SavePreset => {
