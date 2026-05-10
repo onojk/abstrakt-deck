@@ -10,7 +10,7 @@ struct FrameUniforms {
     frame_color_g: f32,
     frame_color_b: f32,
     frame_color_a: f32,
-    // 0 = none, 1 = circle, 2 = square, 3 = rounded, 4 = hexagon, 5 = octagon, 6 = star
+    // 0 = none, 1 = circle, 2 = square, 3 = rounded, 4 = hexagon, 5 = octagon, 6 = flower, 7 = star
     frame_shape:   f32,
     frame_size:    f32,  // fraction of half-screen the frame inscribes, typically 0.7–0.95
 };
@@ -55,26 +55,14 @@ fn sdf_polygon(p: vec2<f32>, r: f32, sides: f32) -> f32 {
     return length(p) * cos(folded_angle) - r;
 }
 
-// Rounded-petal flower (5 petals). Same petal-edge-projection as sdf_star but with
-// a larger inner radius ratio (0.55) making the indents shallower and petal tips rounder.
-fn sdf_flower(p: vec2<f32>, r: f32) -> f32 {
-    let num_points = 5.0;
-    let inner_r    = r * 0.55;
-
-    let angle    = atan2(p.y, p.x);
-    let radius   = length(p);
-    let segment  = TAU / num_points;
-    let half_seg = segment * 0.5;
-
-    let local = ((angle % segment) + segment) % segment - half_seg;
-
-    let tip    = vec2<f32>(r,                          0.0);
-    let corner = vec2<f32>(inner_r * cos(half_seg), inner_r * sin(half_seg));
-    let edge_dir    = normalize(corner - tip);
-    let edge_normal = vec2<f32>(-edge_dir.y, edge_dir.x);
-
-    let local_p = vec2<f32>(radius * cos(local), radius * sin(abs(local)));
-    return -dot(local_p - tip, edge_normal);
+// 5-petal flower via cos-modulated radius. Curved convex petals, visually distinct from Star.
+// Petal tips at base_r+petal_amp, waist dips at base_r-petal_amp.
+fn sdf_flower(p: vec2<f32>, num_petals: f32, base_r: f32, petal_amp: f32) -> f32 {
+    let angle   = atan2(p.y, p.x);
+    let radius  = length(p);
+    let petal_r = base_r + petal_amp * cos(num_petals * angle);
+    // Negative inside shape, positive outside — matches frame.wgsl sign convention.
+    return radius - petal_r;
 }
 
 // Sharp 5-pointed star. inner_r = 0.4 × r gives deep concave indents and pointed tips.
@@ -128,7 +116,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else if frame.frame_shape < 5.5 {
         dist = sdf_polygon(p, r, 8.0);   // octagon
     } else if frame.frame_shape < 6.5 {
-        dist = sdf_flower(p, r);
+        dist = sdf_flower(p, 5.0, r * 0.7, r * 0.3);
     } else {
         dist = sdf_star(p, r);
     }
