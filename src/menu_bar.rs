@@ -288,6 +288,7 @@ impl MenuBar {
                         crate::PainterKind::HueStripe,
                         crate::PainterKind::Spiral,
                         crate::PainterKind::Plasma,
+                        crate::PainterKind::Skin,
                     ] {
                         ui.selectable_value(&mut painter, v, v.name());
                     }

@@ -119,6 +119,7 @@ pub enum PainterKind {
     HueStripe,
     Spiral,
     Plasma,
+    Skin,
 }
 
 impl PainterKind {
@@ -126,7 +127,8 @@ impl PainterKind {
         match self {
             PainterKind::HueStripe => PainterKind::Spiral,
             PainterKind::Spiral    => PainterKind::Plasma,
-            PainterKind::Plasma    => PainterKind::HueStripe,
+            PainterKind::Plasma    => PainterKind::Skin,
+            PainterKind::Skin      => PainterKind::HueStripe,
         }
     }
 
@@ -135,6 +137,7 @@ impl PainterKind {
             PainterKind::HueStripe => "HueStripe",
             PainterKind::Spiral    => "Spiral",
             PainterKind::Plasma    => "Plasma",
+            PainterKind::Skin      => "Skin",
         }
     }
 }
@@ -278,9 +281,31 @@ impl Preset {
         params.painter_kind = match self.painter_kind.as_str() {
             "Spiral" => PainterKind::Spiral,
             "Plasma" => PainterKind::Plasma,
+            "Skin"   => PainterKind::Skin,
             _        => PainterKind::HueStripe,
         };
     }
+}
+
+fn load_skin_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let img = img.to_rgba8();
+    let (src_w, src_h) = img.dimensions();
+    let (crop_w, crop_h) = if src_w as f32 / src_h as f32 > 16.0 {
+        ((src_h as f32 * 16.0) as u32, src_h)
+    } else {
+        (src_w, (src_w as f32 / 16.0) as u32)
+    };
+    let crop_x = (src_w - crop_w) / 2;
+    let crop_y = (src_h - crop_h) / 2;
+    let cropped = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
+    let resized = image::imageops::resize(
+        &cropped,
+        PAINTER_TEXTURE_WIDTH,
+        PAINTER_TEXTURE_HEIGHT,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Ok(resized.into_raw())
 }
 
 fn preset_path() -> Option<std::path::PathBuf> {
@@ -338,6 +363,14 @@ struct GpuState {
     painter_view: wgpu::TextureView,
     #[allow(dead_code)]
     painter_sampler: wgpu::Sampler,
+
+    // Skin painter resources
+    skin_tex: wgpu::Texture,
+    #[allow(dead_code)]
+    skin_view: wgpu::TextureView,
+    skin_bgl: wgpu::BindGroupLayout,
+    skin_bind_group: wgpu::BindGroup,
+    painter_skin_pipeline: wgpu::RenderPipeline,
 
     // Pass 2 — shape (3D mesh with painter surface → screen-res, depth-tested)
     #[allow(dead_code)]
@@ -911,6 +944,95 @@ impl GpuState {
             painter_pipelines.insert(*kind, pipeline);
         }
 
+        // ── Skin painter resources ────────────────────────────────────────────
+        let skin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Skin BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let skin_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Skin texture"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &skin_tex, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8, 0, 0, 255],
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let skin_view = skin_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let skin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Skin BG"),
+            layout: &skin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&skin_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&painter_sampler),
+                },
+            ],
+        });
+        let skin_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Skin painter shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/painter_skin.wgsl").into()),
+        });
+        let painter_skin_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Skin painter pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&skin_bgl],
+                    push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &skin_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &skin_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         let shape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shape shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shape.wgsl").into()),
@@ -1054,6 +1176,7 @@ impl GpuState {
             uniforms_buffer,
             painter_uniforms_bind_group, painter_pipelines,
             painter_texture, painter_view, painter_sampler,
+            skin_tex, skin_view, skin_bgl, skin_bind_group, painter_skin_pipeline,
             shape_texture, shape_view, shape_depth, shape_depth_view,
             shape_buffers,
             transform_buffer, transform_bind_group,
@@ -1306,9 +1429,14 @@ impl GpuState {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            let painter_pipeline = &self.painter_pipelines[&self.params.painter_kind];
-            pass.set_pipeline(painter_pipeline);
-            pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
+            if self.params.painter_kind == PainterKind::Skin {
+                pass.set_pipeline(&self.painter_skin_pipeline);
+                pass.set_bind_group(0, &self.skin_bind_group, &[]);
+            } else {
+                let painter_pipeline = &self.painter_pipelines[&self.params.painter_kind];
+                pass.set_pipeline(painter_pipeline);
+                pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
+            }
             pass.draw(0..3, 0..1);
         }
 
@@ -1522,6 +1650,57 @@ impl GpuState {
         } else {
             self.bass_zoom_smoothed = self.bass_zoom_smoothed * (1.0 - decay) + raw_bass * decay;
         }
+    }
+
+    pub fn load_skin(&mut self, rgba: Vec<u8>) {
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Skin texture"),
+            size: wgpu::Extent3d {
+                width: PAINTER_TEXTURE_WIDTH,
+                height: PAINTER_TEXTURE_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(PAINTER_TEXTURE_WIDTH * 4),
+                rows_per_image: Some(PAINTER_TEXTURE_HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: PAINTER_TEXTURE_WIDTH,
+                height: PAINTER_TEXTURE_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Skin BG"),
+            layout: &self.skin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.painter_sampler),
+                },
+            ],
+        });
+        self.skin_tex = tex;
+        self.skin_view = view;
+        self.skin_bind_group = new_bg;
     }
 
     pub fn toggle_recording(&mut self) {
@@ -1983,25 +2162,13 @@ impl ApplicationHandler for App {
                                 .pick_file()
                             {
                                 log::info!("Selected file: {}", path.display());
-                                match std::fs::metadata(&path) {
-                                    Ok(meta) if meta.len() > 50 * 1024 * 1024 => {
-                                        log::error!(
-                                            "skin rejected: file too large ({} MB, max 50 MB)",
-                                            meta.len() / 1024 / 1024
-                                        );
+                                match load_skin_image(&path) {
+                                    Ok(rgba) => {
+                                        gpu.load_skin(rgba);
+                                        gpu.params.painter_kind = PainterKind::Skin;
+                                        log::info!("Skin loaded and active");
                                     }
-                                    Ok(meta) => {
-                                        log::info!("File size: {} KB", meta.len() / 1024);
-                                        match image::open(&path) {
-                                            Ok(img) => {
-                                                let (w, h) = image::GenericImageView::dimensions(&img);
-                                                log::info!("Image decoded: {}x{} pixels", w, h);
-                                                log::info!("(Skin display coming in slice 23c — dialog test complete)");
-                                            }
-                                            Err(e) => log::error!("Failed to decode image: {}", e),
-                                        }
-                                    }
-                                    Err(e) => log::error!("Can't read file metadata: {}", e),
+                                    Err(e) => log::error!("Failed to load skin: {}", e),
                                 }
                             } else {
                                 log::info!("Open Skin canceled");
@@ -2248,11 +2415,12 @@ mod tests {
 
     #[test]
     fn painter_kind_name_roundtrip() {
-        for kind in [PainterKind::HueStripe, PainterKind::Spiral, PainterKind::Plasma] {
+        for kind in [PainterKind::HueStripe, PainterKind::Spiral, PainterKind::Plasma, PainterKind::Skin] {
             let name = kind.name();
             let parsed = match name {
                 "Spiral" => PainterKind::Spiral,
                 "Plasma" => PainterKind::Plasma,
+                "Skin"   => PainterKind::Skin,
                 _        => PainterKind::HueStripe,
             };
             assert_eq!(parsed, kind, "PainterKind {:?} did not round-trip via name()", kind);

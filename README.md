@@ -21,6 +21,7 @@ Native Linux desktop audio-reactive kaleidoscope visualizer built with Rust + wg
 - **HueStripe**: scrolling rainbow vertical bands
 - **Spiral**: radial color spiral with arm rotation
 - **Plasma**: flowing demoscene-style color blobs
+- **Skin**: user-loaded image (File → Open Skin…), auto-cropped to 16:1 and resized to 4096×256
 
 ### Effects
 - Color invert
@@ -70,7 +71,7 @@ The visualizer opens in a 1280×720 window. Click the window for focus before us
 |-----|--------|
 | `?` | toggle cheat sheet overlay (animated slide-in) |
 | `Shift+Tab` | cycle 3D shape (Cylinder → Sphere → Cube → Tetrahedron) |
-| `P` | cycle painter (HueStripe → Spiral → Plasma) |
+| `P` | cycle painter (HueStripe → Spiral → Plasma → Skin) |
 | `[` / `]` | decrease / increase kaleido fold count (2 to 24) |
 | `Z` / `X` | decrease / increase kaleido zoom (0.3 to 1.5) |
 | `,` / `.` | decrease / increase rotation speed (0 to 4×) |
