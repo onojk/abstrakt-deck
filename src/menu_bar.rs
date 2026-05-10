@@ -3,6 +3,30 @@ use egui_wgpu::Renderer;
 use egui_winit::State;
 use winit::window::Window;
 
+#[derive(Debug, Clone, Copy)]
+pub enum LockTarget {
+    PainterKind,
+    CurrentShape,
+    FoldCount,
+    Zoom,
+    RotationSpeedScale,
+    FrameShape,
+    FrameSize,
+    FrameColorHue,
+    InvertEnabled,
+    ColorizeEnabled,
+    ColorizeHue,
+    ColorizeIntensity,
+    DistortionEnabled,
+    DistortionAmplitude,
+    DistortionFrequency,
+    Contrast,
+    ContrastPasses,
+    Saturation,
+    BassZoomStrength,
+    ShakeEnabled,
+}
+
 #[derive(Debug)]
 pub enum MenuAction {
     OpenSkin,
@@ -44,6 +68,7 @@ pub enum ParamChange {
     ReactiveModeAggressiveness(f32),
     PartyModeEnabled(bool),
     PartyModeAggressiveness(f32),
+    ToggleLock(LockTarget),
 }
 
 pub struct MenuBar {
@@ -314,73 +339,111 @@ impl MenuBar {
         }
     }
 
+    fn lock_button(ui: &mut egui::Ui, locked: bool) -> egui::Response {
+        let icon = if locked { "🔒" } else { "🔓" };
+        let button = egui::Button::new(icon).small();
+        let button = if locked {
+            button.fill(egui::Color32::from_rgb(80, 60, 30))
+        } else {
+            button
+        };
+        ui.add(button)
+    }
+
     fn geometry_section(
         ui: &mut egui::Ui,
         params: &crate::VisualParams,
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Geometry", |ui| {
-            let mut shape = params.current_shape;
-            egui::ComboBox::from_label("Shape")
-                .selected_text(shape.name())
-                .show_ui(ui, |ui| {
-                    for v in [
-                        crate::ShapeKind::Cylinder,
-                        crate::ShapeKind::Sphere,
-                        crate::ShapeKind::Cube,
-                        crate::ShapeKind::Tetrahedron,
-                    ] {
-                        ui.selectable_value(&mut shape, v, v.name());
+            // Shape
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.current_shape).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::CurrentShape));
+                }
+                ui.add_enabled_ui(!params.locks.current_shape, |ui| {
+                    let mut shape = params.current_shape;
+                    egui::ComboBox::from_label("Shape")
+                        .selected_text(shape.name())
+                        .show_ui(ui, |ui| {
+                            for v in [
+                                crate::ShapeKind::Cylinder,
+                                crate::ShapeKind::Sphere,
+                                crate::ShapeKind::Cube,
+                                crate::ShapeKind::Tetrahedron,
+                            ] {
+                                ui.selectable_value(&mut shape, v, v.name());
+                            }
+                        });
+                    if shape != params.current_shape {
+                        changes.push(ParamChange::CurrentShape(shape));
                     }
                 });
-            if shape != params.current_shape {
-                changes.push(ParamChange::CurrentShape(shape));
-            }
+            });
 
-            let mut painter = params.painter_kind;
-            egui::ComboBox::from_label("Painter")
-                .selected_text(painter.name())
-                .show_ui(ui, |ui| {
-                    for v in [
-                        crate::PainterKind::HueStripe,
-                        crate::PainterKind::Spiral,
-                        crate::PainterKind::Plasma,
-                        crate::PainterKind::Skin,
-                    ] {
-                        ui.selectable_value(&mut painter, v, v.name());
+            // Painter
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.painter_kind).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::PainterKind));
+                }
+                ui.add_enabled_ui(!params.locks.painter_kind, |ui| {
+                    let mut painter = params.painter_kind;
+                    egui::ComboBox::from_label("Painter")
+                        .selected_text(painter.name())
+                        .show_ui(ui, |ui| {
+                            for v in [
+                                crate::PainterKind::HueStripe,
+                                crate::PainterKind::Spiral,
+                                crate::PainterKind::Plasma,
+                                crate::PainterKind::Skin,
+                            ] {
+                                ui.selectable_value(&mut painter, v, v.name());
+                            }
+                        });
+                    if painter != params.painter_kind {
+                        changes.push(ParamChange::PainterKind(painter));
                     }
                 });
-            if painter != params.painter_kind {
-                changes.push(ParamChange::PainterKind(painter));
-            }
+            });
 
-            let mut fold = params.fold_count;
-            if ui
-                .add(egui::Slider::new(&mut fold, 2.0..=24.0).text("Fold Count").integer())
-                .changed()
-            {
-                changes.push(ParamChange::FoldCount(fold));
-            }
+            // Fold Count
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.fold_count).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::FoldCount));
+                }
+                ui.add_enabled_ui(!params.locks.fold_count, |ui| {
+                    let mut fold = params.fold_count;
+                    if ui.add(egui::Slider::new(&mut fold, 2.0..=24.0).text("Fold Count").integer()).changed() {
+                        changes.push(ParamChange::FoldCount(fold));
+                    }
+                });
+            });
 
-            let mut zoom = params.zoom;
-            if ui
-                .add(egui::Slider::new(&mut zoom, 0.3..=1.5).text("Zoom").step_by(0.05))
-                .changed()
-            {
-                changes.push(ParamChange::Zoom(zoom));
-            }
+            // Zoom
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.zoom).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::Zoom));
+                }
+                ui.add_enabled_ui(!params.locks.zoom, |ui| {
+                    let mut zoom = params.zoom;
+                    if ui.add(egui::Slider::new(&mut zoom, 0.3..=1.5).text("Zoom").step_by(0.05)).changed() {
+                        changes.push(ParamChange::Zoom(zoom));
+                    }
+                });
+            });
 
-            let mut rot = params.rotation_speed_scale;
-            if ui
-                .add(
-                    egui::Slider::new(&mut rot, 0.0..=4.0)
-                        .text("Rotation Speed")
-                        .step_by(0.25),
-                )
-                .changed()
-            {
-                changes.push(ParamChange::RotationSpeedScale(rot));
-            }
+            // Rotation Speed
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.rotation_speed_scale).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::RotationSpeedScale));
+                }
+                ui.add_enabled_ui(!params.locks.rotation_speed_scale, |ui| {
+                    let mut rot = params.rotation_speed_scale;
+                    if ui.add(egui::Slider::new(&mut rot, 0.0..=4.0).text("Rotation Speed").step_by(0.25)).changed() {
+                        changes.push(ParamChange::RotationSpeedScale(rot));
+                    }
+                });
+            });
         });
     }
 
@@ -390,47 +453,60 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Frame", |ui| {
-            let mut fs = params.frame_shape;
-            egui::ComboBox::from_label("Frame Shape")
-                .selected_text(format!("{:?}", fs))
-                .show_ui(ui, |ui| {
-                    for v in [
-                        crate::FrameShape::None,
-                        crate::FrameShape::Circle,
-                        crate::FrameShape::Square,
-                        crate::FrameShape::Rounded,
-                        crate::FrameShape::Hexagon,
-                        crate::FrameShape::Octagon,
-                        crate::FrameShape::Flower,
-                        crate::FrameShape::Star,
-                    ] {
-                        ui.selectable_value(&mut fs, v, format!("{:?}", v));
+            // Frame Shape
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.frame_shape).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::FrameShape));
+                }
+                ui.add_enabled_ui(!params.locks.frame_shape, |ui| {
+                    let mut fs = params.frame_shape;
+                    egui::ComboBox::from_label("Frame Shape")
+                        .selected_text(format!("{:?}", fs))
+                        .show_ui(ui, |ui| {
+                            for v in [
+                                crate::FrameShape::None,
+                                crate::FrameShape::Circle,
+                                crate::FrameShape::Square,
+                                crate::FrameShape::Rounded,
+                                crate::FrameShape::Hexagon,
+                                crate::FrameShape::Octagon,
+                                crate::FrameShape::Flower,
+                                crate::FrameShape::Star,
+                            ] {
+                                ui.selectable_value(&mut fs, v, format!("{:?}", v));
+                            }
+                        });
+                    if fs != params.frame_shape {
+                        changes.push(ParamChange::FrameShape(fs));
                     }
                 });
-            if fs != params.frame_shape {
-                changes.push(ParamChange::FrameShape(fs));
-            }
+            });
 
-            let mut size = params.frame_size;
-            if ui
-                .add(egui::Slider::new(&mut size, 0.4..=1.0).text("Size").step_by(0.05))
-                .changed()
-            {
-                changes.push(ParamChange::FrameSize(size));
-            }
+            // Size
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.frame_size).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::FrameSize));
+                }
+                ui.add_enabled_ui(!params.locks.frame_size, |ui| {
+                    let mut size = params.frame_size;
+                    if ui.add(egui::Slider::new(&mut size, 0.4..=1.0).text("Size").step_by(0.05)).changed() {
+                        changes.push(ParamChange::FrameSize(size));
+                    }
+                });
+            });
 
-            let mut hue = params.frame_color_hue;
-            if ui
-                .add(
-                    egui::Slider::new(&mut hue, 0.0..=360.0)
-                        .text("Color Hue")
-                        .step_by(5.0)
-                        .suffix("°"),
-                )
-                .changed()
-            {
-                changes.push(ParamChange::FrameColorHue(hue));
-            }
+            // Color Hue
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.frame_color_hue).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::FrameColorHue));
+                }
+                ui.add_enabled_ui(!params.locks.frame_color_hue, |ui| {
+                    let mut hue = params.frame_color_hue;
+                    if ui.add(egui::Slider::new(&mut hue, 0.0..=360.0).text("Color Hue").step_by(5.0).suffix("°")).changed() {
+                        changes.push(ParamChange::FrameColorHue(hue));
+                    }
+                });
+            });
         });
     }
 
@@ -440,102 +516,144 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Effects", |ui| {
-            let mut contrast = params.contrast;
-            if ui
-                .add(egui::Slider::new(&mut contrast, 0.0..=2.0).text("Contrast").step_by(0.05))
-                .changed()
-            {
-                changes.push(ParamChange::Contrast(contrast));
-            }
-
-            let mut passes = params.contrast_passes;
-            if ui
-                .add(egui::Slider::new(&mut passes, 1..=6).text("Contrast Passes"))
-                .changed()
-            {
-                changes.push(ParamChange::ContrastPasses(passes));
-            }
-
-            let mut saturation = params.saturation;
-            if ui
-                .add(
-                    egui::Slider::new(&mut saturation, 0.0..=2.0)
-                        .text("Saturation")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changes.push(ParamChange::Saturation(saturation));
-            }
-
-            ui.separator();
-
-            let mut invert = params.invert_enabled;
-            if ui.checkbox(&mut invert, "Color Invert").changed() {
-                changes.push(ParamChange::InvertEnabled(invert));
-            }
-
-            ui.separator();
-
-            let mut colorize_on = params.colorize_enabled;
-            if ui.checkbox(&mut colorize_on, "Colorize Tint").changed() {
-                changes.push(ParamChange::ColorizeEnabled(colorize_on));
-            }
-            ui.add_enabled_ui(colorize_on, |ui| {
-                let mut hue = params.colorize_hue;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut hue, 0.0..=360.0)
-                            .text("Hue")
-                            .step_by(5.0)
-                            .suffix("°"),
-                    )
-                    .changed()
-                {
-                    changes.push(ParamChange::ColorizeHue(hue));
+            // Contrast
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.contrast).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::Contrast));
                 }
-                let mut intensity = params.colorize_intensity;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut intensity, 0.0..=1.0)
-                            .text("Intensity")
-                            .step_by(0.05),
-                    )
-                    .changed()
-                {
-                    changes.push(ParamChange::ColorizeIntensity(intensity));
+                ui.add_enabled_ui(!params.locks.contrast, |ui| {
+                    let mut contrast = params.contrast;
+                    if ui.add(egui::Slider::new(&mut contrast, 0.0..=2.0).text("Contrast").step_by(0.05)).changed() {
+                        changes.push(ParamChange::Contrast(contrast));
+                    }
+                });
+            });
+
+            // Contrast Passes
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.contrast_passes).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ContrastPasses));
                 }
+                ui.add_enabled_ui(!params.locks.contrast_passes, |ui| {
+                    let mut passes = params.contrast_passes;
+                    if ui.add(egui::Slider::new(&mut passes, 1..=6).text("Contrast Passes")).changed() {
+                        changes.push(ParamChange::ContrastPasses(passes));
+                    }
+                });
+            });
+
+            // Saturation
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.saturation).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::Saturation));
+                }
+                ui.add_enabled_ui(!params.locks.saturation, |ui| {
+                    let mut saturation = params.saturation;
+                    if ui.add(egui::Slider::new(&mut saturation, 0.0..=2.0).text("Saturation").step_by(0.05)).changed() {
+                        changes.push(ParamChange::Saturation(saturation));
+                    }
+                });
             });
 
             ui.separator();
 
-            let mut dist_on = params.distortion_enabled;
-            if ui.checkbox(&mut dist_on, "Distortion").changed() {
-                changes.push(ParamChange::DistortionEnabled(dist_on));
-            }
-            ui.add_enabled_ui(dist_on, |ui| {
-                let mut amp = params.distortion_amplitude;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut amp, 0.0..=0.5)
-                            .text("Amplitude")
-                            .step_by(0.02),
-                    )
-                    .changed()
-                {
-                    changes.push(ParamChange::DistortionAmplitude(amp));
+            // Color Invert
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.invert_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::InvertEnabled));
                 }
-                let mut freq = params.distortion_frequency;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut freq, 0.5..=8.0)
-                            .text("Frequency")
-                            .step_by(0.5),
-                    )
-                    .changed()
-                {
-                    changes.push(ParamChange::DistortionFrequency(freq));
+                ui.add_enabled_ui(!params.locks.invert_enabled, |ui| {
+                    let mut invert = params.invert_enabled;
+                    if ui.checkbox(&mut invert, "Color Invert").changed() {
+                        changes.push(ParamChange::InvertEnabled(invert));
+                    }
+                });
+            });
+
+            ui.separator();
+
+            // Colorize Tint toggle
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.colorize_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorizeEnabled));
                 }
+                ui.add_enabled_ui(!params.locks.colorize_enabled, |ui| {
+                    let mut colorize_on = params.colorize_enabled;
+                    if ui.checkbox(&mut colorize_on, "Colorize Tint").changed() {
+                        changes.push(ParamChange::ColorizeEnabled(colorize_on));
+                    }
+                });
+            });
+
+            let colorize_active = params.colorize_enabled;
+
+            // Colorize Hue — greyed if locked OR if colorize is off
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.colorize_hue).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorizeHue));
+                }
+                ui.add_enabled_ui(!params.locks.colorize_hue && colorize_active, |ui| {
+                    let mut hue = params.colorize_hue;
+                    if ui.add(egui::Slider::new(&mut hue, 0.0..=360.0).text("Hue").step_by(5.0).suffix("°")).changed() {
+                        changes.push(ParamChange::ColorizeHue(hue));
+                    }
+                });
+            });
+
+            // Colorize Intensity
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.colorize_intensity).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorizeIntensity));
+                }
+                ui.add_enabled_ui(!params.locks.colorize_intensity && colorize_active, |ui| {
+                    let mut intensity = params.colorize_intensity;
+                    if ui.add(egui::Slider::new(&mut intensity, 0.0..=1.0).text("Intensity").step_by(0.05)).changed() {
+                        changes.push(ParamChange::ColorizeIntensity(intensity));
+                    }
+                });
+            });
+
+            ui.separator();
+
+            // Distortion toggle
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_enabled, |ui| {
+                    let mut dist_on = params.distortion_enabled;
+                    if ui.checkbox(&mut dist_on, "Distortion").changed() {
+                        changes.push(ParamChange::DistortionEnabled(dist_on));
+                    }
+                });
+            });
+
+            let dist_active = params.distortion_enabled;
+
+            // Distortion Amplitude
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_amplitude).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionAmplitude));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_amplitude && dist_active, |ui| {
+                    let mut amp = params.distortion_amplitude;
+                    if ui.add(egui::Slider::new(&mut amp, 0.0..=0.5).text("Amplitude").step_by(0.02)).changed() {
+                        changes.push(ParamChange::DistortionAmplitude(amp));
+                    }
+                });
+            });
+
+            // Distortion Frequency
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_frequency).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionFrequency));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_frequency && dist_active, |ui| {
+                    let mut freq = params.distortion_frequency;
+                    if ui.add(egui::Slider::new(&mut freq, 0.5..=8.0).text("Frequency").step_by(0.5)).changed() {
+                        changes.push(ParamChange::DistortionFrequency(freq));
+                    }
+                });
             });
         });
     }
@@ -546,22 +664,31 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Audio", |ui| {
-            let mut shake = params.shake_enabled;
-            if ui.checkbox(&mut shake, "Beat-reactive Shake").changed() {
-                changes.push(ParamChange::ShakeEnabled(shake));
-            }
+            // Beat-reactive Shake
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.shake_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ShakeEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.shake_enabled, |ui| {
+                    let mut shake = params.shake_enabled;
+                    if ui.checkbox(&mut shake, "Beat-reactive Shake").changed() {
+                        changes.push(ParamChange::ShakeEnabled(shake));
+                    }
+                });
+            });
 
-            let mut bass = params.bass_zoom_strength;
-            if ui
-                .add(
-                    egui::Slider::new(&mut bass, 0.0..=1.0)
-                        .text("Bass-Zoom Strength")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changes.push(ParamChange::BassZoomStrength(bass));
-            }
+            // Bass-Zoom Strength
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.bass_zoom_strength).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BassZoomStrength));
+                }
+                ui.add_enabled_ui(!params.locks.bass_zoom_strength, |ui| {
+                    let mut bass = params.bass_zoom_strength;
+                    if ui.add(egui::Slider::new(&mut bass, 0.0..=1.0).text("Bass-Zoom Strength").step_by(0.05)).changed() {
+                        changes.push(ParamChange::BassZoomStrength(bass));
+                    }
+                });
+            });
         });
     }
 

@@ -144,6 +144,34 @@ impl PainterKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ParamLocks {
+    // Geometry
+    pub painter_kind: bool,
+    pub current_shape: bool,
+    pub fold_count: bool,
+    pub zoom: bool,
+    pub rotation_speed_scale: bool,
+    // Frame
+    pub frame_shape: bool,
+    pub frame_size: bool,
+    pub frame_color_hue: bool,
+    // Effects
+    pub invert_enabled: bool,
+    pub colorize_enabled: bool,
+    pub colorize_hue: bool,
+    pub colorize_intensity: bool,
+    pub distortion_enabled: bool,
+    pub distortion_amplitude: bool,
+    pub distortion_frequency: bool,
+    pub contrast: bool,
+    pub contrast_passes: bool,
+    pub saturation: bool,
+    // Audio
+    pub bass_zoom_strength: bool,
+    pub shake_enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisualParams {
     pub current_shape: ShapeKind,
@@ -172,6 +200,7 @@ pub struct VisualParams {
     pub reactive_mode_aggressiveness: f32,
     pub party_mode_enabled: bool,
     pub party_mode_aggressiveness: f32,
+    pub locks: ParamLocks,
 }
 
 impl Default for VisualParams {
@@ -203,6 +232,7 @@ impl Default for VisualParams {
             reactive_mode_aggressiveness: 0.5,
             party_mode_enabled: false,
             party_mode_aggressiveness: 0.5,
+            locks: ParamLocks::default(),
         }
     }
 }
@@ -265,6 +295,8 @@ struct Preset {
     party_mode_enabled: bool,
     #[serde(default = "default_half_f32")]
     party_mode_aggressiveness: f32,
+    #[serde(default)]
+    locks: ParamLocks,
 }
 
 fn default_one_f32()  -> f32 { 1.0 }
@@ -300,6 +332,7 @@ impl Preset {
             reactive_mode_aggressiveness: params.reactive_mode_aggressiveness,
             party_mode_enabled: params.party_mode_enabled,
             party_mode_aggressiveness: params.party_mode_aggressiveness,
+            locks: params.locks,
         }
     }
 
@@ -349,6 +382,7 @@ impl Preset {
         params.reactive_mode_aggressiveness = self.reactive_mode_aggressiveness;
         params.party_mode_enabled          = self.party_mode_enabled;
         params.party_mode_aggressiveness   = self.party_mode_aggressiveness;
+        params.locks                       = self.locks;
     }
 }
 
@@ -1937,46 +1971,51 @@ impl GpuState {
         use rand::Rng;
         let mut rng = rand::thread_rng();
 
-        self.params.painter_kind = match rng.gen_range(0u8..4) {
-            0 => PainterKind::HueStripe,
-            1 => PainterKind::Spiral,
-            2 => PainterKind::Plasma,
-            _ => PainterKind::Skin,
-        };
-        self.params.current_shape = match rng.gen_range(0u8..4) {
-            0 => ShapeKind::Cylinder,
-            1 => ShapeKind::Sphere,
-            2 => ShapeKind::Cube,
-            _ => ShapeKind::Tetrahedron,
-        };
-        self.params.frame_shape = match rng.gen_range(0u8..8) {
-            0 => FrameShape::None,
-            1 => FrameShape::Circle,
-            2 => FrameShape::Square,
-            3 => FrameShape::Rounded,
-            4 => FrameShape::Hexagon,
-            5 => FrameShape::Octagon,
-            6 => FrameShape::Flower,
-            _ => FrameShape::Star,
-        };
-
-        self.params.fold_count            = rng.gen_range(4.0_f32..=20.0).round();
-        self.params.zoom                  = rng.gen_range(0.5_f32..=1.3);
-        self.params.rotation_speed_scale  = rng.gen_range(0.3_f32..=2.5);
-        self.params.frame_size            = rng.gen_range(0.65_f32..=1.0);
-        self.params.frame_color_hue       = rng.gen_range(0.0_f32..360.0);
-        self.params.colorize_hue          = rng.gen_range(0.0_f32..360.0);
-        self.params.colorize_intensity    = rng.gen_range(0.2_f32..=0.9);
-        self.params.distortion_amplitude  = rng.gen_range(0.0_f32..=0.25);
-        self.params.distortion_frequency  = rng.gen_range(1.0_f32..=6.0);
-        self.params.contrast              = rng.gen_range(0.7_f32..=1.8);
-        self.params.contrast_passes       = rng.gen_range(1u32..=4);
-        self.params.saturation            = rng.gen_range(0.6_f32..=1.6);
-        self.params.bass_zoom_strength    = rng.gen_range(0.0_f32..=0.6);
-        self.params.invert_enabled        = rng.gen_bool(0.5);
-        self.params.colorize_enabled      = rng.gen_bool(0.5);
-        self.params.distortion_enabled    = rng.gen_bool(0.5);
-        self.params.shake_enabled         = rng.gen_bool(0.5);
+        if !self.params.locks.painter_kind {
+            self.params.painter_kind = match rng.gen_range(0u8..4) {
+                0 => PainterKind::HueStripe,
+                1 => PainterKind::Spiral,
+                2 => PainterKind::Plasma,
+                _ => PainterKind::Skin,
+            };
+        }
+        if !self.params.locks.current_shape {
+            self.params.current_shape = match rng.gen_range(0u8..4) {
+                0 => ShapeKind::Cylinder,
+                1 => ShapeKind::Sphere,
+                2 => ShapeKind::Cube,
+                _ => ShapeKind::Tetrahedron,
+            };
+        }
+        if !self.params.locks.frame_shape {
+            self.params.frame_shape = match rng.gen_range(0u8..8) {
+                0 => FrameShape::None,
+                1 => FrameShape::Circle,
+                2 => FrameShape::Square,
+                3 => FrameShape::Rounded,
+                4 => FrameShape::Hexagon,
+                5 => FrameShape::Octagon,
+                6 => FrameShape::Flower,
+                _ => FrameShape::Star,
+            };
+        }
+        if !self.params.locks.fold_count           { self.params.fold_count           = rng.gen_range(4.0_f32..=20.0).round(); }
+        if !self.params.locks.zoom                 { self.params.zoom                 = rng.gen_range(0.5_f32..=1.3); }
+        if !self.params.locks.rotation_speed_scale { self.params.rotation_speed_scale = rng.gen_range(0.3_f32..=2.5); }
+        if !self.params.locks.frame_size           { self.params.frame_size           = rng.gen_range(0.65_f32..=1.0); }
+        if !self.params.locks.frame_color_hue      { self.params.frame_color_hue      = rng.gen_range(0.0_f32..360.0); }
+        if !self.params.locks.colorize_hue         { self.params.colorize_hue         = rng.gen_range(0.0_f32..360.0); }
+        if !self.params.locks.colorize_intensity   { self.params.colorize_intensity   = rng.gen_range(0.2_f32..=0.9); }
+        if !self.params.locks.distortion_amplitude { self.params.distortion_amplitude = rng.gen_range(0.0_f32..=0.25); }
+        if !self.params.locks.distortion_frequency { self.params.distortion_frequency = rng.gen_range(1.0_f32..=6.0); }
+        if !self.params.locks.contrast             { self.params.contrast             = rng.gen_range(0.7_f32..=1.8); }
+        if !self.params.locks.contrast_passes      { self.params.contrast_passes      = rng.gen_range(1u32..=4); }
+        if !self.params.locks.saturation           { self.params.saturation           = rng.gen_range(0.6_f32..=1.6); }
+        if !self.params.locks.bass_zoom_strength   { self.params.bass_zoom_strength   = rng.gen_range(0.0_f32..=0.6); }
+        if !self.params.locks.invert_enabled       { self.params.invert_enabled       = rng.gen_bool(0.5); }
+        if !self.params.locks.colorize_enabled     { self.params.colorize_enabled     = rng.gen_bool(0.5); }
+        if !self.params.locks.distortion_enabled   { self.params.distortion_enabled   = rng.gen_bool(0.5); }
+        if !self.params.locks.shake_enabled        { self.params.shake_enabled        = rng.gen_bool(0.5); }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -2622,6 +2661,32 @@ impl ApplicationHandler for App {
                         ParamChange::ReactiveModeAggressiveness(v) => gpu.params.reactive_mode_aggressiveness = v,
                         ParamChange::PartyModeEnabled(v)          => gpu.params.party_mode_enabled          = v,
                         ParamChange::PartyModeAggressiveness(v)   => gpu.params.party_mode_aggressiveness   = v,
+                        ParamChange::ToggleLock(target) => {
+                            use menu_bar::LockTarget;
+                            match target {
+                                LockTarget::PainterKind        => gpu.params.locks.painter_kind        = !gpu.params.locks.painter_kind,
+                                LockTarget::CurrentShape       => gpu.params.locks.current_shape       = !gpu.params.locks.current_shape,
+                                LockTarget::FoldCount          => gpu.params.locks.fold_count          = !gpu.params.locks.fold_count,
+                                LockTarget::Zoom               => gpu.params.locks.zoom               = !gpu.params.locks.zoom,
+                                LockTarget::RotationSpeedScale => gpu.params.locks.rotation_speed_scale = !gpu.params.locks.rotation_speed_scale,
+                                LockTarget::FrameShape         => gpu.params.locks.frame_shape         = !gpu.params.locks.frame_shape,
+                                LockTarget::FrameSize          => gpu.params.locks.frame_size          = !gpu.params.locks.frame_size,
+                                LockTarget::FrameColorHue      => gpu.params.locks.frame_color_hue     = !gpu.params.locks.frame_color_hue,
+                                LockTarget::InvertEnabled      => gpu.params.locks.invert_enabled      = !gpu.params.locks.invert_enabled,
+                                LockTarget::ColorizeEnabled    => gpu.params.locks.colorize_enabled    = !gpu.params.locks.colorize_enabled,
+                                LockTarget::ColorizeHue        => gpu.params.locks.colorize_hue        = !gpu.params.locks.colorize_hue,
+                                LockTarget::ColorizeIntensity  => gpu.params.locks.colorize_intensity  = !gpu.params.locks.colorize_intensity,
+                                LockTarget::DistortionEnabled  => gpu.params.locks.distortion_enabled  = !gpu.params.locks.distortion_enabled,
+                                LockTarget::DistortionAmplitude => gpu.params.locks.distortion_amplitude = !gpu.params.locks.distortion_amplitude,
+                                LockTarget::DistortionFrequency => gpu.params.locks.distortion_frequency = !gpu.params.locks.distortion_frequency,
+                                LockTarget::Contrast           => gpu.params.locks.contrast           = !gpu.params.locks.contrast,
+                                LockTarget::ContrastPasses     => gpu.params.locks.contrast_passes     = !gpu.params.locks.contrast_passes,
+                                LockTarget::Saturation         => gpu.params.locks.saturation         = !gpu.params.locks.saturation,
+                                LockTarget::BassZoomStrength   => gpu.params.locks.bass_zoom_strength  = !gpu.params.locks.bass_zoom_strength,
+                                LockTarget::ShakeEnabled       => gpu.params.locks.shake_enabled       = !gpu.params.locks.shake_enabled,
+                            }
+                            log::info!("Lock toggled: {:?}", target);
+                        }
                     }
                 }
 
@@ -2629,11 +2694,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 23e.7 — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 23f — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 23e.7 — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 23f — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2740,6 +2805,11 @@ mod tests {
             reactive_mode_aggressiveness: 0.3,
             party_mode_enabled: true,
             party_mode_aggressiveness: 0.8,
+            locks: ParamLocks {
+                contrast: true,
+                contrast_passes: true,
+                ..Default::default()
+            },
         }
     }
 
@@ -2780,6 +2850,8 @@ mod tests {
         assert_eq!(restored.reactive_mode_aggressiveness, original.reactive_mode_aggressiveness, "reactive_mode_aggressiveness failed");
         assert_eq!(restored.party_mode_enabled,           original.party_mode_enabled,           "party_mode_enabled failed");
         assert_eq!(restored.party_mode_aggressiveness,    original.party_mode_aggressiveness,    "party_mode_aggressiveness failed");
+        assert_eq!(restored.locks.contrast,        original.locks.contrast,        "locks.contrast failed");
+        assert_eq!(restored.locks.contrast_passes, original.locks.contrast_passes, "locks.contrast_passes failed");
     }
 
     #[test]
