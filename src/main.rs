@@ -1010,6 +1010,10 @@ pub struct ExportState {
     pub frame_save_sender: Option<Sender<FrameSaveJob>>,
     pub frame_save_thread: Option<std::thread::JoinHandle<()>>,
     pub mux_thread: Option<std::thread::JoinHandle<MuxResult>>,
+    // Smoothed audio energies — EMA prevents FFT window-shift jitter at 60fps
+    pub export_bass_smoothed: f32,
+    pub export_mid_smoothed:  f32,
+    pub export_rms_smoothed:  f32,
 }
 
 fn spawn_frame_save_worker() -> (Sender<FrameSaveJob>, std::thread::JoinHandle<()>) {
@@ -2611,6 +2615,9 @@ impl GpuState {
             frame_save_sender: Some(frame_save_sender),
             frame_save_thread: Some(frame_save_thread),
             mux_thread: None,
+            export_bass_smoothed: 0.0,
+            export_mid_smoothed:  0.0,
+            export_rms_smoothed:  0.0,
         });
         Ok(())
     }
@@ -2673,28 +2680,39 @@ impl GpuState {
 
         let frame_time = frame_index as f32 / fps as f32;
 
-        // ── Phase 2: audio energies at this frame ─────────────────────────────
-        let (bass, mid, rms) = if let Some(audio) = self.loaded_audio.clone() {
-            let ch = audio.channels as usize;
-            let pos = (frame_time * audio.sample_rate as f32) as usize;
-            let window = 1024usize;
-            let start = pos.saturating_sub(window / 2) * ch;
-            let end = (start + window * ch).min(audio.samples.len());
-            if start < end && ch > 0 {
-                let mut mono = Vec::with_capacity(window);
-                let mut i = start;
-                while i + ch <= end {
-                    let mut sum = 0.0f32;
-                    for c in 0..ch { sum += audio.samples[i + c]; }
-                    mono.push(sum / ch as f32);
-                    i += ch;
-                }
-                let (b, m) = audio::compute_band_energies(&mono, audio.sample_rate);
-                let r = (mono.iter().map(|x| x * x).sum::<f32>() / mono.len() as f32)
-                    .sqrt().min(1.0);
-                (b, m, r)
-            } else { (0.0, 0.0, 0.0) }
-        } else { (0.0, 0.0, 0.0) };
+        // ── Phase 2: audio energies at this frame (with EMA smoothing) ──────────
+        // Raw FFT windows at 60fps shift by ~800 samples with only ~224 overlap,
+        // causing jitter. Alpha=0.25 gives a ~4-frame (~67ms) smoothing window.
+        let (bass, mid, rms) = {
+            let (raw_b, raw_m, raw_r) = if let Some(audio) = self.loaded_audio.clone() {
+                let ch = audio.channels as usize;
+                let pos = (frame_time * audio.sample_rate as f32) as usize;
+                let window = 1024usize;
+                let start = pos.saturating_sub(window / 2) * ch;
+                let end = (start + window * ch).min(audio.samples.len());
+                if start < end && ch > 0 {
+                    let mut mono = Vec::with_capacity(window);
+                    let mut i = start;
+                    while i + ch <= end {
+                        let mut sum = 0.0f32;
+                        for c in 0..ch { sum += audio.samples[i + c]; }
+                        mono.push(sum / ch as f32);
+                        i += ch;
+                    }
+                    let (b, m) = audio::compute_band_energies(&mono, audio.sample_rate);
+                    let r = (mono.iter().map(|x| x * x).sum::<f32>() / mono.len() as f32)
+                        .sqrt().min(1.0);
+                    (b, m, r)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            const ALPHA: f32 = 0.25;
+            let exp = self.export_state.as_mut().unwrap();
+            exp.export_bass_smoothed = exp.export_bass_smoothed * (1.0 - ALPHA) + raw_b * ALPHA;
+            exp.export_mid_smoothed  = exp.export_mid_smoothed  * (1.0 - ALPHA) + raw_m * ALPHA;
+            exp.export_rms_smoothed  = exp.export_rms_smoothed  * (1.0 - ALPHA) + raw_r * ALPHA;
+            (exp.export_bass_smoothed, exp.export_mid_smoothed, exp.export_rms_smoothed)
+        };
 
         // ── Phase 3: state updates (needs &mut self) ──────────────────────────
         self.update_bass_zoom(bass);
