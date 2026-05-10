@@ -71,7 +71,7 @@ struct ShapeEffects {
     contrast_passes:      f32,
 }
 
-// 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=star
+// 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=flower 7=star
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameUniforms {
@@ -108,7 +108,8 @@ pub enum FrameShape {
     Rounded = 3,
     Hexagon = 4,
     Octagon = 5,
-    Star    = 6,
+    Flower  = 6,
+    Star    = 7,
 }
 
 impl FrameShape {
@@ -318,6 +319,7 @@ impl Preset {
             "Square"  => FrameShape::Square,
             "Rounded" => FrameShape::Rounded,
             "Octagon" => FrameShape::Octagon,
+            "Flower"  => FrameShape::Flower,
             "Star"    => FrameShape::Star,
             _         => FrameShape::Hexagon,
         };
@@ -1947,13 +1949,14 @@ impl GpuState {
             2 => ShapeKind::Cube,
             _ => ShapeKind::Tetrahedron,
         };
-        self.params.frame_shape = match rng.gen_range(0u8..7) {
+        self.params.frame_shape = match rng.gen_range(0u8..8) {
             0 => FrameShape::None,
             1 => FrameShape::Circle,
             2 => FrameShape::Square,
             3 => FrameShape::Rounded,
             4 => FrameShape::Hexagon,
             5 => FrameShape::Octagon,
+            6 => FrameShape::Flower,
             _ => FrameShape::Star,
         };
 
@@ -2128,7 +2131,8 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
                         FrameShape::Square  => FrameShape::Rounded,
                         FrameShape::Rounded => FrameShape::Hexagon,
                         FrameShape::Hexagon => FrameShape::Octagon,
-                        FrameShape::Octagon => FrameShape::Star,
+                        FrameShape::Octagon => FrameShape::Flower,
+                        FrameShape::Flower  => FrameShape::Star,
                         FrameShape::Star    => FrameShape::None,
                     };
                     log::debug!("MIDI CC64 → frame_shape cycled to {:?}", gpu.params.frame_shape);
@@ -2345,7 +2349,8 @@ impl ApplicationHandler for App {
                     KeyCode::Digit4 => { gpu.params.frame_shape = FrameShape::Rounded; log::info!("frame: Rounded"); }
                     KeyCode::Digit5 => { gpu.params.frame_shape = FrameShape::Hexagon; log::info!("frame: Hexagon"); }
                     KeyCode::Digit6 => { gpu.params.frame_shape = FrameShape::Octagon; log::info!("frame: Octagon"); }
-                    KeyCode::Digit7 => { gpu.params.frame_shape = FrameShape::Star;    log::info!("frame: Star"); }
+                    KeyCode::Digit7 => { gpu.params.frame_shape = FrameShape::Flower;  log::info!("frame: Flower"); }
+                    KeyCode::Digit8 => { gpu.params.frame_shape = FrameShape::Star;    log::info!("frame: Star"); }
                     KeyCode::Minus => {
                         gpu.params.frame_size = (gpu.params.frame_size - 0.05).max(0.4);
                         log::info!("frame_size = {:.2}", gpu.params.frame_size);
@@ -2624,11 +2629,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 23e — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 23e.7 — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 23e — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 23e.7 — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2795,7 +2800,8 @@ mod tests {
     fn frame_shape_debug_roundtrip() {
         for shape in [
             FrameShape::None, FrameShape::Circle, FrameShape::Square,
-            FrameShape::Rounded, FrameShape::Hexagon, FrameShape::Octagon, FrameShape::Star,
+            FrameShape::Rounded, FrameShape::Hexagon, FrameShape::Octagon,
+            FrameShape::Flower, FrameShape::Star,
         ] {
             let debug_str = format!("{:?}", shape);
             let parsed = match debug_str.as_str() {
@@ -2804,6 +2810,7 @@ mod tests {
                 "Square"  => FrameShape::Square,
                 "Rounded" => FrameShape::Rounded,
                 "Octagon" => FrameShape::Octagon,
+                "Flower"  => FrameShape::Flower,
                 "Star"    => FrameShape::Star,
                 _         => FrameShape::Hexagon,
             };

@@ -401,6 +401,7 @@ impl MenuBar {
                         crate::FrameShape::Rounded,
                         crate::FrameShape::Hexagon,
                         crate::FrameShape::Octagon,
+                        crate::FrameShape::Flower,
                         crate::FrameShape::Star,
                     ] {
                         ui.selectable_value(&mut fs, v, format!("{:?}", v));

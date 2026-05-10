@@ -27,7 +27,7 @@ LINES = [
     ("ENTRY", (", .", "rotation speed (0-4x)")),
     ("BLANK", ""),
     ("CATEGORY", "FRAME"),
-    ("ENTRY", ("1-7", "frame shape (None/Circle/Square/Round/Hex/Oct/Star)")),
+    ("ENTRY", ("1-8", "frame shape (None/Circle/Square/Round/Hex/Oct/Flower/Star)")),
     ("ENTRY", ("- =", "frame size")),
     ("ENTRY", ("R G", "shift frame color hue")),
     ("BLANK", ""),

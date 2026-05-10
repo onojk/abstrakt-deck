@@ -55,6 +55,29 @@ fn sdf_polygon(p: vec2<f32>, r: f32, sides: f32) -> f32 {
     return length(p) * cos(folded_angle) - r;
 }
 
+// Rounded-petal flower (5 petals). Same petal-edge-projection as sdf_star but with
+// a larger inner radius ratio (0.55) making the indents shallower and petal tips rounder.
+fn sdf_flower(p: vec2<f32>, r: f32) -> f32 {
+    let num_points = 5.0;
+    let inner_r    = r * 0.55;
+
+    let angle    = atan2(p.y, p.x);
+    let radius   = length(p);
+    let segment  = TAU / num_points;
+    let half_seg = segment * 0.5;
+
+    let local = ((angle % segment) + segment) % segment - half_seg;
+
+    let tip    = vec2<f32>(r,                          0.0);
+    let corner = vec2<f32>(inner_r * cos(half_seg), inner_r * sin(half_seg));
+    let edge_dir    = normalize(corner - tip);
+    let edge_normal = vec2<f32>(-edge_dir.y, edge_dir.x);
+
+    let local_p = vec2<f32>(radius * cos(local), radius * sin(abs(local)));
+    return -dot(local_p - tip, edge_normal);
+}
+
+// Sharp 5-pointed star. inner_r = 0.4 × r gives deep concave indents and pointed tips.
 fn sdf_star(p: vec2<f32>, r: f32) -> f32 {
     let num_points = 5.0;
     let inner_r    = r * 0.4;
@@ -64,13 +87,9 @@ fn sdf_star(p: vec2<f32>, r: f32) -> f32 {
     let segment  = TAU / num_points;
     let half_seg = segment * 0.5;
 
-    // Wrap angle into one symmetric petal segment [-half_seg, +half_seg].
-    // Double-modulo handles negative atan2 results (WGSL % is IEEE 754 remainder).
+    // Double-modulo: WGSL % is IEEE 754 remainder, not modulo (breaks for negative angles).
     let local = ((angle % segment) + segment) % segment - half_seg;
 
-    // The star boundary is the straight line from the outer tip (r, local=0)
-    // to the inner corner (inner_r, local=±half_seg).  Project into petal-space
-    // Cartesian coords (fold lower half onto upper) and compute distance to that line.
     let tip    = vec2<f32>(r,                          0.0);
     let corner = vec2<f32>(inner_r * cos(half_seg), inner_r * sin(half_seg));
     let edge_dir    = normalize(corner - tip);
@@ -78,7 +97,7 @@ fn sdf_star(p: vec2<f32>, r: f32) -> f32 {
 
     let local_p = vec2<f32>(radius * cos(local), radius * sin(abs(local)));
 
-    // Positive outside, negative inside — matches sign convention of all other SDFs here.
+    // Negative inside, positive outside — matches frame.wgsl sign convention.
     return -dot(local_p - tip, edge_normal);
 }
 
@@ -108,6 +127,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         dist = sdf_polygon(p, r, 6.0);   // hexagon
     } else if frame.frame_shape < 5.5 {
         dist = sdf_polygon(p, r, 8.0);   // octagon
+    } else if frame.frame_shape < 6.5 {
+        dist = sdf_flower(p, r);
     } else {
         dist = sdf_star(p, r);
     }
