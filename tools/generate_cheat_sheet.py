@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 
 WIDTH = 800
-HEIGHT = 840
+HEIGHT = 960
 BG = (0, 0, 0, 220)        # dark translucent background
 HEADER = (255, 220, 80)     # gold for category headers
 KEY = (120, 220, 255)       # cyan for key labels
@@ -29,7 +29,7 @@ LINES = [
     ("CATEGORY", "FRAME"),
     ("ENTRY", ("1-7", "frame shape (None/Circle/Square/Round/Hex/Oct/Star)")),
     ("ENTRY", ("- =", "frame size")),
-    ("ENTRY", ("R G B", "shift frame color hue")),
+    ("ENTRY", ("R G", "shift frame color hue")),
     ("BLANK", ""),
     ("CATEGORY", "EFFECTS"),
     ("ENTRY", ("I", "color invert")),
@@ -56,6 +56,11 @@ LINES = [
     ("CATEGORY", "SKIN"),
     ("ENTRY", ("File>Open Skin", "load image as painter skin")),
     ("ENTRY", ("panel Skin", "thumbnail + drag or slider to crop")),
+    ("BLANK", ""),
+    ("CATEGORY", "MODES"),
+    ("ENTRY", ("N", "toggle Random Mode (timer-based painter cycle)")),
+    ("ENTRY", ("B", "toggle Reactive Mode (audio-triggered painter cycle)")),
+    ("ENTRY", ("Y", "toggle Party Mode (painter + shape + hue on beats)")),
     ("BLANK", ""),
     ("ENTRY", ("?", "toggle this help")),
     ("ENTRY", ("Esc", "exit")),

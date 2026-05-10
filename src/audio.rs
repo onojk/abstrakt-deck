@@ -15,6 +15,7 @@ pub enum AudioEvent {
 pub struct AudioState {
     pub rms: f32,
     pub bass_energy: f32,
+    pub mid_energy: f32,
 }
 
 pub struct AudioCapture {
@@ -220,6 +221,7 @@ impl BeatAnalyzer {
         self.prev_spectrum = magnitudes.clone();
 
         let bin_hz = self.sample_rate as f32 / self.fft_size as f32;
+
         let bass_lo = (60.0 / bin_hz) as usize;
         let bass_hi = ((200.0 / bin_hz) as usize).min(magnitudes.len());
         let bass_energy: f32 = if bass_hi > bass_lo {
@@ -228,10 +230,19 @@ impl BeatAnalyzer {
             0.0
         };
 
+        let mid_lo = bass_hi;
+        let mid_hi = ((2000.0 / bin_hz) as usize).min(magnitudes.len());
+        let mid_energy: f32 = if mid_hi > mid_lo {
+            magnitudes[mid_lo..mid_hi].iter().sum::<f32>() / (mid_hi - mid_lo) as f32
+        } else {
+            0.0
+        };
+
         {
             let mut s = state.lock();
             s.rms = self.rms_smoothed.min(1.0);
             s.bass_energy = (bass_energy * 0.05).min(1.0);
+            s.mid_energy  = (mid_energy  * 0.05).min(1.0);
         }
 
         self.flux_history.push(flux);

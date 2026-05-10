@@ -165,6 +165,12 @@ pub struct VisualParams {
     pub contrast: f32,
     pub saturation: f32,
     pub contrast_passes: u32,
+    pub random_mode_enabled: bool,
+    pub random_mode_aggressiveness: f32,
+    pub reactive_mode_enabled: bool,
+    pub reactive_mode_aggressiveness: f32,
+    pub party_mode_enabled: bool,
+    pub party_mode_aggressiveness: f32,
 }
 
 impl Default for VisualParams {
@@ -190,8 +196,18 @@ impl Default for VisualParams {
             contrast: 1.0,
             saturation: 1.0,
             contrast_passes: 1,
+            random_mode_enabled: false,
+            random_mode_aggressiveness: 0.5,
+            reactive_mode_enabled: false,
+            reactive_mode_aggressiveness: 0.5,
+            party_mode_enabled: false,
+            party_mode_aggressiveness: 0.5,
         }
     }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.clamp(0.0, 1.0)
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
@@ -236,10 +252,23 @@ struct Preset {
     saturation: f32,
     #[serde(default = "default_one_u32")]
     contrast_passes: u32,
+    #[serde(default)]
+    random_mode_enabled: bool,
+    #[serde(default = "default_half_f32")]
+    random_mode_aggressiveness: f32,
+    #[serde(default)]
+    reactive_mode_enabled: bool,
+    #[serde(default = "default_half_f32")]
+    reactive_mode_aggressiveness: f32,
+    #[serde(default)]
+    party_mode_enabled: bool,
+    #[serde(default = "default_half_f32")]
+    party_mode_aggressiveness: f32,
 }
 
-fn default_one_f32() -> f32 { 1.0 }
-fn default_one_u32() -> u32 { 1 }
+fn default_one_f32()  -> f32 { 1.0 }
+fn default_half_f32() -> f32 { 0.5 }
+fn default_one_u32()  -> u32 { 1 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -264,6 +293,12 @@ impl Preset {
             contrast: params.contrast,
             saturation: params.saturation,
             contrast_passes: params.contrast_passes,
+            random_mode_enabled: params.random_mode_enabled,
+            random_mode_aggressiveness: params.random_mode_aggressiveness,
+            reactive_mode_enabled: params.reactive_mode_enabled,
+            reactive_mode_aggressiveness: params.reactive_mode_aggressiveness,
+            party_mode_enabled: params.party_mode_enabled,
+            party_mode_aggressiveness: params.party_mode_aggressiveness,
         }
     }
 
@@ -306,6 +341,12 @@ impl Preset {
         params.contrast        = self.contrast;
         params.saturation      = self.saturation;
         params.contrast_passes = self.contrast_passes;
+        params.random_mode_enabled         = self.random_mode_enabled;
+        params.random_mode_aggressiveness  = self.random_mode_aggressiveness;
+        params.reactive_mode_enabled       = self.reactive_mode_enabled;
+        params.reactive_mode_aggressiveness = self.reactive_mode_aggressiveness;
+        params.party_mode_enabled          = self.party_mode_enabled;
+        params.party_mode_aggressiveness   = self.party_mode_aggressiveness;
     }
 }
 
@@ -588,6 +629,13 @@ struct GpuState {
 
     pub skin_source_image: Option<image::DynamicImage>,
     pub crop_y_offset: f32,
+
+    // Autonomous mode state
+    last_random_change:    std::time::Instant,
+    last_reactive_trigger: std::time::Instant,
+    last_party_trigger:    std::time::Instant,
+    bass_mid_smoothed:     f32,
+    bass_mid_baseline:     f32,
 
     pub params: VisualParams,
 }
@@ -1372,6 +1420,11 @@ impl GpuState {
             painter_scroll_phase: 0.0,
             skin_source_image: None,
             crop_y_offset: 0.5,
+            last_random_change:    Instant::now(),
+            last_reactive_trigger: Instant::now(),
+            last_party_trigger:    Instant::now(),
+            bass_mid_smoothed:  0.0,
+            bass_mid_baseline:  0.0,
             params: VisualParams::default(),
         }
     }
@@ -1830,6 +1883,61 @@ impl GpuState {
         }
     }
 
+    pub fn update_modes(&mut self, bass: f32, mid: f32) {
+        let now = Instant::now();
+        let bass_mid = bass + mid;
+
+        let smooth_alpha   = 0.3_f32;
+        let baseline_alpha = 0.005_f32;
+        self.bass_mid_smoothed = self.bass_mid_smoothed * (1.0 - smooth_alpha)  + bass_mid * smooth_alpha;
+        self.bass_mid_baseline = self.bass_mid_baseline * (1.0 - baseline_alpha) + bass_mid * baseline_alpha;
+
+        // Random Mode: timer-based painter cycle
+        if self.params.random_mode_enabled {
+            let interval = lerp(30.0, 1.0, self.params.random_mode_aggressiveness);
+            if now.duration_since(self.last_random_change).as_secs_f32() >= interval {
+                self.params.painter_kind = self.params.painter_kind.next();
+                self.last_random_change = now;
+                log::info!("Random Mode: painter -> {} (interval {:.1}s)",
+                    self.params.painter_kind.name(), interval);
+            }
+        }
+
+        // Reactive Mode: audio-triggered painter cycle
+        if self.params.reactive_mode_enabled {
+            let threshold_mult = lerp(2.5, 1.05, self.params.reactive_mode_aggressiveness);
+            let cooldown       = lerp(8.0, 0.5,  self.params.reactive_mode_aggressiveness);
+            if now.duration_since(self.last_reactive_trigger).as_secs_f32() >= cooldown {
+                let trigger_level = self.bass_mid_baseline * threshold_mult;
+                if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                    self.params.painter_kind = self.params.painter_kind.next();
+                    self.last_reactive_trigger = now;
+                    log::info!("Reactive Mode: painter -> {}", self.params.painter_kind.name());
+                }
+            }
+        }
+
+        // Party Mode: audio-triggered painter + shape + frame hue
+        if self.params.party_mode_enabled {
+            let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
+            let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
+            if now.duration_since(self.last_party_trigger).as_secs_f32() >= cooldown {
+                let trigger_level = self.bass_mid_baseline * threshold_mult;
+                if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                    self.params.painter_kind  = self.params.painter_kind.next();
+                    self.params.current_shape = self.params.current_shape.next();
+                    use rand::Rng;
+                    self.params.frame_color_hue = rand::thread_rng().gen_range(0.0_f32..360.0);
+                    self.last_party_trigger = now;
+                    log::info!("Party Mode: painter -> {}, shape -> {:?}, hue -> {:.0}°",
+                        self.params.painter_kind.name(),
+                        self.params.current_shape,
+                        self.params.frame_color_hue);
+                }
+            }
+        }
+    }
+
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Skin texture"),
@@ -2217,8 +2325,19 @@ impl ApplicationHandler for App {
                         log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                     }
                     KeyCode::KeyB => {
-                        gpu.params.frame_color_hue = (gpu.params.frame_color_hue + 60.0) % 360.0;
-                        log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
+                        gpu.params.reactive_mode_enabled = !gpu.params.reactive_mode_enabled;
+                        log::info!("Reactive Mode: {}", gpu.params.reactive_mode_enabled);
+                    }
+                    KeyCode::KeyN if !ctrl => {
+                        gpu.params.random_mode_enabled = !gpu.params.random_mode_enabled;
+                        if gpu.params.random_mode_enabled {
+                            gpu.last_random_change = Instant::now();
+                        }
+                        log::info!("Random Mode: {}", gpu.params.random_mode_enabled);
+                    }
+                    KeyCode::KeyY if !ctrl => {
+                        gpu.params.party_mode_enabled = !gpu.params.party_mode_enabled;
+                        log::info!("Party Mode: {}", gpu.params.party_mode_enabled);
                     }
                     KeyCode::Space => {
                         gpu.params.shake_enabled = !gpu.params.shake_enabled;
@@ -2329,10 +2448,11 @@ impl ApplicationHandler for App {
                         apply_midi_event(gpu, event);
                     }
                 }
-                let bass_energy = self.audio.as_ref()
-                    .map(|a| a.state.lock().bass_energy)
-                    .unwrap_or(0.0);
+                let (bass_energy, mid_energy) = self.audio.as_ref()
+                    .map(|a| { let s = a.state.lock(); (s.bass_energy, s.mid_energy) })
+                    .unwrap_or((0.0, 0.0));
                 gpu.update_bass_zoom(bass_energy);
+                gpu.update_modes(bass_energy, mid_energy);
                 let menu = self.menu_bar.as_mut()
                     .map(|m| (m, window.as_ref()));
                 match gpu.render(menu) {
@@ -2450,6 +2570,15 @@ impl ApplicationHandler for App {
                         ParamChange::Contrast(v)        => gpu.params.contrast        = v,
                         ParamChange::Saturation(v)      => gpu.params.saturation      = v,
                         ParamChange::ContrastPasses(v)  => gpu.params.contrast_passes = v,
+                        ParamChange::RandomModeEnabled(v) => {
+                            gpu.params.random_mode_enabled = v;
+                            if v { gpu.last_random_change = Instant::now(); }
+                        }
+                        ParamChange::RandomModeAggressiveness(v)  => gpu.params.random_mode_aggressiveness  = v,
+                        ParamChange::ReactiveModeEnabled(v)       => gpu.params.reactive_mode_enabled       = v,
+                        ParamChange::ReactiveModeAggressiveness(v) => gpu.params.reactive_mode_aggressiveness = v,
+                        ParamChange::PartyModeEnabled(v)          => gpu.params.party_mode_enabled          = v,
+                        ParamChange::PartyModeAggressiveness(v)   => gpu.params.party_mode_aggressiveness   = v,
                     }
                 }
 
@@ -2457,11 +2586,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 23c.5 — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 23e — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 23c.5 — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 23e — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2483,7 +2612,7 @@ fn main() {
     println!("  , .    rotation speed (0 to 4×)");
     println!("  1-7    frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star)");
     println!("  - =    frame size");
-    println!("  R G B  cycle frame color hue");
+    println!("  R G    cycle frame color hue");
     println!("  space  toggle beat-reactive shake");
     println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
     println!("  / '   bass-zoom intensity (0 to 1)");
@@ -2502,6 +2631,9 @@ fn main() {
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
     println!("  Ctrl+L load preset from same file");
     println!("  esc    exit");
+    println!("  N      toggle Random Mode (timer-based painter cycle)");
+    println!("  B      toggle Reactive Mode (audio-triggered painter cycle)");
+    println!("  Y      toggle Party Mode (aggressive: painter + shape + hue)");
     println!("  (Skin crop: use the Skin section in the parameters panel — M to toggle panel)");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
@@ -2559,6 +2691,12 @@ mod tests {
             contrast: 1.5,
             saturation: 0.7,
             contrast_passes: 3,
+            random_mode_enabled: true,
+            random_mode_aggressiveness: 0.7,
+            reactive_mode_enabled: true,
+            reactive_mode_aggressiveness: 0.3,
+            party_mode_enabled: true,
+            party_mode_aggressiveness: 0.8,
         }
     }
 
@@ -2593,6 +2731,12 @@ mod tests {
         assert_eq!(restored.contrast,        original.contrast,        "contrast failed");
         assert_eq!(restored.saturation,      original.saturation,      "saturation failed");
         assert_eq!(restored.contrast_passes, original.contrast_passes, "contrast_passes failed");
+        assert_eq!(restored.random_mode_enabled,          original.random_mode_enabled,          "random_mode_enabled failed");
+        assert_eq!(restored.random_mode_aggressiveness,   original.random_mode_aggressiveness,   "random_mode_aggressiveness failed");
+        assert_eq!(restored.reactive_mode_enabled,        original.reactive_mode_enabled,        "reactive_mode_enabled failed");
+        assert_eq!(restored.reactive_mode_aggressiveness, original.reactive_mode_aggressiveness, "reactive_mode_aggressiveness failed");
+        assert_eq!(restored.party_mode_enabled,           original.party_mode_enabled,           "party_mode_enabled failed");
+        assert_eq!(restored.party_mode_aggressiveness,    original.party_mode_aggressiveness,    "party_mode_aggressiveness failed");
     }
 
     #[test]

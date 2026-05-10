@@ -38,6 +38,12 @@ pub enum ParamChange {
     Contrast(f32),
     Saturation(f32),
     ContrastPasses(u32),
+    RandomModeEnabled(bool),
+    RandomModeAggressiveness(f32),
+    ReactiveModeEnabled(bool),
+    ReactiveModeAggressiveness(f32),
+    PartyModeEnabled(bool),
+    PartyModeAggressiveness(f32),
 }
 
 pub struct MenuBar {
@@ -258,6 +264,8 @@ impl MenuBar {
                                 &mut current_crop,
                                 &mut frame_changes,
                             );
+                            ui.separator();
+                            Self::modes_section(ui, current_params, &mut frame_changes);
                         });
                     });
             }
@@ -553,6 +561,63 @@ impl MenuBar {
             {
                 changes.push(ParamChange::BassZoomStrength(bass));
             }
+        });
+    }
+
+    fn modes_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Modes", |ui| {
+            ui.label("Random Mode  (N)");
+            let mut r_en = params.random_mode_enabled;
+            if ui.checkbox(&mut r_en, "Enable").changed() {
+                changes.push(ParamChange::RandomModeEnabled(r_en));
+            }
+            ui.add_enabled_ui(r_en, |ui| {
+                let mut agg = params.random_mode_aggressiveness;
+                if ui
+                    .add(egui::Slider::new(&mut agg, 0.0..=1.0).text("Aggressiveness").step_by(0.05))
+                    .changed()
+                {
+                    changes.push(ParamChange::RandomModeAggressiveness(agg));
+                }
+            });
+
+            ui.separator();
+
+            ui.label("Reactive Mode  (B)");
+            let mut re_en = params.reactive_mode_enabled;
+            if ui.checkbox(&mut re_en, "Enable").changed() {
+                changes.push(ParamChange::ReactiveModeEnabled(re_en));
+            }
+            ui.add_enabled_ui(re_en, |ui| {
+                let mut agg = params.reactive_mode_aggressiveness;
+                if ui
+                    .add(egui::Slider::new(&mut agg, 0.0..=1.0).text("Aggressiveness").step_by(0.05))
+                    .changed()
+                {
+                    changes.push(ParamChange::ReactiveModeAggressiveness(agg));
+                }
+            });
+
+            ui.separator();
+
+            ui.label("Party Mode  (Y)");
+            let mut p_en = params.party_mode_enabled;
+            if ui.checkbox(&mut p_en, "Enable").changed() {
+                changes.push(ParamChange::PartyModeEnabled(p_en));
+            }
+            ui.add_enabled_ui(p_en, |ui| {
+                let mut agg = params.party_mode_aggressiveness;
+                if ui
+                    .add(egui::Slider::new(&mut agg, 0.0..=1.0).text("Aggressiveness").step_by(0.05))
+                    .changed()
+                {
+                    changes.push(ParamChange::PartyModeAggressiveness(agg));
+                }
+            });
         });
     }
 
