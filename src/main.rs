@@ -1892,14 +1892,13 @@ impl GpuState {
         self.bass_mid_smoothed = self.bass_mid_smoothed * (1.0 - smooth_alpha)  + bass_mid * smooth_alpha;
         self.bass_mid_baseline = self.bass_mid_baseline * (1.0 - baseline_alpha) + bass_mid * baseline_alpha;
 
-        // Random Mode: timer-based painter cycle
+        // Random Mode: timer-based full reroll
         if self.params.random_mode_enabled {
             let interval = lerp(30.0, 1.0, self.params.random_mode_aggressiveness);
             if now.duration_since(self.last_random_change).as_secs_f32() >= interval {
-                self.params.painter_kind = self.params.painter_kind.next();
+                self.randomize_all_params();
                 self.last_random_change = now;
-                log::info!("Random Mode: painter -> {} (interval {:.1}s)",
-                    self.params.painter_kind.name(), interval);
+                log::info!("Random Mode: full reroll (interval {:.1}s)", interval);
             }
         }
 
@@ -1917,25 +1916,64 @@ impl GpuState {
             }
         }
 
-        // Party Mode: audio-triggered painter + shape + frame hue
+        // Party Mode: audio-triggered full reroll
         if self.params.party_mode_enabled {
             let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
             let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
             if now.duration_since(self.last_party_trigger).as_secs_f32() >= cooldown {
                 let trigger_level = self.bass_mid_baseline * threshold_mult;
                 if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
-                    self.params.painter_kind  = self.params.painter_kind.next();
-                    self.params.current_shape = self.params.current_shape.next();
-                    use rand::Rng;
-                    self.params.frame_color_hue = rand::thread_rng().gen_range(0.0_f32..360.0);
+                    self.randomize_all_params();
                     self.last_party_trigger = now;
-                    log::info!("Party Mode: painter -> {}, shape -> {:?}, hue -> {:.0}°",
-                        self.params.painter_kind.name(),
-                        self.params.current_shape,
-                        self.params.frame_color_hue);
+                    log::info!("Party Mode: full reroll on beat");
                 }
             }
         }
+    }
+
+    fn randomize_all_params(&mut self) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        self.params.painter_kind = match rng.gen_range(0u8..4) {
+            0 => PainterKind::HueStripe,
+            1 => PainterKind::Spiral,
+            2 => PainterKind::Plasma,
+            _ => PainterKind::Skin,
+        };
+        self.params.current_shape = match rng.gen_range(0u8..4) {
+            0 => ShapeKind::Cylinder,
+            1 => ShapeKind::Sphere,
+            2 => ShapeKind::Cube,
+            _ => ShapeKind::Tetrahedron,
+        };
+        self.params.frame_shape = match rng.gen_range(0u8..7) {
+            0 => FrameShape::None,
+            1 => FrameShape::Circle,
+            2 => FrameShape::Square,
+            3 => FrameShape::Rounded,
+            4 => FrameShape::Hexagon,
+            5 => FrameShape::Octagon,
+            _ => FrameShape::Star,
+        };
+
+        self.params.fold_count            = rng.gen_range(4.0_f32..=20.0).round();
+        self.params.zoom                  = rng.gen_range(0.5_f32..=1.3);
+        self.params.rotation_speed_scale  = rng.gen_range(0.3_f32..=2.5);
+        self.params.frame_size            = rng.gen_range(0.65_f32..=1.0);
+        self.params.frame_color_hue       = rng.gen_range(0.0_f32..360.0);
+        self.params.colorize_hue          = rng.gen_range(0.0_f32..360.0);
+        self.params.colorize_intensity    = rng.gen_range(0.2_f32..=0.9);
+        self.params.distortion_amplitude  = rng.gen_range(0.0_f32..=0.25);
+        self.params.distortion_frequency  = rng.gen_range(1.0_f32..=6.0);
+        self.params.contrast              = rng.gen_range(0.7_f32..=1.8);
+        self.params.contrast_passes       = rng.gen_range(1u32..=4);
+        self.params.saturation            = rng.gen_range(0.6_f32..=1.6);
+        self.params.bass_zoom_strength    = rng.gen_range(0.0_f32..=0.6);
+        self.params.invert_enabled        = rng.gen_bool(0.5);
+        self.params.colorize_enabled      = rng.gen_bool(0.5);
+        self.params.distortion_enabled    = rng.gen_bool(0.5);
+        self.params.shake_enabled         = rng.gen_bool(0.5);
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
