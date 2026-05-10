@@ -35,6 +35,8 @@ pub enum ParamChange {
     FrameShape(crate::FrameShape),
     PainterKind(crate::PainterKind),
     SkinCropOffset(f32),
+    Contrast(f32),
+    Saturation(f32),
 }
 
 pub struct MenuBar {
@@ -428,6 +430,28 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Effects", |ui| {
+            let mut contrast = params.contrast;
+            if ui
+                .add(egui::Slider::new(&mut contrast, 0.0..=2.0).text("Contrast").step_by(0.05))
+                .changed()
+            {
+                changes.push(ParamChange::Contrast(contrast));
+            }
+
+            let mut saturation = params.saturation;
+            if ui
+                .add(
+                    egui::Slider::new(&mut saturation, 0.0..=2.0)
+                        .text("Saturation")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changes.push(ParamChange::Saturation(saturation));
+            }
+
+            ui.separator();
+
             let mut invert = params.invert_enabled;
             if ui.checkbox(&mut invert, "Color Invert").changed() {
                 changes.push(ParamChange::InvertEnabled(invert));

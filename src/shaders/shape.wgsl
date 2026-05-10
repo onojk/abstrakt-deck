@@ -12,8 +12,8 @@ struct ShapeEffects {
     distortion_frequency: f32,
     time_seconds:         f32,
     painter_scroll_phase: f32,
-    _pad_s0:              f32,
-    _pad_s1:              f32,
+    contrast:             f32,
+    saturation:           f32,
     _pad_s2:              f32,
 };
 
@@ -71,6 +71,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // The window slides by 0.25 per revolution, so 4 rotations = 1 full painter cycle.
     let scroll_u = fract(warped_uv.x * 0.25 + effects.painter_scroll_phase);
     var color = textureSample(painter_tex, painter_sampler, vec2<f32>(scroll_u, warped_uv.y));
+
+    // Contrast: pivot around 0.5
+    color = vec4<f32>((color.rgb - vec3<f32>(0.5)) * effects.contrast + vec3<f32>(0.5), color.a);
+
+    // Saturation: blend between luma and full color
+    let luma = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    color = vec4<f32>(mix(vec3<f32>(luma), color.rgb, effects.saturation), color.a);
+
+    color = vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
 
     // Invert: flip RGB
     let inverted = vec3<f32>(1.0) - color.rgb;

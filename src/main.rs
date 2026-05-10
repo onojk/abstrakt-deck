@@ -66,8 +66,8 @@ struct ShapeEffects {
     time_seconds:         f32,
     // Scroll phase for the 4096×256 painter window (0..1); keeps struct at 16-byte alignment.
     painter_scroll_phase: f32,
-    _pad_s0:              f32,
-    _pad_s1:              f32,
+    contrast:             f32,
+    saturation:           f32,
     _pad_s2:              f32,
 }
 
@@ -162,6 +162,8 @@ pub struct VisualParams {
     pub shake_enabled: bool,
     pub bass_zoom_strength: f32,
     pub painter_kind: PainterKind,
+    pub contrast: f32,
+    pub saturation: f32,
 }
 
 impl Default for VisualParams {
@@ -184,6 +186,8 @@ impl Default for VisualParams {
             shake_enabled: true,
             bass_zoom_strength: 0.3,
             painter_kind: PainterKind::HueStripe,
+            contrast: 1.0,
+            saturation: 1.0,
         }
     }
 }
@@ -224,7 +228,13 @@ struct Preset {
     shake_enabled: bool,
     bass_zoom_strength: f32,
     painter_kind: String,
+    #[serde(default = "default_one_f32")]
+    contrast: f32,
+    #[serde(default = "default_one_f32")]
+    saturation: f32,
 }
+
+fn default_one_f32() -> f32 { 1.0 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -246,6 +256,8 @@ impl Preset {
             shake_enabled: params.shake_enabled,
             bass_zoom_strength: params.bass_zoom_strength,
             painter_kind: params.painter_kind.name().to_string(),
+            contrast: params.contrast,
+            saturation: params.saturation,
         }
     }
 
@@ -285,6 +297,8 @@ impl Preset {
             "Skin"   => PainterKind::Skin,
             _        => PainterKind::HueStripe,
         };
+        params.contrast   = self.contrast;
+        params.saturation = self.saturation;
     }
 }
 
@@ -866,7 +880,7 @@ impl GpuState {
                     distortion_enabled: 0.0, distortion_amplitude: 0.05, distortion_frequency: 3.0,
                     time_seconds: 0.0,
                     painter_scroll_phase: 0.0,
-                    _pad_s0: 0.0, _pad_s1: 0.0, _pad_s2: 0.0,
+                    contrast: 1.0, saturation: 1.0, _pad_s2: 0.0,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -1517,7 +1531,9 @@ impl GpuState {
                 distortion_frequency: self.params.distortion_frequency,
                 time_seconds:         elapsed,
                 painter_scroll_phase: self.painter_scroll_phase,
-                _pad_s0: 0.0, _pad_s1: 0.0, _pad_s2: 0.0,
+                contrast:   self.params.contrast,
+                saturation: self.params.saturation,
+                _pad_s2: 0.0,
             }]),
         );
 
@@ -2424,6 +2440,8 @@ impl ApplicationHandler for App {
                                 gpu.upload_skin_bytes(&rgba);
                             }
                         }
+                        ParamChange::Contrast(v)   => gpu.params.contrast   = v,
+                        ParamChange::Saturation(v) => gpu.params.saturation = v,
                     }
                 }
 
@@ -2431,11 +2449,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 23d — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 23c.5 — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 23d — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 23c.5 — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2530,6 +2548,8 @@ mod tests {
             shake_enabled: false,
             bass_zoom_strength: 0.8,
             painter_kind: PainterKind::Plasma,
+            contrast: 1.5,
+            saturation: 0.7,
         }
     }
 
@@ -2561,6 +2581,8 @@ mod tests {
         assert_eq!(restored.shake_enabled, original.shake_enabled, "shake_enabled failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
         assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");
+        assert_eq!(restored.contrast,   original.contrast,   "contrast failed");
+        assert_eq!(restored.saturation, original.saturation, "saturation failed");
     }
 
     #[test]
