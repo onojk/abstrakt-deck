@@ -15,8 +15,10 @@ static CHEAT_SHEET_PNG: &[u8] = include_bytes!("../assets/cheat_sheet.png");
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use wgpu::util::DeviceExt;
@@ -949,28 +951,66 @@ fn load_preset(gpu: &mut GpuState) -> Result<(), String> {
 }
 
 pub struct OfflineTarget {
-    #[allow(dead_code)]
-    texture: wgpu::Texture,
+    pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub width: u32,
     pub height: u32,
+    pub format: wgpu::TextureFormat,
 }
 
 impl OfflineTarget {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Offline Render Target"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::COPY_SRC
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self { texture, view, width, height }
+        Self { texture, view, width, height, format }
     }
+}
+
+pub struct FrameSaveJob {
+    pub frame_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba_bytes: Vec<u8>,
+    pub output_path: PathBuf,
+}
+
+pub struct ExportState {
+    pub current_frame: u32,
+    pub total_frames: u32,
+    pub output_dir: PathBuf,
+    pub fps: u32,
+    pub start_time: Instant,
+    pub frame_save_sender: Sender<FrameSaveJob>,
+}
+
+fn spawn_frame_save_worker() -> Sender<FrameSaveJob> {
+    let (tx, rx) = std::sync::mpsc::channel::<FrameSaveJob>();
+    std::thread::spawn(move || {
+        while let Ok(job) = rx.recv() {
+            match image::RgbaImage::from_raw(job.width, job.height, job.rgba_bytes) {
+                Some(img) => {
+                    if let Err(e) = img.save(&job.output_path) {
+                        log::error!("frame {:05}: save failed: {}", job.frame_index, e);
+                    }
+                }
+                None => {
+                    log::error!("frame {:05}: failed to construct RgbaImage", job.frame_index);
+                }
+            }
+        }
+    });
+    tx
 }
 
 struct ShapeBufferSet {
@@ -1052,6 +1092,7 @@ struct GpuState {
 
     // Offline render target for export
     pub offline_target: Option<OfflineTarget>,
+    pub export_state: Option<ExportState>,
 
     help_overlay: HelpOverlay,
 
@@ -1854,6 +1895,7 @@ impl GpuState {
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
             offline_target: None,
+            export_state: None,
             help_overlay,
             start_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
@@ -1990,6 +2032,11 @@ impl GpuState {
     }
 
     fn render(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) -> Result<(), wgpu::SurfaceError> {
+        if self.export_state.is_some() {
+            self.render_export_frame();
+            return Ok(());
+        }
+
         let elapsed = self.start_time.elapsed().as_secs_f32();
 
         // Rotation-driven painter scroll: shape samples a 0.25-wide window that slides
@@ -2377,6 +2424,420 @@ impl GpuState {
         }
     }
 
+    pub fn start_export(&mut self) -> Result<(), String> {
+        if self.export_state.is_some() {
+            return Err("export already in progress".into());
+        }
+        let duration = self.loaded_audio.as_ref()
+            .ok_or_else(|| "no audio loaded — File → Open Audio first".to_string())?
+            .duration_seconds;
+        let (off_w, off_h) = self.offline_target.as_ref()
+            .map(|t| (t.width, t.height))
+            .ok_or_else(|| "no offline target".to_string())?;
+
+        if let Some(player) = &self.audio_player {
+            if player.is_playing() { player.pause(); }
+        }
+
+        let fps = self.params.export_framerate.fps();
+        let total_frames = (duration * fps as f32).ceil() as u32;
+
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let output_dir = PathBuf::from(format!("/tmp/abstrakt-deck-export-{}", timestamp));
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("create dir failed: {}", e))?;
+
+        let frame_save_sender = spawn_frame_save_worker();
+
+        log::info!(
+            "Export started: {} frames at {}fps, {}×{}, output → {}",
+            total_frames, fps, off_w, off_h, output_dir.display()
+        );
+
+        self.shake_offset   = glam::Vec3::ZERO;
+        self.shake_velocity = glam::Vec3::ZERO;
+        self.file_rms_baseline = 0.0;
+
+        self.export_state = Some(ExportState {
+            current_frame: 0,
+            total_frames,
+            output_dir,
+            fps,
+            start_time: Instant::now(),
+            frame_save_sender,
+        });
+        Ok(())
+    }
+
+    fn render_export_frame(&mut self) {
+        // ── Phase 1: snapshot state, check completion ─────────────────────────
+        let (frame_index, total, fps, output_dir, sender) = {
+            let e = self.export_state.as_ref().unwrap();
+            (e.current_frame, e.total_frames, e.fps,
+             e.output_dir.clone(), e.frame_save_sender.clone())
+        };
+
+        if frame_index >= total {
+            let elapsed = self.export_state.as_ref().unwrap().start_time.elapsed().as_secs_f32();
+            log::info!(
+                "Export complete: {} frames in {:.1}s — saved to {}",
+                total, elapsed, output_dir.display()
+            );
+            self.export_state = None;
+            return;
+        }
+
+        let frame_time = frame_index as f32 / fps as f32;
+
+        // ── Phase 2: audio energies at this frame ─────────────────────────────
+        let (bass, mid, rms) = if let Some(audio) = self.loaded_audio.clone() {
+            let ch = audio.channels as usize;
+            let pos = (frame_time * audio.sample_rate as f32) as usize;
+            let window = 1024usize;
+            let start = pos.saturating_sub(window / 2) * ch;
+            let end = (start + window * ch).min(audio.samples.len());
+            if start < end && ch > 0 {
+                let mut mono = Vec::with_capacity(window);
+                let mut i = start;
+                while i + ch <= end {
+                    let mut sum = 0.0f32;
+                    for c in 0..ch { sum += audio.samples[i + c]; }
+                    mono.push(sum / ch as f32);
+                    i += ch;
+                }
+                let (b, m) = audio::compute_band_energies(&mono, audio.sample_rate);
+                let r = (mono.iter().map(|x| x * x).sum::<f32>() / mono.len() as f32)
+                    .sqrt().min(1.0);
+                (b, m, r)
+            } else { (0.0, 0.0, 0.0) }
+        } else { (0.0, 0.0, 0.0) };
+
+        // ── Phase 3: state updates (needs &mut self) ──────────────────────────
+        self.update_bass_zoom(bass);
+        self.update_modes(bass, mid);
+
+        // Beat-shake detection for the export timeline
+        {
+            let threshold = self.file_rms_baseline * 1.5 + 0.01;
+            if rms > threshold && self.last_file_beat.elapsed().as_millis() > 120 {
+                let strength = ((rms / (threshold + 0.001)).min(3.0) / 3.0).clamp(0.0, 1.0);
+                self.kick_shake(strength);
+                self.last_file_beat = Instant::now();
+            }
+            self.file_rms_baseline = self.file_rms_baseline * 0.95 + rms * 0.05;
+        }
+
+        // Spring-damping shake physics, stepped by 1/fps
+        let dt = 1.0 / fps as f32;
+        let force = -30.0 * self.shake_offset - 8.0 * self.shake_velocity;
+        self.shake_velocity += force * dt;
+        self.shake_offset   += self.shake_velocity * dt;
+
+        // ── Phase 4: uniforms with export resolution + frame_time ─────────────
+        let (off_w, off_h) = {
+            let t = self.offline_target.as_ref().unwrap();
+            (t.width, t.height)
+        };
+
+        let shape = self.params.current_shape;
+        let ang_vel = std::f32::consts::TAU / shape.rotation_period_seconds();
+        let rot_rad = frame_time * ang_vel * self.params.rotation_speed_scale;
+        self.painter_scroll_phase = (rot_rad / std::f32::consts::TAU * 0.25).fract();
+
+        let angle = rot_rad;
+        let axis  = glam::Vec3::from_array(shape.rotation_axis()).normalize();
+        let model = glam::Mat4::from_translation(self.shake_offset)
+            * glam::Mat4::from_axis_angle(axis, angle)
+            * glam::Mat4::from_scale(glam::Vec3::splat(shape.model_scale()));
+        let aspect = off_w as f32 / off_h as f32;
+        let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+        let cam  = glam::Mat4::look_at_rh(
+            glam::Vec3::new(0.0, 0.5, 3.0), glam::Vec3::ZERO, glam::Vec3::Y,
+        );
+
+        self.queue.write_buffer(&self.uniforms_buffer, 0,
+            bytemuck::cast_slice(&[GlobalUniforms {
+                time_seconds: frame_time,
+                resolution_x: off_w as f32, resolution_y: off_h as f32, _pad: 0.0,
+            }]));
+        self.queue.write_buffer(&self.kaleido_uniforms_buffer, 0,
+            bytemuck::cast_slice(&[KaleidoUniforms {
+                resolution_x: off_w as f32, resolution_y: off_h as f32,
+                fold_count: self.params.fold_count,
+                zoom: self.params.zoom * self.params.current_shape.kaleido_zoom()
+                    + self.bass_zoom_smoothed * self.params.bass_zoom_strength,
+            }]));
+        self.queue.write_buffer(&self.shape_effects_buffer, 0,
+            bytemuck::cast_slice(&[ShapeEffects {
+                invert:               if self.params.invert_enabled   { 1.0 } else { 0.0 },
+                colorize_enabled:     if self.params.colorize_enabled { 1.0 } else { 0.0 },
+                colorize_hue:         self.params.colorize_hue,
+                colorize_intensity:   self.params.colorize_intensity,
+                distortion_enabled:   if self.params.distortion_enabled { 1.0 } else { 0.0 },
+                distortion_amplitude: self.params.distortion_amplitude,
+                distortion_frequency: self.params.distortion_frequency,
+                time_seconds:         frame_time,
+                painter_scroll_phase: self.painter_scroll_phase,
+                contrast:        self.params.contrast,
+                saturation:      self.params.saturation,
+                contrast_passes: self.params.contrast_passes as f32,
+            }]));
+        let (fr, fg, fb) = hsv_to_rgb(self.params.frame_color_hue, 0.85, 1.0);
+        self.queue.write_buffer(&self.frame_uniforms_buffer, 0,
+            bytemuck::cast_slice(&[FrameUniforms {
+                resolution_x: off_w as f32, resolution_y: off_h as f32,
+                frame_color_r: fr, frame_color_g: fg, frame_color_b: fb, frame_color_a: 1.0,
+                frame_shape: self.params.frame_shape.as_f32(),
+                frame_size:  self.params.frame_size,
+            }]));
+        self.queue.write_buffer(&self.transform_buffer, 0,
+            bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]));
+
+        // ── Phase 5: temporary export-resolution FBOs + bind groups ──────────
+        let (_exp_shape_tex, exp_shape_view, _exp_shape_depth_tex, exp_shape_depth_view) =
+            Self::create_shape_fbo(&self.device, off_w, off_h);
+        let (_exp_kaleido_tex, exp_kaleido_view) =
+            Self::create_kaleido_fbo(&self.device, off_w, off_h);
+
+        let exp_kaleido_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Export Kaleido BG"),
+            layout: &self.kaleido_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0,
+                    resource: self.kaleido_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&exp_shape_view) },
+                wgpu::BindGroupEntry { binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+            ],
+        });
+        let exp_frame_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Export Frame BG"),
+            layout: &self.frame_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0,
+                    resource: self.frame_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&exp_kaleido_view) },
+                wgpu::BindGroupEntry { binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+            ],
+        });
+
+        // ── Phase 6: render passes ────────────────────────────────────────────
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Export frame encoder"),
+        });
+
+        // Pass 1: painter (unchanged — 4096×256 is resolution-independent)
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Export painter pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.painter_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            if self.params.painter_kind == PainterKind::Skin {
+                pass.set_pipeline(&self.painter_skin_pipeline);
+                pass.set_bind_group(0, &self.skin_bind_group, &[]);
+            } else {
+                let p = &self.painter_pipelines[&self.params.painter_kind];
+                pass.set_pipeline(p);
+                pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
+            }
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass 2: shape → export-res shape view
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Export shape pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &exp_shape_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &exp_shape_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.shape_pipeline);
+            pass.set_bind_group(0, &self.transform_bind_group, &[]);
+            pass.set_bind_group(1, &self.shape_bind_group, &[]);
+            pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
+            let bufs = &self.shape_buffers[&self.params.current_shape];
+            pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
+            pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+        }
+
+        // Pass 3: kaleido → export-res kaleido view
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Export kaleido pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &exp_kaleido_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.kaleido_pipeline);
+            pass.set_bind_group(0, &exp_kaleido_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass 4: frame overlay → offline target
+        {
+            let offline_view = &self.offline_target.as_ref().unwrap().view;
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Export frame pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: offline_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.frame_pipeline);
+            pass.set_bind_group(0, &exp_frame_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Readback: copy offline_target → staging buffer
+        let aligned_bpr = ((off_w * 4 + 255) / 256) * 256;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Export readback"),
+            size: (aligned_bpr * off_h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &self.offline_target.as_ref().unwrap().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bpr),
+                    rows_per_image: Some(off_h),
+                },
+            },
+            wgpu::Extent3d { width: off_w, height: off_h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(std::iter::once(enc.finish()));
+
+        // ── Phase 7: map, de-pad, BGRA→RGBA, send to worker ──────────────────
+        let mut pixels = {
+            let slice = readback.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+            self.device.poll(wgpu::Maintain::Wait);
+            rx.recv().expect("map channel closed").expect("buffer map failed");
+            let data = slice.get_mapped_range();
+            let mut packed = Vec::with_capacity((off_w * off_h * 4) as usize);
+            for row in 0..off_h {
+                let s = (row * aligned_bpr) as usize;
+                packed.extend_from_slice(&data[s..s + (off_w * 4) as usize]);
+            }
+            packed
+        };
+        readback.unmap();
+
+        let fmt = self.offline_target.as_ref().unwrap().format;
+        if matches!(fmt, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm) {
+            for px in pixels.chunks_exact_mut(4) { px.swap(0, 2); }
+        }
+
+        let _ = sender.send(FrameSaveJob {
+            frame_index,
+            width: off_w, height: off_h,
+            rgba_bytes: pixels,
+            output_path: output_dir.join(format!("frame_{:05}.png", frame_index)),
+        });
+
+        // ── Phase 8: preview — blit offline target to swapchain ───────────────
+        if let Ok(swap_frame) = self.surface.get_current_texture() {
+            let swap_view = swap_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let preview_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export preview BG"),
+                layout: &self.blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.offline_target.as_ref().unwrap().view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry { binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
+            let mut blit_enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Export preview blit"),
+            });
+            {
+                let mut pass = blit_enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Export preview pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &preview_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.queue.submit(std::iter::once(blit_enc.finish()));
+            swap_frame.present();
+        }
+
+        // ── Phase 9: advance counter + progress log ───────────────────────────
+        if let Some(exp) = self.export_state.as_mut() {
+            exp.current_frame += 1;
+            let log_interval = (total / 10).max(30);
+            if exp.current_frame % log_interval == 0 || exp.current_frame == total {
+                let elapsed = exp.start_time.elapsed().as_secs_f32();
+                let pct = exp.current_frame as f32 / total as f32 * 100.0;
+                let render_fps = exp.current_frame as f32 / elapsed.max(0.001);
+                let eta = (total - exp.current_frame) as f32 / render_fps;
+                log::info!(
+                    "Export progress: {}/{} ({:.1}%) — {:.1} fps render, ~{:.0}s remaining",
+                    exp.current_frame, total, pct, render_fps, eta
+                );
+            }
+        }
+    }
+
     fn randomize_all_params(&mut self) {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -2679,7 +3140,7 @@ impl ApplicationHandler for App {
         let mut gpu = pollster::block_on(GpuState::new(window.clone()));
         let menu_bar = MenuBar::new(&gpu.device, gpu.config.format, &window);
         let (off_w, off_h) = gpu.params.export_resolution.dimensions();
-        gpu.offline_target = Some(OfflineTarget::new(&gpu.device, off_w, off_h));
+        gpu.offline_target = Some(OfflineTarget::new(&gpu.device, off_w, off_h, gpu.config.format));
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.menu_bar = Some(menu_bar);
@@ -2783,8 +3244,11 @@ impl ApplicationHandler for App {
                         log::info!("zoom = {:.2}", gpu.params.zoom);
                     }
                     KeyCode::KeyX => {
-                        gpu.params.zoom = (gpu.params.zoom + 0.05).min(1.5);
-                        log::info!("zoom = {:.2}", gpu.params.zoom);
+                        // Temporary export trigger (wired properly in 24f)
+                        match gpu.start_export() {
+                            Ok(()) => {}
+                            Err(e) => log::error!("Export failed to start: {}", e),
+                        }
                     }
                     KeyCode::Comma => {
                         gpu.params.rotation_speed_scale = (gpu.params.rotation_speed_scale - 0.25).max(0.0);
@@ -2926,6 +3390,38 @@ impl ApplicationHandler for App {
                 gpu.resize(physical_size);
             }
             WindowEvent::RedrawRequested => {
+                // Export mode: skip live audio/MIDI/mode processing
+                if gpu.export_state.is_some() {
+                    if let Some(audio) = &self.audio {
+                        while audio.event_rx.try_recv().is_ok() {}
+                    }
+                    if let Some(midi) = &self.midi {
+                        while midi.event_rx.try_recv().is_ok() {}
+                    }
+                    match gpu.render(None) {
+                        Ok(()) => {}
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                            gpu.resize(gpu.size);
+                        }
+                        Err(e) => log::warn!("Surface error during export: {:?}", e),
+                    }
+                    if let Some(fps_val) = self.fps.tick() {
+                        let title = if let Some(exp) = &gpu.export_state {
+                            format!(
+                                "abstrakt-deck — slice 24d — EXPORTING {}/{} ({:.0}%) — {:.1} fps",
+                                exp.current_frame, exp.total_frames,
+                                exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
+                                fps_val,
+                            )
+                        } else {
+                            format!("abstrakt-deck — slice 24d — {:.1} fps", fps_val)
+                        };
+                        window.set_title(&title);
+                    }
+                    window.request_redraw();
+                    return;
+                }
+
                 let file_playing = gpu.audio_player.as_ref().map_or(false, |p| p.is_playing());
 
                 // Mic beat events — drain always; only apply shake when file is not playing
@@ -3207,7 +3703,8 @@ impl ApplicationHandler for App {
                         ParamChange::ExportResolution(v) => {
                             gpu.params.export_resolution = v;
                             let (w, h) = v.dimensions();
-                            gpu.offline_target = Some(OfflineTarget::new(&gpu.device, w, h));
+                            let fmt = gpu.config.format;
+                            gpu.offline_target = Some(OfflineTarget::new(&gpu.device, w, h, fmt));
                             log::info!("Offline target resized to {}×{}", w, h);
                         }
                         ParamChange::ExportFramerate(v) => {
@@ -3220,11 +3717,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24c — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24d — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24c — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24d — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
