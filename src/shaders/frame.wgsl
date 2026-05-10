@@ -59,20 +59,27 @@ fn sdf_star(p: vec2<f32>, r: f32) -> f32 {
     let num_points = 5.0;
     let inner_r    = r * 0.4;
 
-    let angle   = atan2(p.y, p.x);
-    let radius  = length(p);
-    let segment = TAU / num_points;
+    let angle    = atan2(p.y, p.x);
+    let radius   = length(p);
+    let segment  = TAU / num_points;
+    let half_seg = segment * 0.5;
 
-    // Wrap into one segment centered on an outer tip.
-    // Double-modulo pattern (same as sdf_polygon) handles negative angles correctly.
-    let raw   = angle + segment * 0.5;
-    let local = (raw % segment + segment) % segment - segment * 0.5;
+    // Wrap angle into one symmetric petal segment [-half_seg, +half_seg].
+    // Double-modulo handles negative atan2 results (WGSL % is IEEE 754 remainder).
+    let local = ((angle % segment) + segment) % segment - half_seg;
 
-    // Boundary radius: r at the tip (local=0), inner_r at the valley (local=±segment/2).
-    let boundary = mix(inner_r, r, 1.0 - abs(local) / (segment * 0.5));
+    // The star boundary is the straight line from the outer tip (r, local=0)
+    // to the inner corner (inner_r, local=±half_seg).  Project into petal-space
+    // Cartesian coords (fold lower half onto upper) and compute distance to that line.
+    let tip    = vec2<f32>(r,                          0.0);
+    let corner = vec2<f32>(inner_r * cos(half_seg), inner_r * sin(half_seg));
+    let edge_dir    = normalize(corner - tip);
+    let edge_normal = vec2<f32>(-edge_dir.y, edge_dir.x); // 90° CCW perpendicular
 
-    // Positive = outside — matches the sign convention used by all other SDFs in this file.
-    return radius - boundary;
+    let local_p = vec2<f32>(radius * cos(local), radius * sin(abs(local)));
+
+    // Positive outside, negative inside — matches sign convention of all other SDFs here.
+    return -dot(local_p - tip, edge_normal);
 }
 
 @fragment
