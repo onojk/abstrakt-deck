@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use wgpu::util::DeviceExt;
@@ -686,6 +687,143 @@ fn decode_audio_file(path: &std::path::Path) -> Result<LoadedAudio, String> {
     })
 }
 
+// ── Audio Player ────────────────────────────────────────────────────────────
+
+pub struct AudioPlayer {
+    /// Current playback position in SOURCE FRAMES (not interleaved samples).
+    position_frames: Arc<AtomicUsize>,
+    is_playing: Arc<AtomicBool>,
+    pub output_sample_rate: u32,
+    _output_stream: cpal::Stream,
+}
+
+impl AudioPlayer {
+    pub fn new(audio: Arc<LoadedAudio>) -> Result<Self, String> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host   = cpal::default_host();
+        let device = host.default_output_device()
+            .ok_or_else(|| "no output device found".to_string())?;
+        let config = device.default_output_config()
+            .map_err(|e| format!("output config: {}", e))?;
+
+        let output_sample_rate = config.sample_rate().0;
+        let output_channels    = config.channels() as usize;
+        let sample_format      = config.sample_format();
+
+        log::info!("AudioPlayer output: {} Hz, {} ch, {:?}",
+            output_sample_rate, output_channels, sample_format);
+
+        if sample_format != cpal::SampleFormat::F32 {
+            return Err(format!(
+                "output device uses {:?}; only F32 output is supported", sample_format
+            ));
+        }
+
+        let position   = Arc::new(AtomicUsize::new(0));
+        let is_playing = Arc::new(AtomicBool::new(false));
+
+        let pos_c  = position.clone();
+        let play_c = is_playing.clone();
+        let aud_c  = audio.clone();
+
+        // How many source frames advance per output frame
+        let src_per_out = audio.sample_rate as f64 / output_sample_rate as f64;
+        let total_src   = audio.samples.len() / audio.channels.max(1) as usize;
+
+        let stream_config: cpal::StreamConfig = config.into();
+        let stream = device.build_output_stream(
+            &stream_config,
+            move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let frames = output.len() / output_channels;
+                if !play_c.load(Ordering::Relaxed) {
+                    for s in output.iter_mut() { *s = 0.0; }
+                    return;
+                }
+                let base   = pos_c.load(Ordering::Relaxed);
+                let src_ch = aud_c.channels as usize;
+                for f in 0..frames {
+                    let src_frame = base + (f as f64 * src_per_out) as usize;
+                    let (l, r) = if src_frame < total_src {
+                        let i = src_frame * src_ch;
+                        if src_ch >= 2 {
+                            (aud_c.samples[i], aud_c.samples[i + 1])
+                        } else {
+                            let s = aud_c.samples[i];
+                            (s, s)
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    if output_channels == 1 {
+                        output[f] = (l + r) * 0.5;
+                    } else {
+                        output[f * output_channels]     = l;
+                        output[f * output_channels + 1] = r;
+                        for c in 2..output_channels {
+                            output[f * output_channels + c] = 0.0;
+                        }
+                    }
+                }
+                let new_pos = base + (frames as f64 * src_per_out) as usize;
+                pos_c.store(new_pos, Ordering::Relaxed);
+                if new_pos >= total_src {
+                    play_c.store(false, Ordering::Relaxed);
+                    pos_c.store(0, Ordering::Relaxed);
+                }
+            },
+            |err| log::error!("audio output error: {}", err),
+            None,
+        ).map_err(|e| format!("stream build: {}", e))?;
+
+        stream.play().map_err(|e| format!("stream play: {}", e))?;
+
+        Ok(Self {
+            position_frames: position,
+            is_playing,
+            output_sample_rate,
+            _output_stream: stream,
+        })
+    }
+
+    pub fn play(&self) { self.is_playing.store(true,  Ordering::Relaxed); }
+    pub fn pause(&self) { self.is_playing.store(false, Ordering::Relaxed); }
+    pub fn is_playing(&self) -> bool { self.is_playing.load(Ordering::Relaxed) }
+
+    /// Current position in source frames.
+    pub fn position_frames(&self) -> usize { self.position_frames.load(Ordering::Relaxed) }
+
+    /// Seek to a specific source frame.
+    pub fn seek_frames(&self, target: usize) { self.position_frames.store(target, Ordering::Relaxed); }
+
+    /// Current position in seconds (based on source sample rate).
+    pub fn position_seconds(&self, source_sample_rate: u32) -> f32 {
+        self.position_frames() as f32 / source_sample_rate as f32
+    }
+}
+
+/// Compute (bass, mid, rms) from the file at the player's current position.
+/// Uses a 1024-frame mono window centred on the playhead.
+fn compute_file_energies(player: &AudioPlayer, audio: &LoadedAudio) -> (f32, f32, f32) {
+    const WINDOW: usize = 1024;
+    let ch = audio.channels.max(1) as usize;
+    let total_frames = audio.samples.len() / ch;
+    let pos = player.position_frames();
+    let start = pos.saturating_sub(WINDOW / 2).min(total_frames);
+    let end   = (start + WINDOW).min(total_frames);
+    if start >= end { return (0.0, 0.0, 0.0); }
+    let mono: Vec<f32> = (start..end)
+        .map(|f| {
+            let i = f * ch;
+            (0..ch).map(|c| audio.samples.get(i + c).copied().unwrap_or(0.0))
+                .sum::<f32>() / ch as f32
+        })
+        .collect();
+    let rms = (mono.iter().map(|x| x * x).sum::<f32>() / mono.len() as f32).sqrt();
+    let (bass, mid) = audio::compute_band_energies(&mono, audio.sample_rate);
+    (bass, mid, rms)
+}
+
 fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32) -> Vec<u8> {
     use image::GenericImageView;
     let (src_w, src_h) = img.dimensions();
@@ -830,12 +968,17 @@ struct GpuState {
 
     pub skin_source_image: Option<image::DynamicImage>,
     pub crop_y_offset: f32,
-    pub loaded_audio: Option<LoadedAudio>,
+    pub loaded_audio: Option<Arc<LoadedAudio>>,
+    pub audio_player: Option<AudioPlayer>,
+
+    // File-beat detection state (for shake when playing from file)
+    file_rms_baseline: f32,
+    last_file_beat:    Instant,
 
     // Autonomous mode state
-    last_random_change:    std::time::Instant,
-    last_reactive_trigger: std::time::Instant,
-    last_party_trigger:    std::time::Instant,
+    last_random_change:    Instant,
+    last_reactive_trigger: Instant,
+    last_party_trigger:    Instant,
     bass_mid_smoothed:     f32,
     bass_mid_baseline:     f32,
 
@@ -1623,6 +1766,9 @@ impl GpuState {
             skin_source_image: None,
             crop_y_offset: 0.5,
             loaded_audio: None,
+            audio_player: None,
+            file_rms_baseline: 0.0,
+            last_file_beat: Instant::now(),
             last_random_change:    Instant::now(),
             last_reactive_trigger: Instant::now(),
             last_party_trigger:    Instant::now(),
@@ -2681,27 +2827,86 @@ impl ApplicationHandler for App {
                 gpu.resize(physical_size);
             }
             WindowEvent::RedrawRequested => {
+                let file_playing = gpu.audio_player.as_ref().map_or(false, |p| p.is_playing());
+
+                // Mic beat events — drain always; only apply shake when file is not playing
                 if let Some(audio) = &self.audio {
                     while let Ok(event) = audio.event_rx.try_recv() {
-                        match event {
-                            AudioEvent::Beat(strength) => {
-                                if gpu.params.shake_enabled {
-                                    gpu.kick_shake(strength);
+                        if !file_playing {
+                            match event {
+                                AudioEvent::Beat(strength) => {
+                                    if gpu.params.shake_enabled {
+                                        gpu.kick_shake(strength);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
                 if let Some(midi) = &self.midi {
                     while let Ok(event) = midi.event_rx.try_recv() {
                         apply_midi_event(gpu, event);
                     }
                 }
-                let (bass_energy, mid_energy) = self.audio.as_ref()
-                    .map(|a| { let s = a.state.lock(); (s.bass_energy, s.mid_energy) })
-                    .unwrap_or((0.0, 0.0));
+
+                // Choose audio source: file player if active, otherwise mic
+                let file_energies: Option<(f32, f32, f32)> = if file_playing {
+                    if let (Some(player), Some(audio)) = (&gpu.audio_player, &gpu.loaded_audio) {
+                        Some(compute_file_energies(player, audio))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let (bass_energy, mid_energy) = match file_energies {
+                    Some((bass, mid, rms)) => {
+                        // Beat-shake from file: RMS threshold crossing
+                        if gpu.params.shake_enabled {
+                            let threshold = gpu.file_rms_baseline * 1.5 + 0.01;
+                            if rms > threshold && gpu.last_file_beat.elapsed().as_millis() > 120 {
+                                let strength = ((rms / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
+                                gpu.kick_shake(strength);
+                                gpu.last_file_beat = Instant::now();
+                            }
+                        }
+                        gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
+                        (bass, mid)
+                    }
+                    None => {
+                        self.audio.as_ref()
+                            .map(|a| { let s = a.state.lock(); (s.bass_energy, s.mid_energy) })
+                            .unwrap_or((0.0, 0.0))
+                    }
+                };
+
                 gpu.update_bass_zoom(bass_energy);
                 gpu.update_modes(bass_energy, mid_energy);
+
+                // Update player info displayed in the panel
+                let player_info = if let (Some(player), Some(audio)) =
+                    (&gpu.audio_player, &gpu.loaded_audio)
+                {
+                    let filename = std::path::Path::new(&audio.source_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    Some(menu_bar::PlayerInfo {
+                        filename,
+                        duration_seconds: audio.duration_seconds,
+                        position_seconds: player.position_seconds(audio.sample_rate),
+                        is_playing: player.is_playing(),
+                    })
+                } else {
+                    None
+                };
+                if let Some(menu) = self.menu_bar.as_mut() {
+                    menu.player_info = player_info;
+                }
+
                 let menu = self.menu_bar.as_mut()
                     .map(|m| (m, window.as_ref()));
                 match gpu.render(menu) {
@@ -2762,8 +2967,18 @@ impl ApplicationHandler for App {
                                 log::info!("Loading audio from {}", path.display());
                                 match decode_audio_file(&path) {
                                     Ok(audio) => {
-                                        gpu.loaded_audio = Some(audio);
-                                        log::info!("Audio loaded successfully");
+                                        let arc_audio = Arc::new(audio);
+                                        gpu.loaded_audio = Some(arc_audio.clone());
+                                        gpu.file_rms_baseline = 0.0;
+                                        match AudioPlayer::new(arc_audio) {
+                                            Ok(player) => {
+                                                gpu.audio_player = Some(player);
+                                                log::info!("Audio loaded and player ready");
+                                            }
+                                            Err(e) => {
+                                                log::error!("Player creation failed: {}", e);
+                                            }
+                                        }
                                     }
                                     Err(e) => log::error!("Audio load failed: {}", e),
                                 }
@@ -2846,6 +3061,24 @@ impl ApplicationHandler for App {
                         ParamChange::ReactiveModeAggressiveness(v) => gpu.params.reactive_mode_aggressiveness = v,
                         ParamChange::PartyModeEnabled(v)          => gpu.params.party_mode_enabled          = v,
                         ParamChange::PartyModeAggressiveness(v)   => gpu.params.party_mode_aggressiveness   = v,
+                        ParamChange::PlayerToggle => {
+                            if let Some(player) = &gpu.audio_player {
+                                if player.is_playing() { player.pause(); } else { player.play(); }
+                            }
+                        }
+                        ParamChange::PlayerStop => {
+                            if let Some(player) = &gpu.audio_player {
+                                player.pause();
+                                player.seek_frames(0);
+                            }
+                        }
+                        ParamChange::PlayerSeek(secs) => {
+                            if let (Some(player), Some(audio)) =
+                                (&gpu.audio_player, &gpu.loaded_audio)
+                            {
+                                player.seek_frames((secs * audio.sample_rate as f32) as usize);
+                            }
+                        }
                         ParamChange::ToggleLock(target) => {
                             use menu_bar::LockTarget;
                             match target {
@@ -2879,11 +3112,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 23f — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24b — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 23f — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24b — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }

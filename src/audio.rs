@@ -276,3 +276,45 @@ impl BeatAnalyzer {
         }
     }
 }
+
+/// Compute bass (60–200 Hz) and mid (200–2000 Hz) energies from a mono PCM window.
+/// Returns the same normalized values the mic analyzer produces so both sources
+/// feed identical ranges into update_bass_zoom / update_modes.
+pub fn compute_band_energies(mono: &[f32], sample_rate: u32) -> (f32, f32) {
+    const FFT_SIZE: usize = 1024;
+    if mono.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut planner = RealFftPlanner::<f32>::new();
+    let r2c = planner.plan_fft_forward(FFT_SIZE);
+    let mut windowed: Vec<f32> = (0..FFT_SIZE)
+        .map(|i| {
+            let s = mono.get(i).copied().unwrap_or(0.0);
+            let w = 0.5
+                - 0.5
+                    * ((2.0 * std::f32::consts::PI * i as f32) / (FFT_SIZE - 1) as f32).cos();
+            s * w
+        })
+        .collect();
+    let mut spectrum = r2c.make_output_vec();
+    if r2c.process(&mut windowed, &mut spectrum).is_err() {
+        return (0.0, 0.0);
+    }
+    let magnitudes: Vec<f32> = spectrum.iter().map(|c| c.norm()).collect();
+    let bin_hz = sample_rate as f32 / FFT_SIZE as f32;
+    let bass_lo = (60.0 / bin_hz) as usize;
+    let bass_hi = ((200.0 / bin_hz) as usize).min(magnitudes.len());
+    let bass = if bass_hi > bass_lo {
+        magnitudes[bass_lo..bass_hi].iter().sum::<f32>() / (bass_hi - bass_lo) as f32
+    } else {
+        0.0
+    };
+    let mid_lo = bass_hi;
+    let mid_hi = ((2000.0 / bin_hz) as usize).min(magnitudes.len());
+    let mid = if mid_hi > mid_lo {
+        magnitudes[mid_lo..mid_hi].iter().sum::<f32>() / (mid_hi - mid_lo) as f32
+    } else {
+        0.0
+    };
+    ((bass * 0.05).min(1.0), (mid * 0.05).min(1.0))
+}

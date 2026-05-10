@@ -27,6 +27,14 @@ pub enum LockTarget {
     ShakeEnabled,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlayerInfo {
+    pub filename:         String,
+    pub duration_seconds: f32,
+    pub position_seconds: f32,
+    pub is_playing:       bool,
+}
+
 #[derive(Debug)]
 pub enum MenuAction {
     OpenSkin,
@@ -70,6 +78,9 @@ pub enum ParamChange {
     PartyModeEnabled(bool),
     PartyModeAggressiveness(f32),
     ToggleLock(LockTarget),
+    PlayerToggle,
+    PlayerStop,
+    PlayerSeek(f32),
 }
 
 pub struct MenuBar {
@@ -82,6 +93,7 @@ pub struct MenuBar {
     pub skin_thumbnail: Option<egui::TextureHandle>,
     skin_thumbnail_aspect: f32,
     pub current_crop_y_offset: f32,
+    pub player_info: Option<PlayerInfo>,
 }
 
 impl MenuBar {
@@ -110,6 +122,7 @@ impl MenuBar {
             skin_thumbnail: None,
             skin_thumbnail_aspect: 1.0,
             current_crop_y_offset: 0.5,
+            player_info: None,
         }
     }
 
@@ -199,6 +212,7 @@ impl MenuBar {
         let skin_thumb = self.skin_thumbnail.clone();
         let skin_aspect = self.skin_thumbnail_aspect;
         let mut current_crop = self.current_crop_y_offset;
+        let player_info_snap = self.player_info.clone();
         let mut frame_actions: Vec<MenuAction> = Vec::new();
         let mut frame_changes: Vec<ParamChange> = Vec::new();
 
@@ -292,6 +306,12 @@ impl MenuBar {
                                 skin_thumb.as_ref(),
                                 skin_aspect,
                                 &mut current_crop,
+                                &mut frame_changes,
+                            );
+                            ui.separator();
+                            Self::audio_player_section(
+                                ui,
+                                player_info_snap.as_ref(),
                                 &mut frame_changes,
                             );
                             ui.separator();
@@ -751,6 +771,45 @@ impl MenuBar {
                     changes.push(ParamChange::PartyModeAggressiveness(agg));
                 }
             });
+        });
+    }
+
+    fn audio_player_section(
+        ui: &mut egui::Ui,
+        player_info: Option<&PlayerInfo>,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Audio Player", |ui| {
+            match player_info {
+                None => {
+                    ui.label("No audio loaded.");
+                    ui.label("File → Open Audio…");
+                }
+                Some(info) => {
+                    ui.label(&info.filename);
+
+                    ui.horizontal(|ui| {
+                        let play_label = if info.is_playing { "⏸ Pause" } else { "▶ Play" };
+                        if ui.button(play_label).clicked() {
+                            changes.push(ParamChange::PlayerToggle);
+                        }
+                        if ui.button("⏹ Stop").clicked() {
+                            changes.push(ParamChange::PlayerStop);
+                        }
+                    });
+
+                    let mut pos = info.position_seconds;
+                    let max = info.duration_seconds.max(0.001);
+                    if ui
+                        .add(egui::Slider::new(&mut pos, 0.0..=max).show_value(false))
+                        .changed()
+                    {
+                        changes.push(ParamChange::PlayerSeek(pos));
+                    }
+
+                    ui.label(format!("{:.1}s / {:.1}s", info.position_seconds, info.duration_seconds));
+                }
+            }
         });
     }
 
