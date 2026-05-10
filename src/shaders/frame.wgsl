@@ -56,18 +56,23 @@ fn sdf_polygon(p: vec2<f32>, r: f32, sides: f32) -> f32 {
 }
 
 fn sdf_star(p: vec2<f32>, r: f32) -> f32 {
-    let n  = 5.0;
-    let m  = 2.0;
-    let an = PI / n;
-    let en = PI / m;
-    let acs = vec2<f32>(cos(an), sin(an));
-    let ecs = vec2<f32>(cos(en), sin(en));
-    var pp = p;
-    let bn = (atan2(pp.x, pp.y) % (2.0 * an)) - an;
-    pp = length(pp) * vec2<f32>(cos(bn), abs(sin(bn)));
-    pp = pp - r * acs;
-    pp = pp + ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y);
-    return length(pp) * sign(pp.x);
+    let num_points = 5.0;
+    let inner_r    = r * 0.4;
+
+    let angle   = atan2(p.y, p.x);
+    let radius  = length(p);
+    let segment = TAU / num_points;
+
+    // Wrap into one segment centered on an outer tip.
+    // Double-modulo pattern (same as sdf_polygon) handles negative angles correctly.
+    let raw   = angle + segment * 0.5;
+    let local = (raw % segment + segment) % segment - segment * 0.5;
+
+    // Boundary radius: r at the tip (local=0), inner_r at the valley (local=±segment/2).
+    let boundary = mix(inner_r, r, 1.0 - abs(local) / (segment * 0.5));
+
+    // Positive = outside — matches the sign convention used by all other SDFs in this file.
+    return radius - boundary;
 }
 
 @fragment
