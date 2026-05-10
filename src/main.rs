@@ -2580,9 +2580,15 @@ impl GpuState {
         let total_frames = (duration * fps as f32).ceil() as u32;
 
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let output_dir = PathBuf::from(format!("/tmp/abstrakt-deck-export-{}", timestamp));
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("abstrakt-deck")
+            .join("exports");
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| format!("create cache dir failed: {}", e))?;
+        let output_dir = cache_dir.join(format!("export-{}", timestamp));
         std::fs::create_dir_all(&output_dir)
-            .map_err(|e| format!("create dir failed: {}", e))?;
+            .map_err(|e| format!("create export dir failed: {}", e))?;
 
         let (frame_save_sender, frame_save_thread) = spawn_frame_save_worker();
 
@@ -3588,16 +3594,16 @@ impl ApplicationHandler for App {
                             Some(ExportPhase::Rendering) => {
                                 let exp = gpu.export_state.as_ref().unwrap();
                                 format!(
-                                    "abstrakt-deck — slice 24e — EXPORTING {}/{} ({:.0}%) — {:.1} fps",
+                                    "abstrakt-deck — slice 24g — EXPORTING {}/{} ({:.0}%) — {:.1} fps",
                                     exp.current_frame, exp.total_frames,
                                     exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
                                     fps_val,
                                 )
                             }
                             Some(ExportPhase::Muxing) => {
-                                "abstrakt-deck — slice 24e — MUXING (ffmpeg)...".to_string()
+                                "abstrakt-deck — slice 24g — MUXING (ffmpeg)...".to_string()
                             }
-                            _ => format!("abstrakt-deck — slice 24e — {:.1} fps", fps_val),
+                            _ => format!("abstrakt-deck — slice 24g — {:.1} fps", fps_val),
                         };
                         window.set_title(&title);
                     }
@@ -3900,17 +3906,37 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24e — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24g — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24e — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24g — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
                 window.request_redraw();
             }
             _ => {}
+        }
+    }
+}
+
+fn clean_old_exports() {
+    let exports_dir = match dirs::cache_dir() {
+        Some(d) => d.join("abstrakt-deck").join("exports"),
+        None => return,
+    };
+    let entries = match std::fs::read_dir(&exports_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_str().map_or(false, |n| n.starts_with("export-")) {
+            let path = entry.path();
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => log::info!("Cleaned leftover export dir: {}", path.display()),
+                Err(e) => log::warn!("Could not clean {}: {}", path.display(), e),
+            }
         }
     }
 }
@@ -3968,6 +3994,7 @@ fn main() {
     println!("  CC 66  cycle painter (HueStripe → Spiral → Plasma → Skin)");
     println!("  Note On  trigger shake (like a beat)\n");
 
+    clean_old_exports();
     log::info!("abstrakt-deck starting");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
