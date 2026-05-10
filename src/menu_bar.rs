@@ -34,6 +34,7 @@ pub enum ParamChange {
     CurrentShape(crate::ShapeKind),
     FrameShape(crate::FrameShape),
     PainterKind(crate::PainterKind),
+    SkinCropOffset(f32),
 }
 
 pub struct MenuBar {
@@ -43,6 +44,9 @@ pub struct MenuBar {
     pub pending_actions: Vec<MenuAction>,
     pub pending_param_changes: Vec<ParamChange>,
     pub params_panel_visible: bool,
+    pub skin_thumbnail: Option<egui::TextureHandle>,
+    skin_thumbnail_aspect: f32,
+    pub current_crop_y_offset: f32,
 }
 
 impl MenuBar {
@@ -68,6 +72,9 @@ impl MenuBar {
             pending_actions: Vec::new(),
             pending_param_changes: Vec::new(),
             params_panel_visible: true,
+            skin_thumbnail: None,
+            skin_thumbnail_aspect: 1.0,
+            current_crop_y_offset: 0.5,
         }
     }
 
@@ -112,6 +119,33 @@ impl MenuBar {
         self.params_panel_visible = !self.params_panel_visible;
     }
 
+    pub fn set_skin_thumbnail(&mut self, source_img: &image::DynamicImage) {
+        use image::GenericImageView;
+        const MAX_W: u32 = 280;
+        const MAX_H: u32 = 200;
+        let (w, h) = source_img.dimensions();
+        self.skin_thumbnail_aspect = w as f32 / h as f32;
+        let scale = (MAX_W as f32 / w as f32).min(MAX_H as f32 / h as f32);
+        let tw = ((w as f32 * scale) as u32).max(1);
+        let th = ((h as f32 * scale) as u32).max(1);
+        let resized = source_img.resize_exact(tw, th, image::imageops::FilterType::Triangle);
+        let pixels = resized.to_rgba8().into_raw();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [tw as usize, th as usize],
+            &pixels,
+        );
+        self.skin_thumbnail = Some(self.ctx.load_texture(
+            "skin_thumbnail",
+            color_image,
+            egui::TextureOptions::LINEAR,
+        ));
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_skin_thumbnail(&mut self) {
+        self.skin_thumbnail = None;
+    }
+
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -127,6 +161,9 @@ impl MenuBar {
 
         // Capture fields by copy/value before the closure to avoid borrowing self inside it.
         let panel_visible = self.params_panel_visible;
+        let skin_thumb = self.skin_thumbnail.clone();
+        let skin_aspect = self.skin_thumbnail_aspect;
+        let mut current_crop = self.current_crop_y_offset;
         let mut frame_actions: Vec<MenuAction> = Vec::new();
         let mut frame_changes: Vec<ParamChange> = Vec::new();
 
@@ -210,11 +247,20 @@ impl MenuBar {
                             Self::effects_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::audio_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::skin_section_static(
+                                ui,
+                                skin_thumb.as_ref(),
+                                skin_aspect,
+                                &mut current_crop,
+                                &mut frame_changes,
+                            );
                         });
                     });
             }
         });
 
+        self.current_crop_y_offset = current_crop;
         self.pending_actions.append(&mut frame_actions);
         self.pending_param_changes.append(&mut frame_changes);
 
@@ -473,6 +519,101 @@ impl MenuBar {
                 .changed()
             {
                 changes.push(ParamChange::BassZoomStrength(bass));
+            }
+        });
+    }
+
+    fn skin_section_static(
+        ui: &mut egui::Ui,
+        thumbnail: Option<&egui::TextureHandle>,
+        thumbnail_aspect: f32,
+        crop_y_offset: &mut f32,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Skin", |ui| {
+            if let Some(thumb) = thumbnail {
+                let [tw, th] = thumb.size();
+                let display_w = ui.available_width().min(tw as f32);
+                let thumb_aspect = if th > 0 { tw as f32 / th as f32 } else { thumbnail_aspect };
+                let display_h = if thumb_aspect > 0.0 { display_w / thumb_aspect } else { display_w };
+
+                let (response, painter) = ui.allocate_painter(
+                    egui::vec2(display_w, display_h),
+                    egui::Sense::drag(),
+                );
+                let rect = response.rect;
+
+                // Draw the thumbnail
+                painter.image(
+                    thumb.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                // Crop strip: always 1/16 of display width tall (mirrors crop_skin_image logic)
+                let strip_h = (display_w / 16.0).max(1.0);
+                let max_top = (display_h - strip_h).max(0.0);
+                let strip_top = (*crop_y_offset * max_top).clamp(0.0, max_top);
+
+                let strip_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, rect.min.y + strip_top),
+                    egui::vec2(display_w, strip_h),
+                );
+
+                // Dim regions outside the strip
+                if strip_rect.min.y > rect.min.y {
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, strip_rect.min.y)),
+                        egui::Rounding::ZERO,
+                        egui::Color32::from_black_alpha(140),
+                    );
+                }
+                if strip_rect.max.y < rect.max.y {
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(rect.min.x, strip_rect.max.y), rect.max),
+                        egui::Rounding::ZERO,
+                        egui::Color32::from_black_alpha(140),
+                    );
+                }
+
+                // Gold border around the crop strip
+                painter.rect_stroke(
+                    strip_rect,
+                    egui::Rounding::ZERO,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 220, 80)),
+                );
+
+                // Drag to reposition the strip
+                if response.dragged() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let local_y = (pos.y - rect.min.y).clamp(0.0, display_h);
+                        let new_top = (local_y - strip_h / 2.0).clamp(0.0, max_top);
+                        let new_offset = if max_top > 0.0 { new_top / max_top } else { 0.5 };
+                        let new_offset = new_offset.clamp(0.0, 1.0);
+                        if (new_offset - *crop_y_offset).abs() > 0.005 {
+                            *crop_y_offset = new_offset;
+                            changes.push(ParamChange::SkinCropOffset(new_offset));
+                        }
+                    }
+                }
+
+                // Slider as keyboard-accessible alternative
+                let mut offset = *crop_y_offset;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut offset, 0.0..=1.0)
+                            .text("Vertical offset")
+                            .step_by(0.01),
+                    )
+                    .changed()
+                {
+                    *crop_y_offset = offset;
+                    changes.push(ParamChange::SkinCropOffset(offset));
+                }
+            } else {
+                ui.label("No skin loaded.");
+                ui.label("Use File \u{2192} Open Skin\u{2026} to load.");
             }
         });
     }

@@ -566,7 +566,6 @@ struct GpuState {
     painter_scroll_phase: f32,
 
     pub skin_source_image: Option<image::DynamicImage>,
-    pub crop_mode: bool,
     pub crop_y_offset: f32,
 
     pub params: VisualParams,
@@ -1351,7 +1350,6 @@ impl GpuState {
             bass_zoom_smoothed: 0.0,
             painter_scroll_phase: 0.0,
             skin_source_image: None,
-            crop_mode: false,
             crop_y_offset: 0.5,
             params: VisualParams::default(),
         }
@@ -2145,68 +2143,16 @@ impl ApplicationHandler for App {
                 }
                 match key_code {
                     KeyCode::Escape => {
-                        if gpu.crop_mode {
-                            gpu.crop_y_offset = 0.5;
-                            let rgba = gpu.skin_source_image.as_ref()
-                                .map(|src| crop_skin_image(src, 0.5));
-                            if let Some(rgba) = rgba {
-                                gpu.upload_skin_bytes(&rgba);
-                            }
-                            gpu.crop_mode = false;
-                            log::info!("Crop canceled — reverted to center");
-                        } else {
-                            log::info!("Escape pressed");
-                            event_loop.exit();
-                        }
-                    }
-                    KeyCode::Enter => {
-                        if gpu.crop_mode {
-                            gpu.skin_source_image = None;
-                            gpu.crop_mode = false;
-                            log::info!("Crop committed at offset {:.2}", gpu.crop_y_offset);
-                        }
-                    }
-                    KeyCode::KeyC if !ctrl => {
-                        if gpu.skin_source_image.is_some() {
-                            gpu.crop_mode = !gpu.crop_mode;
-                            if gpu.crop_mode {
-                                log::info!("Crop mode ON — [ ] to adjust, Enter to commit, Esc to cancel");
-                            } else {
-                                log::info!("Crop mode OFF");
-                            }
-                        } else {
-                            log::info!("No skin loaded — use File → Open Skin first");
-                        }
+                        log::info!("Escape pressed");
+                        event_loop.exit();
                     }
                     KeyCode::BracketLeft => {
-                        if gpu.crop_mode {
-                            gpu.crop_y_offset = (gpu.crop_y_offset - 0.02).max(0.0);
-                            let offset = gpu.crop_y_offset;
-                            let rgba = gpu.skin_source_image.as_ref()
-                                .map(|src| crop_skin_image(src, offset));
-                            if let Some(rgba) = rgba {
-                                gpu.upload_skin_bytes(&rgba);
-                            }
-                            log::info!("crop_y_offset = {:.2}", gpu.crop_y_offset);
-                        } else {
-                            gpu.params.fold_count = (gpu.params.fold_count - 1.0).max(2.0);
-                            log::info!("fold_count = {}", gpu.params.fold_count);
-                        }
+                        gpu.params.fold_count = (gpu.params.fold_count - 1.0).max(2.0);
+                        log::info!("fold_count = {}", gpu.params.fold_count);
                     }
                     KeyCode::BracketRight => {
-                        if gpu.crop_mode {
-                            gpu.crop_y_offset = (gpu.crop_y_offset + 0.02).min(1.0);
-                            let offset = gpu.crop_y_offset;
-                            let rgba = gpu.skin_source_image.as_ref()
-                                .map(|src| crop_skin_image(src, offset));
-                            if let Some(rgba) = rgba {
-                                gpu.upload_skin_bytes(&rgba);
-                            }
-                            log::info!("crop_y_offset = {:.2}", gpu.crop_y_offset);
-                        } else {
-                            gpu.params.fold_count = (gpu.params.fold_count + 1.0).min(24.0);
-                            log::info!("fold_count = {}", gpu.params.fold_count);
-                        }
+                        gpu.params.fold_count = (gpu.params.fold_count + 1.0).min(24.0);
+                        log::info!("fold_count = {}", gpu.params.fold_count);
                     }
                     KeyCode::KeyZ => {
                         gpu.params.zoom = (gpu.params.zoom - 0.05).max(0.3);
@@ -2401,10 +2347,13 @@ impl ApplicationHandler for App {
                                         let rgba = crop_skin_image(&img, 0.5);
                                         gpu.load_skin(rgba);
                                         gpu.params.painter_kind = PainterKind::Skin;
-                                        gpu.skin_source_image = Some(img);
                                         gpu.crop_y_offset = 0.5;
-                                        gpu.crop_mode = false;
-                                        log::info!("Skin loaded — press C to enter crop mode");
+                                        if let Some(menu) = self.menu_bar.as_mut() {
+                                            menu.set_skin_thumbnail(&img);
+                                            menu.current_crop_y_offset = 0.5;
+                                        }
+                                        gpu.skin_source_image = Some(img);
+                                        log::info!("Skin loaded — adjust crop in the Skin panel");
                                     }
                                     Err(e) => log::error!("Failed to load skin: {}", e),
                                 }
@@ -2467,21 +2416,26 @@ impl ApplicationHandler for App {
                         ParamChange::CurrentShape(v)         => gpu.params.current_shape = v,
                         ParamChange::FrameShape(v)           => gpu.params.frame_shape = v,
                         ParamChange::PainterKind(v)          => gpu.params.painter_kind = v,
+                        ParamChange::SkinCropOffset(v) => {
+                            gpu.crop_y_offset = v;
+                            let rgba = gpu.skin_source_image.as_ref()
+                                .map(|src| crop_skin_image(src, v));
+                            if let Some(rgba) = rgba {
+                                gpu.upload_skin_bytes(&rgba);
+                            }
+                        }
                     }
                 }
 
                 if let Some(fps) = self.fps.tick() {
-                    let title = if gpu.crop_mode {
-                        format!("abstrakt-deck — slice 23c — CROP [{:.2}] — {:.1} fps",
-                                gpu.crop_y_offset, fps)
-                    } else if let Some(rec) = gpu.recorder.as_ref() {
+                    let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 23c — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 23d — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 23c — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 23d — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2521,10 +2475,8 @@ fn main() {
     println!("  F12    toggle video recording (saves to ~/Videos/abstrakt-deck/)");
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
     println!("  Ctrl+L load preset from same file");
-    println!("  C      toggle crop mode (after loading a skin image)");
-    println!("  [ ]    in crop mode: scroll vertical crop offset");
-    println!("  Enter  in crop mode: commit crop and free source image");
-    println!("  esc    in crop mode: cancel and revert to center; otherwise exit");
+    println!("  esc    exit");
+    println!("  (Skin crop: use the Skin section in the parameters panel — M to toggle panel)");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
     println!("  CC 7   zoom");
