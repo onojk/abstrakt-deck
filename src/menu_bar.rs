@@ -37,6 +37,7 @@ pub enum ParamChange {
     SkinCropOffset(f32),
     Contrast(f32),
     Saturation(f32),
+    ContrastPasses(u32),
 }
 
 pub struct MenuBar {
@@ -436,6 +437,14 @@ impl MenuBar {
                 .changed()
             {
                 changes.push(ParamChange::Contrast(contrast));
+            }
+
+            let mut passes = params.contrast_passes;
+            if ui
+                .add(egui::Slider::new(&mut passes, 1..=6).text("Contrast Passes"))
+                .changed()
+            {
+                changes.push(ParamChange::ContrastPasses(passes));
             }
 
             let mut saturation = params.saturation;

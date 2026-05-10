@@ -68,7 +68,7 @@ struct ShapeEffects {
     painter_scroll_phase: f32,
     contrast:             f32,
     saturation:           f32,
-    _pad_s2:              f32,
+    contrast_passes:      f32,
 }
 
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=star
@@ -164,6 +164,7 @@ pub struct VisualParams {
     pub painter_kind: PainterKind,
     pub contrast: f32,
     pub saturation: f32,
+    pub contrast_passes: u32,
 }
 
 impl Default for VisualParams {
@@ -188,6 +189,7 @@ impl Default for VisualParams {
             painter_kind: PainterKind::HueStripe,
             contrast: 1.0,
             saturation: 1.0,
+            contrast_passes: 1,
         }
     }
 }
@@ -232,9 +234,12 @@ struct Preset {
     contrast: f32,
     #[serde(default = "default_one_f32")]
     saturation: f32,
+    #[serde(default = "default_one_u32")]
+    contrast_passes: u32,
 }
 
 fn default_one_f32() -> f32 { 1.0 }
+fn default_one_u32() -> u32 { 1 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -258,6 +263,7 @@ impl Preset {
             painter_kind: params.painter_kind.name().to_string(),
             contrast: params.contrast,
             saturation: params.saturation,
+            contrast_passes: params.contrast_passes,
         }
     }
 
@@ -297,8 +303,9 @@ impl Preset {
             "Skin"   => PainterKind::Skin,
             _        => PainterKind::HueStripe,
         };
-        params.contrast   = self.contrast;
-        params.saturation = self.saturation;
+        params.contrast        = self.contrast;
+        params.saturation      = self.saturation;
+        params.contrast_passes = self.contrast_passes;
     }
 }
 
@@ -880,7 +887,7 @@ impl GpuState {
                     distortion_enabled: 0.0, distortion_amplitude: 0.05, distortion_frequency: 3.0,
                     time_seconds: 0.0,
                     painter_scroll_phase: 0.0,
-                    contrast: 1.0, saturation: 1.0, _pad_s2: 0.0,
+                    contrast: 1.0, saturation: 1.0, contrast_passes: 1.0,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -1531,9 +1538,9 @@ impl GpuState {
                 distortion_frequency: self.params.distortion_frequency,
                 time_seconds:         elapsed,
                 painter_scroll_phase: self.painter_scroll_phase,
-                contrast:   self.params.contrast,
-                saturation: self.params.saturation,
-                _pad_s2: 0.0,
+                contrast:        self.params.contrast,
+                saturation:      self.params.saturation,
+                contrast_passes: self.params.contrast_passes as f32,
             }]),
         );
 
@@ -2440,8 +2447,9 @@ impl ApplicationHandler for App {
                                 gpu.upload_skin_bytes(&rgba);
                             }
                         }
-                        ParamChange::Contrast(v)   => gpu.params.contrast   = v,
-                        ParamChange::Saturation(v) => gpu.params.saturation = v,
+                        ParamChange::Contrast(v)        => gpu.params.contrast        = v,
+                        ParamChange::Saturation(v)      => gpu.params.saturation      = v,
+                        ParamChange::ContrastPasses(v)  => gpu.params.contrast_passes = v,
                     }
                 }
 
@@ -2550,6 +2558,7 @@ mod tests {
             painter_kind: PainterKind::Plasma,
             contrast: 1.5,
             saturation: 0.7,
+            contrast_passes: 3,
         }
     }
 
@@ -2581,8 +2590,9 @@ mod tests {
         assert_eq!(restored.shake_enabled, original.shake_enabled, "shake_enabled failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
         assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");
-        assert_eq!(restored.contrast,   original.contrast,   "contrast failed");
-        assert_eq!(restored.saturation, original.saturation, "saturation failed");
+        assert_eq!(restored.contrast,        original.contrast,        "contrast failed");
+        assert_eq!(restored.saturation,      original.saturation,      "saturation failed");
+        assert_eq!(restored.contrast_passes, original.contrast_passes, "contrast_passes failed");
     }
 
     #[test]

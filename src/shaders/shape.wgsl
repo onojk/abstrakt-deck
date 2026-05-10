@@ -14,7 +14,7 @@ struct ShapeEffects {
     painter_scroll_phase: f32,
     contrast:             f32,
     saturation:           f32,
-    _pad_s2:              f32,
+    contrast_passes:      f32,
 };
 
 @group(0) @binding(0) var<uniform> transform: Transform;
@@ -72,14 +72,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let scroll_u = fract(warped_uv.x * 0.25 + effects.painter_scroll_phase);
     var color = textureSample(painter_tex, painter_sampler, vec2<f32>(scroll_u, warped_uv.y));
 
-    // Contrast: pivot around 0.5
-    color = vec4<f32>((color.rgb - vec3<f32>(0.5)) * effects.contrast + vec3<f32>(0.5), color.a);
+    // Contrast: N clamped passes — each pass pushes midtones toward extremes
+    let contrast_passes = i32(effects.contrast_passes);
+    for (var i = 0; i < contrast_passes; i = i + 1) {
+        let new_rgb = (color.rgb - vec3<f32>(0.5)) * effects.contrast + vec3<f32>(0.5);
+        color = vec4<f32>(clamp(new_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+    }
 
     // Saturation: blend between luma and full color
     let luma = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    color = vec4<f32>(mix(vec3<f32>(luma), color.rgb, effects.saturation), color.a);
-
-    color = vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+    color = vec4<f32>(clamp(mix(vec3<f32>(luma), color.rgb, effects.saturation), vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
 
     // Invert: flip RGB
     let inverted = vec3<f32>(1.0) - color.rgb;
