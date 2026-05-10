@@ -25,8 +25,9 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const PAINTER_TEXTURE_WIDTH: u32 = 4096;
+const PAINTER_TEXTURE_WIDTH: u32  = 4096;
 const PAINTER_TEXTURE_HEIGHT: u32 = 256;
+const SKIN_MIP_LEVELS: u32        = 13; // ilog2(4096) + 1
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -287,6 +288,137 @@ impl Preset {
     }
 }
 
+fn generate_skin_mipmaps(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    mip_count: u32,
+) {
+    const BLIT_SRC: &str = r#"
+struct Vary { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> Vary {
+    let x = f32((vid << 1u) & 2u);
+    let y = f32(vid & 2u);
+    var out: Vary;
+    out.pos = vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+    out.uv  = vec2<f32>(x, 1.0 - y);
+    return out;
+}
+
+@group(0) @binding(0) var src:         texture_2d<f32>;
+@group(0) @binding(1) var src_sampler: sampler;
+
+@fragment
+fn fs_main(in: Vary) -> @location(0) vec4<f32> {
+    return textureSample(src, src_sampler, in.uv);
+}
+"#;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Mip blit shader"),
+        source: wgpu::ShaderSource::Wgsl(BLIT_SRC.into()),
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Mip BGL"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Mip pipeline"),
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&bgl], push_constant_ranges: &[],
+        })),
+        vertex: wgpu::VertexState {
+            module: &shader, entry_point: Some("vs_main"),
+            buffers: &[], compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader, entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None, cache: None,
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Mip source sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let views: Vec<wgpu::TextureView> = (0..mip_count).map(|i| {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: i,
+            mip_level_count: Some(1),
+            ..Default::default()
+        })
+    }).collect();
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Mip encoder"),
+    });
+    for i in 1..mip_count {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Mip BG"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&views[(i - 1) as usize]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Mip pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &views[i as usize],
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
 fn load_skin_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
     let img = image::open(path).map_err(|e| e.to_string())?;
     let img = img.to_rgba8();
@@ -370,6 +502,7 @@ struct GpuState {
     skin_view: wgpu::TextureView,
     skin_bgl: wgpu::BindGroupLayout,
     skin_bind_group: wgpu::BindGroup,
+    skin_sampler: wgpu::Sampler,
     painter_skin_pipeline: wgpu::RenderPipeline,
 
     // Pass 2 — shape (3D mesh with painter surface → screen-res, depth-tested)
@@ -984,6 +1117,16 @@ impl GpuState {
             wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
+        let skin_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Skin sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter:    wgpu::FilterMode::Linear,
+            min_filter:    wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let skin_view = skin_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let skin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Skin BG"),
@@ -995,7 +1138,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&painter_sampler),
+                    resource: wgpu::BindingResource::Sampler(&skin_sampler),
                 },
             ],
         });
@@ -1176,7 +1319,7 @@ impl GpuState {
             uniforms_buffer,
             painter_uniforms_bind_group, painter_pipelines,
             painter_texture, painter_view, painter_sampler,
-            skin_tex, skin_view, skin_bgl, skin_bind_group, painter_skin_pipeline,
+            skin_tex, skin_view, skin_bgl, skin_bind_group, skin_sampler, painter_skin_pipeline,
             shape_texture, shape_view, shape_depth, shape_depth_view,
             shape_buffers,
             transform_buffer, transform_bind_group,
@@ -1660,10 +1803,13 @@ impl GpuState {
                 height: PAINTER_TEXTURE_HEIGHT,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1, sample_count: 1,
+            mip_level_count: SKIN_MIP_LEVELS,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                 | wgpu::TextureUsages::COPY_DST
+                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         self.queue.write_texture(
@@ -1683,6 +1829,7 @@ impl GpuState {
                 depth_or_array_layers: 1,
             },
         );
+        generate_skin_mipmaps(&self.device, &self.queue, &tex, SKIN_MIP_LEVELS);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Skin BG"),
@@ -1694,7 +1841,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.painter_sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.skin_sampler),
                 },
             ],
         });
