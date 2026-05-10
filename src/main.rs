@@ -63,6 +63,11 @@ struct ShapeEffects {
     distortion_amplitude: f32,
     distortion_frequency: f32,
     time_seconds:         f32,
+    // Scroll phase for the 4096×256 painter window (0..1); keeps struct at 16-byte alignment.
+    painter_scroll_phase: f32,
+    _pad_s0:              f32,
+    _pad_s1:              f32,
+    _pad_s2:              f32,
 }
 
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=star
@@ -385,6 +390,7 @@ struct GpuState {
     shake_offset: glam::Vec3,
     shake_velocity: glam::Vec3,
     bass_zoom_smoothed: f32,
+    painter_scroll_phase: f32,
 
     pub params: VisualParams,
 }
@@ -683,6 +689,8 @@ impl GpuState {
                     invert: 0.0, colorize_enabled: 0.0, colorize_hue: 0.0, colorize_intensity: 0.5,
                     distortion_enabled: 0.0, distortion_amplitude: 0.05, distortion_frequency: 3.0,
                     time_seconds: 0.0,
+                    painter_scroll_phase: 0.0,
+                    _pad_s0: 0.0, _pad_s1: 0.0, _pad_s2: 0.0,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -1064,6 +1072,7 @@ impl GpuState {
             shake_offset: glam::Vec3::ZERO,
             shake_velocity: glam::Vec3::ZERO,
             bass_zoom_smoothed: 0.0,
+            painter_scroll_phase: 0.0,
             params: VisualParams::default(),
         }
     }
@@ -1185,6 +1194,18 @@ impl GpuState {
     fn render(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) -> Result<(), wgpu::SurfaceError> {
         let elapsed = self.start_time.elapsed().as_secs_f32();
 
+        // Rotation-driven painter scroll: shape samples a 0.25-wide window that slides
+        // across the 4096-wide painter strip as the shape rotates.
+        {
+            let shape = self.params.current_shape;
+            let angular_velocity = std::f32::consts::TAU / shape.rotation_period_seconds();
+            let rotation_radians = elapsed * angular_velocity * self.params.rotation_speed_scale;
+            // 1 revolution advances the window by 0.25 (shape circumference / painter width).
+            // 4 revolutions = 1 full cycle through the painter.
+            self.painter_scroll_phase =
+                (rotation_radians / std::f32::consts::TAU * 0.25).fract();
+        }
+
         self.queue.write_buffer(
             &self.uniforms_buffer, 0,
             bytemuck::cast_slice(&[GlobalUniforms {
@@ -1217,6 +1238,8 @@ impl GpuState {
                 distortion_amplitude: self.params.distortion_amplitude,
                 distortion_frequency: self.params.distortion_frequency,
                 time_seconds:         elapsed,
+                painter_scroll_phase: self.painter_scroll_phase,
+                _pad_s0: 0.0, _pad_s1: 0.0, _pad_s2: 0.0,
             }]),
         );
 

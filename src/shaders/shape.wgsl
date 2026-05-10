@@ -11,6 +11,10 @@ struct ShapeEffects {
     distortion_amplitude: f32,
     distortion_frequency: f32,
     time_seconds:         f32,
+    painter_scroll_phase: f32,
+    _pad_s0:              f32,
+    _pad_s1:              f32,
+    _pad_s2:              f32,
 };
 
 @group(0) @binding(0) var<uniform> transform: Transform;
@@ -62,7 +66,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let wave_v = sin(in.uv.x * freq + effects.time_seconds) * effects.distortion_amplitude;
         warped_uv = vec2<f32>(in.uv.x + wave_u, in.uv.y + wave_v);
     }
-    var color = textureSample(painter_tex, painter_sampler, warped_uv);
+
+    // Rotation-driven scroll: shape samples a 0.25-wide window of the 4096-wide painter.
+    // The window slides by 0.25 per revolution, so 4 rotations = 1 full painter cycle.
+    let scroll_u = fract(warped_uv.x * 0.25 + effects.painter_scroll_phase);
+    var color = textureSample(painter_tex, painter_sampler, vec2<f32>(scroll_u, warped_uv.y));
 
     // Invert: flip RGB
     let inverted = vec3<f32>(1.0) - color.rgb;
