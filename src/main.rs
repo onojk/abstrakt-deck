@@ -419,25 +419,32 @@ fn fs_main(in: Vary) -> @location(0) vec4<f32> {
     queue.submit(std::iter::once(encoder.finish()));
 }
 
-fn load_skin_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let img = image::open(path).map_err(|e| e.to_string())?;
-    let img = img.to_rgba8();
+fn decode_and_validate_skin(path: &std::path::Path) -> Result<image::DynamicImage, String> {
+    image::open(path).map_err(|e| e.to_string())
+}
+
+fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32) -> Vec<u8> {
+    use image::GenericImageView;
     let (src_w, src_h) = img.dimensions();
-    let (crop_w, crop_h) = if src_w as f32 / src_h as f32 > 16.0 {
-        ((src_h as f32 * 16.0) as u32, src_h)
+    let (crop_w, crop_h, crop_x, crop_y) = if src_w as f32 / src_h as f32 > 16.0 {
+        // Image wider than 16:1 — crop width to center, vertical_offset unused
+        let cw = (src_h as f32 * 16.0) as u32;
+        (cw, src_h, (src_w - cw) / 2, 0u32)
     } else {
-        (src_w, (src_w as f32 / 16.0) as u32)
+        // Image narrower than 16:1 — crop a thin horizontal strip at vertical_offset
+        let ch = ((src_w as f32 / 16.0).round() as u32).max(1);
+        let max_y = src_h.saturating_sub(ch);
+        let cy = (vertical_offset.clamp(0.0, 1.0) * max_y as f32) as u32;
+        (src_w, ch, 0u32, cy)
     };
-    let crop_x = (src_w - crop_w) / 2;
-    let crop_y = (src_h - crop_h) / 2;
-    let cropped = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
-    let resized = image::imageops::resize(
-        &cropped,
+    let cropped = img.crop_imm(crop_x, crop_y, crop_w, crop_h);
+    let rgba = cropped.to_rgba8();
+    image::imageops::resize(
+        &rgba,
         PAINTER_TEXTURE_WIDTH,
         PAINTER_TEXTURE_HEIGHT,
         image::imageops::FilterType::Lanczos3,
-    );
-    Ok(resized.into_raw())
+    ).into_raw()
 }
 
 fn preset_path() -> Option<std::path::PathBuf> {
@@ -557,6 +564,10 @@ struct GpuState {
     shake_velocity: glam::Vec3,
     bass_zoom_smoothed: f32,
     painter_scroll_phase: f32,
+
+    pub skin_source_image: Option<image::DynamicImage>,
+    pub crop_mode: bool,
+    pub crop_y_offset: f32,
 
     pub params: VisualParams,
 }
@@ -1339,6 +1350,9 @@ impl GpuState {
             shake_velocity: glam::Vec3::ZERO,
             bass_zoom_smoothed: 0.0,
             painter_scroll_phase: 0.0,
+            skin_source_image: None,
+            crop_mode: false,
+            crop_y_offset: 0.5,
             params: VisualParams::default(),
         }
     }
@@ -1850,6 +1864,27 @@ impl GpuState {
         self.skin_bind_group = new_bg;
     }
 
+    pub fn upload_skin_bytes(&mut self, rgba: &[u8]) {
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.skin_tex, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(PAINTER_TEXTURE_WIDTH * 4),
+                rows_per_image: Some(PAINTER_TEXTURE_HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: PAINTER_TEXTURE_WIDTH,
+                height: PAINTER_TEXTURE_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        generate_skin_mipmaps(&self.device, &self.queue, &self.skin_tex, SKIN_MIP_LEVELS);
+    }
+
     pub fn toggle_recording(&mut self) {
         if self.recorder.is_some() {
             if let Some(rec) = self.recorder.take() {
@@ -2110,16 +2145,68 @@ impl ApplicationHandler for App {
                 }
                 match key_code {
                     KeyCode::Escape => {
-                        log::info!("Escape pressed");
-                        event_loop.exit();
+                        if gpu.crop_mode {
+                            gpu.crop_y_offset = 0.5;
+                            let rgba = gpu.skin_source_image.as_ref()
+                                .map(|src| crop_skin_image(src, 0.5));
+                            if let Some(rgba) = rgba {
+                                gpu.upload_skin_bytes(&rgba);
+                            }
+                            gpu.crop_mode = false;
+                            log::info!("Crop canceled — reverted to center");
+                        } else {
+                            log::info!("Escape pressed");
+                            event_loop.exit();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if gpu.crop_mode {
+                            gpu.skin_source_image = None;
+                            gpu.crop_mode = false;
+                            log::info!("Crop committed at offset {:.2}", gpu.crop_y_offset);
+                        }
+                    }
+                    KeyCode::KeyC if !ctrl => {
+                        if gpu.skin_source_image.is_some() {
+                            gpu.crop_mode = !gpu.crop_mode;
+                            if gpu.crop_mode {
+                                log::info!("Crop mode ON — [ ] to adjust, Enter to commit, Esc to cancel");
+                            } else {
+                                log::info!("Crop mode OFF");
+                            }
+                        } else {
+                            log::info!("No skin loaded — use File → Open Skin first");
+                        }
                     }
                     KeyCode::BracketLeft => {
-                        gpu.params.fold_count = (gpu.params.fold_count - 1.0).max(2.0);
-                        log::info!("fold_count = {}", gpu.params.fold_count);
+                        if gpu.crop_mode {
+                            gpu.crop_y_offset = (gpu.crop_y_offset - 0.02).max(0.0);
+                            let offset = gpu.crop_y_offset;
+                            let rgba = gpu.skin_source_image.as_ref()
+                                .map(|src| crop_skin_image(src, offset));
+                            if let Some(rgba) = rgba {
+                                gpu.upload_skin_bytes(&rgba);
+                            }
+                            log::info!("crop_y_offset = {:.2}", gpu.crop_y_offset);
+                        } else {
+                            gpu.params.fold_count = (gpu.params.fold_count - 1.0).max(2.0);
+                            log::info!("fold_count = {}", gpu.params.fold_count);
+                        }
                     }
                     KeyCode::BracketRight => {
-                        gpu.params.fold_count = (gpu.params.fold_count + 1.0).min(24.0);
-                        log::info!("fold_count = {}", gpu.params.fold_count);
+                        if gpu.crop_mode {
+                            gpu.crop_y_offset = (gpu.crop_y_offset + 0.02).min(1.0);
+                            let offset = gpu.crop_y_offset;
+                            let rgba = gpu.skin_source_image.as_ref()
+                                .map(|src| crop_skin_image(src, offset));
+                            if let Some(rgba) = rgba {
+                                gpu.upload_skin_bytes(&rgba);
+                            }
+                            log::info!("crop_y_offset = {:.2}", gpu.crop_y_offset);
+                        } else {
+                            gpu.params.fold_count = (gpu.params.fold_count + 1.0).min(24.0);
+                            log::info!("fold_count = {}", gpu.params.fold_count);
+                        }
                     }
                     KeyCode::KeyZ => {
                         gpu.params.zoom = (gpu.params.zoom - 0.05).max(0.3);
@@ -2309,11 +2396,15 @@ impl ApplicationHandler for App {
                                 .pick_file()
                             {
                                 log::info!("Selected file: {}", path.display());
-                                match load_skin_image(&path) {
-                                    Ok(rgba) => {
+                                match decode_and_validate_skin(&path) {
+                                    Ok(img) => {
+                                        let rgba = crop_skin_image(&img, 0.5);
                                         gpu.load_skin(rgba);
                                         gpu.params.painter_kind = PainterKind::Skin;
-                                        log::info!("Skin loaded and active");
+                                        gpu.skin_source_image = Some(img);
+                                        gpu.crop_y_offset = 0.5;
+                                        gpu.crop_mode = false;
+                                        log::info!("Skin loaded — press C to enter crop mode");
                                     }
                                     Err(e) => log::error!("Failed to load skin: {}", e),
                                 }
@@ -2380,14 +2471,17 @@ impl ApplicationHandler for App {
                 }
 
                 if let Some(fps) = self.fps.tick() {
-                    let title = if let Some(rec) = gpu.recorder.as_ref() {
+                    let title = if gpu.crop_mode {
+                        format!("abstrakt-deck — slice 23c — CROP [{:.2}] — {:.1} fps",
+                                gpu.crop_y_offset, fps)
+                    } else if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24c — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 23c — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24c — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 23c — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -2420,14 +2514,17 @@ fn main() {
     println!("  D      toggle distortion");
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
-    println!("  P      cycle painter (HueStripe → Spiral → Plasma)");
+    println!("  P      cycle painter (HueStripe → Spiral → Plasma → Skin)");
     println!("  M      toggle parameters panel");
     println!("  ?      toggle help overlay");
     println!("  F11    toggle fullscreen");
     println!("  F12    toggle video recording (saves to ~/Videos/abstrakt-deck/)");
     println!("  Ctrl+S save preset to ~/.config/abstrakt-deck/preset.json");
     println!("  Ctrl+L load preset from same file");
-    println!("  esc    exit");
+    println!("  C      toggle crop mode (after loading a skin image)");
+    println!("  [ ]    in crop mode: scroll vertical crop offset");
+    println!("  Enter  in crop mode: commit crop and free source image");
+    println!("  esc    in crop mode: cancel and revert to center; otherwise exit");
     println!("\nMIDI control (if device connected):");
     println!("  CC 1   fold count");
     println!("  CC 7   zoom");
@@ -2444,7 +2541,7 @@ fn main() {
     println!("  CC 80  distortion toggle");
     println!("  CC 81  distortion amplitude");
     println!("  CC 82  distortion frequency");
-    println!("  CC 66  cycle painter (HueStripe → Spiral → Plasma)");
+    println!("  CC 66  cycle painter (HueStripe → Spiral → Plasma → Skin)");
     println!("  Note On  trigger shake (like a beat)\n");
 
     log::info!("abstrakt-deck starting");

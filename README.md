@@ -21,7 +21,7 @@ Native Linux desktop audio-reactive kaleidoscope visualizer built with Rust + wg
 - **HueStripe**: scrolling rainbow vertical bands
 - **Spiral**: radial color spiral with arm rotation
 - **Plasma**: flowing demoscene-style color blobs
-- **Skin**: user-loaded image (File → Open Skin…), auto-cropped to 16:1 and resized to 4096×256
+- **Skin**: user-loaded image (File → Open Skin…), auto-cropped center 16:1 strip, resized to 4096×256. Press `C` after load to enter crop mode and scroll the strip up/down with `[`/`]`, `Enter` to commit, `Esc` to cancel
 
 ### Effects
 - Color invert

@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 
 WIDTH = 800
-HEIGHT = 780
+HEIGHT = 900
 BG = (0, 0, 0, 220)        # dark translucent background
 HEADER = (255, 220, 80)     # gold for category headers
 KEY = (120, 220, 255)       # cyan for key labels
@@ -53,8 +53,13 @@ LINES = [
     ("ENTRY", ("Ctrl+S", "save preset")),
     ("ENTRY", ("Ctrl+L", "load preset")),
     ("BLANK", ""),
+    ("CATEGORY", "SKIN CROP MODE"),
+    ("ENTRY", ("C", "toggle crop mode (skin must be loaded)")),
+    ("ENTRY", ("[ ]", "scroll vertical crop offset (in crop mode)")),
+    ("ENTRY", ("Enter", "commit crop")),
+    ("ENTRY", ("Esc", "cancel crop (or exit app)")),
+    ("BLANK", ""),
     ("ENTRY", ("?", "toggle this help")),
-    ("ENTRY", ("Esc", "exit")),
 ]
 
 
