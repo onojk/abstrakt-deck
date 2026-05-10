@@ -81,6 +81,8 @@ pub enum ParamChange {
     PlayerToggle,
     PlayerStop,
     PlayerSeek(f32),
+    ExportResolution(crate::ResolutionPreset),
+    ExportFramerate(crate::FramerateChoice),
 }
 
 pub struct MenuBar {
@@ -311,6 +313,13 @@ impl MenuBar {
                             ui.separator();
                             Self::audio_player_section(
                                 ui,
+                                player_info_snap.as_ref(),
+                                &mut frame_changes,
+                            );
+                            ui.separator();
+                            Self::export_section(
+                                ui,
+                                current_params,
                                 player_info_snap.as_ref(),
                                 &mut frame_changes,
                             );
@@ -810,6 +819,87 @@ impl MenuBar {
                     ui.label(format!("{:.1}s / {:.1}s", info.position_seconds, info.duration_seconds));
                 }
             }
+        });
+    }
+
+    fn export_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        player_info: Option<&PlayerInfo>,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Export", |ui| {
+            // Resolution dropdown
+            ui.horizontal(|ui| {
+                ui.label("Resolution");
+                let all_resolutions = [
+                    crate::ResolutionPreset::SD480,
+                    crate::ResolutionPreset::HD720,
+                    crate::ResolutionPreset::FullHD,
+                    crate::ResolutionPreset::UHD4K,
+                ];
+                egui::ComboBox::from_id_salt("export_resolution")
+                    .selected_text(params.export_resolution.name())
+                    .show_ui(ui, |ui| {
+                        for preset in all_resolutions {
+                            let (w, h) = preset.dimensions();
+                            let label = format!("{} ({}×{})", preset.name(), w, h);
+                            if ui
+                                .selectable_value(
+                                    &mut { params.export_resolution },
+                                    preset,
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                changes.push(ParamChange::ExportResolution(preset));
+                            }
+                        }
+                    });
+            });
+
+            // Framerate dropdown
+            ui.horizontal(|ui| {
+                ui.label("Framerate");
+                let all_framerates = [
+                    crate::FramerateChoice::Fps30,
+                    crate::FramerateChoice::Fps60,
+                ];
+                egui::ComboBox::from_id_salt("export_framerate")
+                    .selected_text(params.export_framerate.name())
+                    .show_ui(ui, |ui| {
+                        for choice in all_framerates {
+                            if ui
+                                .selectable_value(
+                                    &mut { params.export_framerate },
+                                    choice,
+                                    choice.name(),
+                                )
+                                .clicked()
+                            {
+                                changes.push(ParamChange::ExportFramerate(choice));
+                            }
+                        }
+                    });
+            });
+
+            // Frame count estimate
+            if let Some(info) = player_info {
+                let fps = params.export_framerate.fps();
+                let total_frames = (info.duration_seconds * fps as f32).ceil() as u64;
+                ui.label(format!(
+                    "~{} frames  ({:.1}s at {} fps)",
+                    total_frames, info.duration_seconds, fps
+                ));
+            } else {
+                ui.label("Load audio to see frame estimate.");
+            }
+
+            ui.separator();
+
+            // Disabled export button (stub for 24f)
+            ui.add_enabled(false, egui::Button::new("Export..."));
+            ui.label(egui::RichText::new("(coming in 24f)").weak());
         });
     }
 

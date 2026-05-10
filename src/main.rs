@@ -145,6 +145,62 @@ impl PainterKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ResolutionPreset {
+    SD480,
+    HD720,
+    FullHD,
+    UHD4K,
+}
+
+impl Default for ResolutionPreset {
+    fn default() -> Self { ResolutionPreset::HD720 }
+}
+
+impl ResolutionPreset {
+    pub fn dimensions(self) -> (u32, u32) {
+        match self {
+            ResolutionPreset::SD480  => (854, 480),
+            ResolutionPreset::HD720  => (1280, 720),
+            ResolutionPreset::FullHD => (1920, 1080),
+            ResolutionPreset::UHD4K  => (3840, 2160),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            ResolutionPreset::SD480  => "480p",
+            ResolutionPreset::HD720  => "720p",
+            ResolutionPreset::FullHD => "1080p",
+            ResolutionPreset::UHD4K  => "4K",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum FramerateChoice {
+    Fps30,
+    Fps60,
+}
+
+impl Default for FramerateChoice {
+    fn default() -> Self { FramerateChoice::Fps60 }
+}
+
+impl FramerateChoice {
+    pub fn fps(self) -> u32 {
+        match self {
+            FramerateChoice::Fps30 => 30,
+            FramerateChoice::Fps60 => 60,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            FramerateChoice::Fps30 => "30 fps",
+            FramerateChoice::Fps60 => "60 fps",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ParamLocks {
     // Geometry
@@ -202,6 +258,8 @@ pub struct VisualParams {
     pub party_mode_enabled: bool,
     pub party_mode_aggressiveness: f32,
     pub locks: ParamLocks,
+    pub export_resolution: ResolutionPreset,
+    pub export_framerate:  FramerateChoice,
 }
 
 impl Default for VisualParams {
@@ -234,6 +292,8 @@ impl Default for VisualParams {
             party_mode_enabled: false,
             party_mode_aggressiveness: 0.5,
             locks: ParamLocks::default(),
+            export_resolution: ResolutionPreset::HD720,
+            export_framerate:  FramerateChoice::Fps60,
         }
     }
 }
@@ -298,6 +358,10 @@ struct Preset {
     party_mode_aggressiveness: f32,
     #[serde(default)]
     locks: ParamLocks,
+    #[serde(default)]
+    export_resolution: ResolutionPreset,
+    #[serde(default)]
+    export_framerate: FramerateChoice,
 }
 
 fn default_one_f32()  -> f32 { 1.0 }
@@ -334,6 +398,8 @@ impl Preset {
             party_mode_enabled: params.party_mode_enabled,
             party_mode_aggressiveness: params.party_mode_aggressiveness,
             locks: params.locks,
+            export_resolution: params.export_resolution,
+            export_framerate:  params.export_framerate,
         }
     }
 
@@ -383,7 +449,9 @@ impl Preset {
         params.reactive_mode_aggressiveness = self.reactive_mode_aggressiveness;
         params.party_mode_enabled          = self.party_mode_enabled;
         params.party_mode_aggressiveness   = self.party_mode_aggressiveness;
-        params.locks                       = self.locks;
+        params.locks              = self.locks;
+        params.export_resolution  = self.export_resolution;
+        params.export_framerate   = self.export_framerate;
     }
 }
 
@@ -880,6 +948,31 @@ fn load_preset(gpu: &mut GpuState) -> Result<(), String> {
     Ok(())
 }
 
+pub struct OfflineTarget {
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl OfflineTarget {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Offline Render Target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self { texture, view, width, height }
+    }
+}
+
 struct ShapeBufferSet {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -956,6 +1049,9 @@ struct GpuState {
     readback_buffer: wgpu::Buffer,
     readback_padded_bytes_per_row: u32,
     recorder: Option<Recorder>,
+
+    // Offline render target for export
+    pub offline_target: Option<OfflineTarget>,
 
     help_overlay: HelpOverlay,
 
@@ -1757,6 +1853,7 @@ impl GpuState {
             blit_bgl, blit_bind_group, blit_pipeline,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
+            offline_target: None,
             help_overlay,
             start_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
@@ -2579,8 +2676,10 @@ impl ApplicationHandler for App {
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
         );
-        let gpu = pollster::block_on(GpuState::new(window.clone()));
+        let mut gpu = pollster::block_on(GpuState::new(window.clone()));
         let menu_bar = MenuBar::new(&gpu.device, gpu.config.format, &window);
+        let (off_w, off_h) = gpu.params.export_resolution.dimensions();
+        gpu.offline_target = Some(OfflineTarget::new(&gpu.device, off_w, off_h));
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.menu_bar = Some(menu_bar);
@@ -3105,6 +3204,15 @@ impl ApplicationHandler for App {
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
+                        ParamChange::ExportResolution(v) => {
+                            gpu.params.export_resolution = v;
+                            let (w, h) = v.dimensions();
+                            gpu.offline_target = Some(OfflineTarget::new(&gpu.device, w, h));
+                            log::info!("Offline target resized to {}×{}", w, h);
+                        }
+                        ParamChange::ExportFramerate(v) => {
+                            gpu.params.export_framerate = v;
+                        }
                     }
                 }
 
@@ -3112,11 +3220,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24b — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24c — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24b — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24c — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -3228,6 +3336,8 @@ mod tests {
                 contrast_passes: true,
                 ..Default::default()
             },
+            export_resolution: ResolutionPreset::FullHD,
+            export_framerate:  FramerateChoice::Fps30,
         }
     }
 
@@ -3270,6 +3380,8 @@ mod tests {
         assert_eq!(restored.party_mode_aggressiveness,    original.party_mode_aggressiveness,    "party_mode_aggressiveness failed");
         assert_eq!(restored.locks.contrast,        original.locks.contrast,        "locks.contrast failed");
         assert_eq!(restored.locks.contrast_passes, original.locks.contrast_passes, "locks.contrast_passes failed");
+        assert_eq!(restored.export_resolution, original.export_resolution, "export_resolution failed");
+        assert_eq!(restored.export_framerate,  original.export_framerate,  "export_framerate failed");
     }
 
     #[test]
