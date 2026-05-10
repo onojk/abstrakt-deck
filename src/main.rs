@@ -985,18 +985,36 @@ pub struct FrameSaveJob {
     pub output_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportPhase {
+    Rendering,
+    Muxing,
+    Complete,
+    Failed,
+}
+
+pub struct MuxResult {
+    pub success: bool,
+    pub output_path: PathBuf,
+    pub error_message: Option<String>,
+}
+
 pub struct ExportState {
+    pub phase: ExportPhase,
     pub current_frame: u32,
     pub total_frames: u32,
     pub output_dir: PathBuf,
     pub fps: u32,
     pub start_time: Instant,
-    pub frame_save_sender: Sender<FrameSaveJob>,
+    // Rendering phase: Some; set to None when transitioning to Muxing to signal worker
+    pub frame_save_sender: Option<Sender<FrameSaveJob>>,
+    pub frame_save_thread: Option<std::thread::JoinHandle<()>>,
+    pub mux_thread: Option<std::thread::JoinHandle<MuxResult>>,
 }
 
-fn spawn_frame_save_worker() -> Sender<FrameSaveJob> {
+fn spawn_frame_save_worker() -> (Sender<FrameSaveJob>, std::thread::JoinHandle<()>) {
     let (tx, rx) = std::sync::mpsc::channel::<FrameSaveJob>();
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         while let Ok(job) = rx.recv() {
             match image::RgbaImage::from_raw(job.width, job.height, job.rgba_bytes) {
                 Some(img) => {
@@ -1010,7 +1028,54 @@ fn spawn_frame_save_worker() -> Sender<FrameSaveJob> {
             }
         }
     });
-    tx
+    (tx, handle)
+}
+
+pub fn run_ffmpeg_mux(
+    png_dir: &std::path::Path,
+    audio_path: &str,
+    output_path: &std::path::Path,
+    fps: u32,
+) -> MuxResult {
+    use std::process::Command;
+    let png_pattern = png_dir.join("frame_%05d.png");
+    log::info!(
+        "ffmpeg mux: {} + {} → {}",
+        png_pattern.display(), audio_path, output_path.display()
+    );
+    match Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-framerate", &fps.to_string(),
+            "-i", &png_pattern.to_string_lossy(),
+            "-i", audio_path,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            &output_path.to_string_lossy(),
+        ])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let _ = std::fs::remove_dir_all(png_dir);
+            log::info!("Mux complete: {}", output_path.display());
+            MuxResult { success: true, output_path: output_path.to_path_buf(), error_message: None }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            log::error!("ffmpeg failed:\n{}", stderr);
+            MuxResult { success: false, output_path: output_path.to_path_buf(), error_message: Some(stderr) }
+        }
+        Err(e) => {
+            let msg = format!("ffmpeg subprocess error: {}", e);
+            log::error!("{}", msg);
+            MuxResult { success: false, output_path: output_path.to_path_buf(), error_message: Some(msg) }
+        }
+    }
 }
 
 struct ShapeBufferSet {
@@ -2031,10 +2096,82 @@ impl GpuState {
         self.readback_padded_bytes_per_row = rp;
     }
 
+    fn render_mux_phase_preview(&mut self) {
+        if let Ok(swap_frame) = self.surface.get_current_texture() {
+            let swap_view = swap_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            if let Some(target) = &self.offline_target {
+                let preview_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Mux preview BG"),
+                    layout: &self.blit_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&target.view) },
+                        wgpu::BindGroupEntry { binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                    ],
+                });
+                let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Mux preview blit"),
+                });
+                {
+                    let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Mux preview pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &swap_view, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None, timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.blit_pipeline);
+                    pass.set_bind_group(0, &preview_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                self.queue.submit(std::iter::once(enc.finish()));
+            }
+            swap_frame.present();
+        }
+    }
+
     fn render(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) -> Result<(), wgpu::SurfaceError> {
         if self.export_state.is_some() {
-            self.render_export_frame();
-            return Ok(());
+            let phase = self.export_state.as_ref().unwrap().phase;
+            match phase {
+                ExportPhase::Rendering => {
+                    self.render_export_frame();
+                    return Ok(());
+                }
+                ExportPhase::Muxing => {
+                    let is_done = self.export_state.as_ref()
+                        .and_then(|e| e.mux_thread.as_ref())
+                        .map(|h| h.is_finished())
+                        .unwrap_or(false);
+                    if is_done {
+                        let handle = self.export_state.as_mut().unwrap().mux_thread.take().unwrap();
+                        match handle.join() {
+                            Ok(result) if result.success => {
+                                log::info!("✓ MP4 saved to {}", result.output_path.display());
+                            }
+                            Ok(result) => {
+                                log::error!("✗ Mux failed: {:?}", result.error_message);
+                            }
+                            Err(_) => log::error!("Mux thread panicked"),
+                        }
+                        self.export_state = None;
+                        // fall through to live render below
+                    } else {
+                        self.render_mux_phase_preview();
+                        return Ok(());
+                    }
+                }
+                ExportPhase::Complete | ExportPhase::Failed => {
+                    self.export_state = None;
+                    // fall through to live render below
+                }
+            }
         }
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
@@ -2447,7 +2584,7 @@ impl GpuState {
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| format!("create dir failed: {}", e))?;
 
-        let frame_save_sender = spawn_frame_save_worker();
+        let (frame_save_sender, frame_save_thread) = spawn_frame_save_worker();
 
         log::info!(
             "Export started: {} frames at {}fps, {}×{}, output → {}",
@@ -2459,12 +2596,15 @@ impl GpuState {
         self.file_rms_baseline = 0.0;
 
         self.export_state = Some(ExportState {
+            phase: ExportPhase::Rendering,
             current_frame: 0,
             total_frames,
             output_dir,
             fps,
             start_time: Instant::now(),
-            frame_save_sender,
+            frame_save_sender: Some(frame_save_sender),
+            frame_save_thread: Some(frame_save_thread),
+            mux_thread: None,
         });
         Ok(())
     }
@@ -2474,16 +2614,54 @@ impl GpuState {
         let (frame_index, total, fps, output_dir, sender) = {
             let e = self.export_state.as_ref().unwrap();
             (e.current_frame, e.total_frames, e.fps,
-             e.output_dir.clone(), e.frame_save_sender.clone())
+             e.output_dir.clone(), e.frame_save_sender.as_ref().unwrap().clone())
         };
 
         if frame_index >= total {
-            let elapsed = self.export_state.as_ref().unwrap().start_time.elapsed().as_secs_f32();
+            let render_elapsed = self.export_state.as_ref().unwrap().start_time.elapsed().as_secs_f32();
             log::info!(
-                "Export complete: {} frames in {:.1}s — saved to {}",
-                total, elapsed, output_dir.display()
+                "Render complete: {} frames in {:.1}s — starting mux",
+                total, render_elapsed
             );
-            self.export_state = None;
+
+            // Show save dialog for output path
+            let default_name = format!(
+                "abstrakt-deck-{}.mp4",
+                chrono::Local::now().format("%Y%m%d-%H%M%S")
+            );
+            let chosen_path = rfd::FileDialog::new()
+                .set_title("Save MP4 export")
+                .add_filter("MP4 video", &["mp4"])
+                .set_file_name(&default_name)
+                .save_file();
+
+            let output_path = match chosen_path {
+                Some(p) => p,
+                None => {
+                    log::warn!("Save canceled — PNG frames kept at {}", output_dir.display());
+                    self.export_state = None;
+                    return;
+                }
+            };
+
+            // Drop sender to signal PNG worker to drain and exit
+            let worker_handle = {
+                let exp = self.export_state.as_mut().unwrap();
+                drop(exp.frame_save_sender.take());
+                exp.frame_save_thread.take()
+            };
+
+            let png_dir = output_dir.clone();
+            let audio_path = self.loaded_audio.as_ref().unwrap().source_path.clone();
+            let mux_handle = std::thread::spawn(move || {
+                // Wait for all PNG frames to be written before muxing
+                if let Some(h) = worker_handle { let _ = h.join(); }
+                run_ffmpeg_mux(&png_dir, &audio_path, &output_path, fps)
+            });
+
+            let exp = self.export_state.as_mut().unwrap();
+            exp.phase = ExportPhase::Muxing;
+            exp.mux_thread = Some(mux_handle);
             return;
         }
 
@@ -3406,15 +3584,20 @@ impl ApplicationHandler for App {
                         Err(e) => log::warn!("Surface error during export: {:?}", e),
                     }
                     if let Some(fps_val) = self.fps.tick() {
-                        let title = if let Some(exp) = &gpu.export_state {
-                            format!(
-                                "abstrakt-deck — slice 24d — EXPORTING {}/{} ({:.0}%) — {:.1} fps",
-                                exp.current_frame, exp.total_frames,
-                                exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
-                                fps_val,
-                            )
-                        } else {
-                            format!("abstrakt-deck — slice 24d — {:.1} fps", fps_val)
+                        let title = match gpu.export_state.as_ref().map(|e| e.phase) {
+                            Some(ExportPhase::Rendering) => {
+                                let exp = gpu.export_state.as_ref().unwrap();
+                                format!(
+                                    "abstrakt-deck — slice 24e — EXPORTING {}/{} ({:.0}%) — {:.1} fps",
+                                    exp.current_frame, exp.total_frames,
+                                    exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
+                                    fps_val,
+                                )
+                            }
+                            Some(ExportPhase::Muxing) => {
+                                "abstrakt-deck — slice 24e — MUXING (ffmpeg)...".to_string()
+                            }
+                            _ => format!("abstrakt-deck — slice 24e — {:.1} fps", fps_val),
                         };
                         window.set_title(&title);
                     }
@@ -3717,11 +3900,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24d — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24e — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24d — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24e — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
