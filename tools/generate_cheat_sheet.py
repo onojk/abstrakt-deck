@@ -23,7 +23,7 @@ LINES = [
     ("ENTRY", ("Shift+Tab", "cycle 3D shape (Cylinder/Sphere/Cube/Tetrahedron)")),
     ("ENTRY", ("P", "cycle painter (HueStripe/Spiral/Plasma/Skin)")),
     ("ENTRY", ("[ ]", "fold count (2-24)")),
-    ("ENTRY", ("Z", "kaleido zoom out (0.3-1.5)")),
+    ("ENTRY", ("Z X", "kaleido zoom (0.3-1.5)")),
     ("ENTRY", (", .", "rotation speed (0-4x)")),
     ("BLANK", ""),
     ("CATEGORY", "FRAME"),

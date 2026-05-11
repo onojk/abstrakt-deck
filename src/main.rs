@@ -3454,6 +3454,10 @@ impl ApplicationHandler for App {
                         gpu.params.zoom = (gpu.params.zoom - 0.05).max(0.3);
                         log::info!("zoom = {:.2}", gpu.params.zoom);
                     }
+                    KeyCode::KeyX => {
+                        gpu.params.zoom = (gpu.params.zoom + 0.05).min(1.5);
+                        log::info!("zoom = {:.2}", gpu.params.zoom);
+                    }
                     KeyCode::Comma => {
                         gpu.params.rotation_speed_scale = (gpu.params.rotation_speed_scale - 0.25).max(0.0);
                         log::info!("rotation_speed_scale = {:.2}", gpu.params.rotation_speed_scale);
@@ -3979,7 +3983,7 @@ fn main() {
 
     println!("\nabstrakt-deck — keyboard controls:");
     println!("  [ ]    fold count   (2 to 24)");
-    println!("  z      kaleido zoom out (0.30 to 1.50)");
+    println!("  z x    kaleido zoom (0.30 to 1.50)");
     println!("  , .    rotation speed (0 to 4×)");
     println!("  1-7    frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star)");
     println!("  - =    frame size");
