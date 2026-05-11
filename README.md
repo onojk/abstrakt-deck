@@ -7,7 +7,8 @@ Native Linux desktop kaleidoscope visualizer and 4K music video generator built 
 ## Example output
 
 Music videos generated with abstrakt-deck:
-- [Velvet Numbers - Made with abstrakt-deck 4K Visualizer](https://www.youtube.com/watch?v=be_Pq0-iFvk)
+- [Blue TV Static - Made with abstrakt-deck 4K Visualizer](https://www.youtube.com/watch?v=BLUETVSTATICID)
+- [Blue TV Static - Made with abstrakt-deck 4K Visualizer](https://www.youtube.com/watch?v=BLUETVSTATICID)
 
 More examples on the [official artist channel](https://www.youtube.com/channel/UCED3b70ET1LOQu83Jp8w1Ig).
 
