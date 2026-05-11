@@ -7,9 +7,9 @@ Native Linux desktop kaleidoscope visualizer and 4K music video generator built 
 ## Example output
 
 Music videos generated with abstrakt-deck:
-- [Velvet Numbers - Made with abstrakt-deck 4K Visualizer](https://www.youtube.com/watch?v=YOURVIDEOID)
+- [Velvet Numbers - Made with abstrakt-deck 4K Visualizer](https://www.youtube.com/watch?v=be_Pq0-iFvk)
 
-More examples on the [official artist channel](https://www.youtube.com/@onojk).
+More examples on the [official artist channel](https://www.youtube.com/channel/UCED3b70ET1LOQu83Jp8w1Ig).
 
 ## Features
 
@@ -193,7 +193,7 @@ Audio runs on a separate thread (cpal callback). Beat events flow to the render 
 
 ## Status
 
-Slices 1–24j complete. The visualizer is feature-complete for music video generation: audio loading, 3D kaleidoscope with full parameter control, three autonomous modes with per-parameter locks, and a full offline 4K export pipeline with ffmpeg muxing.
+Slices 1–24l complete (including 24f-hotfix). The visualizer is feature-complete for music video generation: audio loading, 3D kaleidoscope with full parameter control, three autonomous modes with per-parameter locks, and a full offline 4K export pipeline with ffmpeg muxing.
 
 Possible future slices: multi-monitor support, additional painters (Audio Paint, Print Head), additional shapes.
 
