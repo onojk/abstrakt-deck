@@ -83,6 +83,8 @@ pub enum ParamChange {
     PlayerSeek(f32),
     ExportResolution(crate::ResolutionPreset),
     ExportFramerate(crate::FramerateChoice),
+    SetExportLivePreview(bool),
+    TriggerExport,
 }
 
 pub struct MenuBar {
@@ -96,6 +98,7 @@ pub struct MenuBar {
     skin_thumbnail_aspect: f32,
     pub current_crop_y_offset: f32,
     pub player_info: Option<PlayerInfo>,
+    pub is_exporting: bool,
 }
 
 impl MenuBar {
@@ -125,6 +128,7 @@ impl MenuBar {
             skin_thumbnail_aspect: 1.0,
             current_crop_y_offset: 0.5,
             player_info: None,
+            is_exporting: false,
         }
     }
 
@@ -215,6 +219,7 @@ impl MenuBar {
         let skin_aspect = self.skin_thumbnail_aspect;
         let mut current_crop = self.current_crop_y_offset;
         let player_info_snap = self.player_info.clone();
+        let is_exporting_snap = self.is_exporting;
         let mut frame_actions: Vec<MenuAction> = Vec::new();
         let mut frame_changes: Vec<ParamChange> = Vec::new();
 
@@ -321,6 +326,7 @@ impl MenuBar {
                                 ui,
                                 current_params,
                                 player_info_snap.as_ref(),
+                                is_exporting_snap,
                                 &mut frame_changes,
                             );
                             ui.separator();
@@ -826,6 +832,7 @@ impl MenuBar {
         ui: &mut egui::Ui,
         params: &crate::VisualParams,
         player_info: Option<&PlayerInfo>,
+        is_exporting: bool,
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Export", |ui| {
@@ -895,11 +902,29 @@ impl MenuBar {
                 ui.label("Load audio to see frame estimate.");
             }
 
+            // Live preview toggle
+            let mut lp = params.export_live_preview;
+            if ui.checkbox(&mut lp, "Live preview")
+                .on_hover_text("Show rendered frames in the window during export. Disable for ~15% faster 4K render.")
+                .changed()
+            {
+                changes.push(ParamChange::SetExportLivePreview(lp));
+            }
+
             ui.separator();
 
-            // Disabled export button (stub for 24f)
-            ui.add_enabled(false, egui::Button::new("Export..."));
-            ui.label(egui::RichText::new("(coming in 24f)").weak());
+            let audio_loaded = player_info.is_some();
+            ui.add_enabled_ui(audio_loaded && !is_exporting, |ui| {
+                if ui.button("Export...").clicked() {
+                    changes.push(ParamChange::TriggerExport);
+                }
+            });
+            if !audio_loaded {
+                ui.label("⚠ Load audio first (File → Open Audio...)");
+            }
+            if is_exporting {
+                ui.label("⏳ Export in progress...");
+            }
         });
     }
 

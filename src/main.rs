@@ -3454,13 +3454,6 @@ impl ApplicationHandler for App {
                         gpu.params.zoom = (gpu.params.zoom - 0.05).max(0.3);
                         log::info!("zoom = {:.2}", gpu.params.zoom);
                     }
-                    KeyCode::KeyX => {
-                        // Temporary export trigger (wired properly in 24f)
-                        match gpu.start_export() {
-                            Ok(()) => {}
-                            Err(e) => log::error!("Export failed to start: {}", e),
-                        }
-                    }
                     KeyCode::Comma => {
                         gpu.params.rotation_speed_scale = (gpu.params.rotation_speed_scale - 0.25).max(0.0);
                         log::info!("rotation_speed_scale = {:.2}", gpu.params.rotation_speed_scale);
@@ -3716,6 +3709,7 @@ impl ApplicationHandler for App {
                     None
                 };
                 if let Some(menu) = self.menu_bar.as_mut() {
+                    menu.is_exporting = gpu.export_state.is_some();
                     menu.player_info = player_info;
                 }
 
@@ -3930,6 +3924,12 @@ impl ApplicationHandler for App {
                         ParamChange::SetExportLivePreview(v) => {
                             gpu.params.export_live_preview = v;
                         }
+                        ParamChange::TriggerExport => {
+                            match gpu.start_export() {
+                                Ok(()) => log::info!("Export started via Export button"),
+                                Err(e) => log::error!("Export failed to start: {}", e),
+                            }
+                        }
                     }
                 }
 
@@ -3979,7 +3979,7 @@ fn main() {
 
     println!("\nabstrakt-deck — keyboard controls:");
     println!("  [ ]    fold count   (2 to 24)");
-    println!("  z x    kaleido zoom (0.30 to 1.50)");
+    println!("  z      kaleido zoom out (0.30 to 1.50)");
     println!("  , .    rotation speed (0 to 4×)");
     println!("  1-7    frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star)");
     println!("  - =    frame size");
