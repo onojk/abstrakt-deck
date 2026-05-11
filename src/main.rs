@@ -262,6 +262,7 @@ pub struct VisualParams {
     pub locks: ParamLocks,
     pub export_resolution: ResolutionPreset,
     pub export_framerate:  FramerateChoice,
+    pub export_live_preview: bool,
 }
 
 impl Default for VisualParams {
@@ -288,14 +289,15 @@ impl Default for VisualParams {
             saturation: 1.0,
             contrast_passes: 1,
             random_mode_enabled: false,
-            random_mode_aggressiveness: 0.5,
+            random_mode_aggressiveness: 0.65,
             reactive_mode_enabled: false,
             reactive_mode_aggressiveness: 0.5,
             party_mode_enabled: false,
-            party_mode_aggressiveness: 0.5,
+            party_mode_aggressiveness: 0.75,
             locks: ParamLocks::default(),
             export_resolution: ResolutionPreset::HD720,
             export_framerate:  FramerateChoice::Fps60,
+            export_live_preview: true,
         }
     }
 }
@@ -364,11 +366,14 @@ struct Preset {
     export_resolution: ResolutionPreset,
     #[serde(default)]
     export_framerate: FramerateChoice,
+    #[serde(default = "default_true")]
+    export_live_preview: bool,
 }
 
-fn default_one_f32()  -> f32 { 1.0 }
-fn default_half_f32() -> f32 { 0.5 }
-fn default_one_u32()  -> u32 { 1 }
+fn default_one_f32()  -> f32  { 1.0 }
+fn default_half_f32() -> f32  { 0.5 }
+fn default_one_u32()  -> u32  { 1 }
+fn default_true()     -> bool { true }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -402,6 +407,7 @@ impl Preset {
             locks: params.locks,
             export_resolution: params.export_resolution,
             export_framerate:  params.export_framerate,
+            export_live_preview: params.export_live_preview,
         }
     }
 
@@ -454,6 +460,7 @@ impl Preset {
         params.locks              = self.locks;
         params.export_resolution  = self.export_resolution;
         params.export_framerate   = self.export_framerate;
+        params.export_live_preview = self.export_live_preview;
     }
 }
 
@@ -2983,44 +2990,46 @@ impl GpuState {
         });
 
         // ── Phase 8: preview — blit offline target to swapchain ───────────────
-        if let Ok(swap_frame) = self.surface.get_current_texture() {
-            let swap_view = swap_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let preview_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Export preview BG"),
-                layout: &self.blit_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0,
-                        resource: wgpu::BindingResource::TextureView(
-                            &self.offline_target.as_ref().unwrap().view,
-                        ),
-                    },
-                    wgpu::BindGroupEntry { binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
-                    },
-                ],
-            });
-            let mut blit_enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Export preview blit"),
-            });
-            {
-                let mut pass = blit_enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Export preview pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &swap_view, resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
+        if self.params.export_live_preview {
+            if let Ok(swap_frame) = self.surface.get_current_texture() {
+                let swap_view = swap_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let preview_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Export preview BG"),
+                    layout: &self.blit_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.offline_target.as_ref().unwrap().view,
+                            ),
                         },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None, timestamp_writes: None,
+                        wgpu::BindGroupEntry { binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                        },
+                    ],
                 });
-                pass.set_pipeline(&self.blit_pipeline);
-                pass.set_bind_group(0, &preview_bg, &[]);
-                pass.draw(0..3, 0..1);
+                let mut blit_enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Export preview blit"),
+                });
+                {
+                    let mut pass = blit_enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Export preview pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &swap_view, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None, timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.blit_pipeline);
+                    pass.set_bind_group(0, &preview_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                self.queue.submit(std::iter::once(blit_enc.finish()));
+                swap_frame.present();
             }
-            self.queue.submit(std::iter::once(blit_enc.finish()));
-            swap_frame.present();
         }
 
         // ── Phase 9: advance counter + progress log ───────────────────────────
@@ -3611,17 +3620,18 @@ impl ApplicationHandler for App {
                         let title = match gpu.export_state.as_ref().map(|e| e.phase) {
                             Some(ExportPhase::Rendering) => {
                                 let exp = gpu.export_state.as_ref().unwrap();
+                                let headless = if !gpu.params.export_live_preview { " [headless]" } else { "" };
                                 format!(
-                                    "abstrakt-deck — slice 24g — EXPORTING {}/{} ({:.0}%) — {:.1} fps",
+                                    "abstrakt-deck — slice 24i — EXPORTING {}/{} ({:.0}%){} — {:.1} fps",
                                     exp.current_frame, exp.total_frames,
                                     exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
-                                    fps_val,
+                                    headless, fps_val,
                                 )
                             }
                             Some(ExportPhase::Muxing) => {
-                                "abstrakt-deck — slice 24g — MUXING (ffmpeg)...".to_string()
+                                "abstrakt-deck — slice 24i — MUXING (ffmpeg)...".to_string()
                             }
-                            _ => format!("abstrakt-deck — slice 24g — {:.1} fps", fps_val),
+                            _ => format!("abstrakt-deck — slice 24i — {:.1} fps", fps_val),
                         };
                         window.set_title(&title);
                     }
@@ -3917,6 +3927,9 @@ impl ApplicationHandler for App {
                         ParamChange::ExportFramerate(v) => {
                             gpu.params.export_framerate = v;
                         }
+                        ParamChange::SetExportLivePreview(v) => {
+                            gpu.params.export_live_preview = v;
+                        }
                     }
                 }
 
@@ -3924,11 +3937,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24g — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24i — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24g — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24i — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -4063,6 +4076,7 @@ mod tests {
             },
             export_resolution: ResolutionPreset::FullHD,
             export_framerate:  FramerateChoice::Fps30,
+            export_live_preview: false,
         }
     }
 
@@ -4105,8 +4119,9 @@ mod tests {
         assert_eq!(restored.party_mode_aggressiveness,    original.party_mode_aggressiveness,    "party_mode_aggressiveness failed");
         assert_eq!(restored.locks.contrast,        original.locks.contrast,        "locks.contrast failed");
         assert_eq!(restored.locks.contrast_passes, original.locks.contrast_passes, "locks.contrast_passes failed");
-        assert_eq!(restored.export_resolution, original.export_resolution, "export_resolution failed");
-        assert_eq!(restored.export_framerate,  original.export_framerate,  "export_framerate failed");
+        assert_eq!(restored.export_resolution,   original.export_resolution,   "export_resolution failed");
+        assert_eq!(restored.export_framerate,    original.export_framerate,    "export_framerate failed");
+        assert_eq!(restored.export_live_preview, original.export_live_preview, "export_live_preview failed");
     }
 
     #[test]
