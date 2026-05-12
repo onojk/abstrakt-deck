@@ -4,6 +4,16 @@
 
 Native Linux desktop kaleidoscope visualizer and 4K music video generator built with Rust + wgpu. Load any audio file (or use live mic), configure the visualizer with parameter sliders, locks, and three autonomous chaos modes — then export a 4K UHD music video with synced audio in a single click. Multi-shape 3D geometry wrapped with procedural or image painters, folded through configurable kaleido symmetry, with audio-driven beat detection and bass-energy reactivity. Sister project to [abstrakt-engine](https://github.com/onojk/abstrakt-engine) (the Android version).
 
+## Part of the abstrakt trilogy
+
+Three implementations of the same audio-reactive kaleidoscope idea, on three different stacks:
+
+- **[abstrakt](https://github.com/onojk/abstrakt)** — Python + pygame visualizers piped through FFmpeg kaleidoscope post-stack. Offline 4K pipeline, Linux. The original.
+- **abstrakt-deck** (this repo) — Rust + wgpu + egui native desktop app. Real-time interactive, MIDI controllable.
+- **[abstrakt-engine](https://github.com/onojk/abstrakt-engine)** — Kotlin + OpenGL ES 3.0 Android app. 120Hz audio-reactive visualization with MP4 export. Coming to Google Play.
+
+Same aesthetic across all three: audio in, kaleidoscope mandala out. Different platforms, different tradeoffs.
+
 ## Example output
 
 Music videos generated with abstrakt-deck:
