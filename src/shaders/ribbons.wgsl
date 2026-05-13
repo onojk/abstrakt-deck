@@ -59,7 +59,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let dist     = in.uv.y - y_ribbon;
         let stroke   = exp(-(dist * dist) / (2.0 * width * width));
 
-        color += stroke * c.rgb * u.intensity;
+        // (1.0 - 0.992) per-frame stroke scale; keeps the running accumulation
+        // at steady-state ≈ stroke peak instead of ~125× larger. Without this,
+        // ribbons saturate to white when composited onto the Rgba8Unorm painter.
+        color += stroke * c.rgb * u.intensity * 0.008;
     }
 
     return vec4<f32>(color, 1.0);
