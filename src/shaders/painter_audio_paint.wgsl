@@ -1,6 +1,12 @@
 // painter_audio_paint.wgsl
-// Currently 2-band (bass + mid). Will be upgraded to 8-band when analyzer
-// is upgraded in slice 24s.
+// 8-band audio visualizer: one horizontal row per band, hue-coded.
+// Band cutoffs match Android parity (60-120, 120-250, 250-500, 500-1k,
+// 1k-2k, 2k-4k, 4k-8k, 8k-16k Hz). Beat flash via beat_decay.
+//
+// NOTE: WGSL uniform arrays require stride ≥ 16 bytes per element.
+// array<f32, 8> has stride 4 and fails validation. We pack the 8 f32
+// band values into array<vec4<f32>, 2> (stride 16) which has the same
+// 32-byte memory footprint as the Rust [f32; 8] at the same offset.
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -11,7 +17,8 @@ struct PainterAudioUniforms {
     time_seconds: f32,
     bass:         f32,
     mid:          f32,
-    _pad:         f32,
+    beat_decay:   f32,
+    bands:        array<vec4<f32>, 2>,  // [0].xyzw = bands 0-3, [1].xyzw = bands 4-7
 };
 
 @group(0) @binding(0) var<uniform> audio: PainterAudioUniforms;
@@ -41,23 +48,34 @@ fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     return rgb + vec3<f32>(m);
 }
 
+// Extract band i (0-7) from the vec4-packed bands array.
+fn band(i: i32) -> f32 {
+    let v = audio.bands[i / 4];
+    let lane = i % 4;
+    if      lane == 0 { return v.x; }
+    else if lane == 1 { return v.y; }
+    else if lane == 2 { return v.z; }
+    else              { return v.w; }
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let t = audio.time_seconds;
 
-    // Lower half [0, 0.5) → bass, upper half (0.5, 1.0] → mid.
-    // Smooth blend at UV.y == 0.5 using a 0.05-wide smoothstep band.
-    let blend = smoothstep(0.45, 0.55, in.uv.y);  // 0 = bass, 1 = mid
-    let energy = mix(audio.bass, audio.mid, blend);
+    // Row 0 (top) = band 0 (sub-bass), row 7 (bottom) = band 7 (air/treble)
+    let row_f = clamp(floor(in.uv.y * 8.0), 0.0, 7.0);
+    let row   = i32(row_f);
 
-    // Hue drifts slowly with time; U adds a gentle wave so the stripe
-    // isn't a perfectly flat color bar.
-    let hue_base_bass = 0.0;   // red-orange
-    let hue_base_mid  = 0.55;  // cyan-blue
-    let hue_base = mix(hue_base_bass, hue_base_mid, blend);
-    let hue = fract(hue_base + t * 0.01 + in.uv.x * 0.04);
+    let band_energy = band(row);
 
-    let value = clamp(energy * 3.0 + 0.15, 0.0, 1.0);
+    // Evenly spaced hues across the spectrum; slow time drift + U wave
+    let hue_base = row_f / 8.0;
+    let hue = fract(hue_base + t * 0.005 + in.uv.x * 0.03);
 
-    return vec4<f32>(hsv2rgb(hue, 1.0, value), 1.0);
+    let value = clamp(band_energy * 3.0 + 0.1, 0.0, 1.0);
+
+    // Beat flash: all rows brighten simultaneously on onset
+    let flash = audio.beat_decay * 0.3;
+
+    return vec4<f32>(hsv2rgb(hue, 1.0, clamp(value + flash, 0.0, 1.0)), 1.0);
 }
