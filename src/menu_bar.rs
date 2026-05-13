@@ -30,6 +30,8 @@ pub enum LockTarget {
     BassZoomStrength,
     MidiShakeEnabled,
     AudioShakeEnabled,
+    RibbonsEnabled,
+    RibbonsIntensity,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +75,8 @@ pub enum ParamChange {
     DistortionPlusRoll(f32),
     MidiShakeEnabled(bool),
     AudioShakeEnabled(bool),
+    RibbonsEnabled(bool),
+    RibbonsIntensity(f32),
     BassZoomStrength(f32),
     CurrentShape(crate::ShapeKind),
     FrameShape(crate::FrameShape),
@@ -355,6 +359,8 @@ impl MenuBar {
                             );
                             ui.separator();
                             Self::modes_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::ribbons_section(ui, current_params, &mut frame_changes);
                         });
                     });
             }
@@ -820,6 +826,42 @@ impl MenuBar {
                     let mut bass = params.bass_zoom_strength;
                     if ui.add(egui::Slider::new(&mut bass, 0.0..=1.0).text("Bass-Zoom Strength").step_by(0.05)).changed() {
                         changes.push(ParamChange::BassZoomStrength(bass));
+                    }
+                });
+            });
+        });
+    }
+
+    fn ribbons_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Ribbons", |ui| {
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.ribbons_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::RibbonsEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.ribbons_enabled, |ui| {
+                    let mut en = params.ribbons_enabled;
+                    if ui.checkbox(&mut en, "Enable Ribbons").changed() {
+                        changes.push(ParamChange::RibbonsEnabled(en));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.ribbons_intensity).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::RibbonsIntensity));
+                }
+                ui.add_enabled_ui(!params.locks.ribbons_intensity, |ui| {
+                    let mut intensity = params.ribbons_intensity;
+                    if ui.add(
+                        egui::Slider::new(&mut intensity, 0.0..=2.0)
+                            .text("Intensity")
+                            .step_by(0.05),
+                    ).changed() {
+                        changes.push(ParamChange::RibbonsIntensity(intensity));
                     }
                 });
             });

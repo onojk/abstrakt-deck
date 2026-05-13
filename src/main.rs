@@ -31,6 +31,22 @@ use winit::window::{Window, WindowId};
 const PAINTER_TEXTURE_WIDTH: u32  = 4096;
 const PAINTER_TEXTURE_HEIGHT: u32 = 256;
 const SKIN_MIP_LEVELS: u32        = 13; // ilog2(4096) + 1
+const PAINTER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+// 4 ribbons: [r, g, b, speed_rad_per_s]
+const RIBBON_COLORS: [[f32; 4]; 4] = [
+    [1.0, 0.3, 0.1, 0.4],  // orange-red
+    [0.1, 0.6, 1.0, 0.3],  // cyan-blue
+    [0.8, 0.1, 0.9, 0.5],  // purple
+    [0.1, 0.9, 0.4, 0.2],  // green
+];
+// 4 ribbons: [frequency, phase_offset, gaussian_width_uv, amplitude_uv]
+const RIBBON_PARAMS: [[f32; 4]; 4] = [
+    [2.5, 0.0,  0.020, 0.30],
+    [3.2, 1.2,  0.015, 0.25],
+    [1.8, 2.4,  0.025, 0.35],
+    [4.1, 0.7,  0.012, 0.20],
+];
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -91,6 +107,17 @@ struct DistortionPlusUniforms {
     pitch: f32,
     roll:  f32,
     _pad:  f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RibbonUniforms {
+    time_seconds: f32,
+    beat_decay:   f32,
+    intensity:    f32,
+    _pad0:        f32,
+    colors: [[f32; 4]; 4],  // [r, g, b, speed] per ribbon (matches WGSL array<vec4<f32>,4>)
+    params: [[f32; 4]; 4],  // [freq, phase, width, amplitude] per ribbon
 }
 
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=flower 7=star
@@ -256,6 +283,9 @@ pub struct ParamLocks {
     pub bass_zoom_strength: bool,
     pub midi_shake_enabled: bool,
     pub audio_shake_enabled: bool,
+    // Ribbons
+    pub ribbons_enabled:   bool,
+    pub ribbons_intensity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -280,6 +310,8 @@ pub struct VisualParams {
     pub distortion_plus_roll:    f32,
     pub midi_shake_enabled:  bool,
     pub audio_shake_enabled: bool,
+    pub ribbons_enabled:   bool,
+    pub ribbons_intensity: f32,
     pub bass_zoom_strength: f32,
     pub painter_kind: PainterKind,
     pub contrast: f32,
@@ -320,6 +352,8 @@ impl Default for VisualParams {
             distortion_plus_roll:    0.0,
             midi_shake_enabled:  true,
             audio_shake_enabled: false,
+            ribbons_enabled:   false,
+            ribbons_intensity: 0.5,
             bass_zoom_strength: 0.3,
             painter_kind: PainterKind::HueStripe,
             contrast: 1.0,
@@ -388,6 +422,10 @@ struct Preset {
     midi_shake_enabled:  bool,
     #[serde(default)]
     audio_shake_enabled: bool,
+    #[serde(default)]
+    ribbons_enabled: bool,
+    #[serde(default = "default_half_f32")]
+    ribbons_intensity: f32,
     bass_zoom_strength: f32,
     painter_kind: String,
     #[serde(default = "default_one_f32")]
@@ -446,6 +484,8 @@ impl Preset {
             distortion_plus_roll:    params.distortion_plus_roll,
             midi_shake_enabled:  params.midi_shake_enabled,
             audio_shake_enabled: params.audio_shake_enabled,
+            ribbons_enabled:   params.ribbons_enabled,
+            ribbons_intensity: params.ribbons_intensity,
             bass_zoom_strength: params.bass_zoom_strength,
             painter_kind: params.painter_kind.name().to_string(),
             contrast: params.contrast,
@@ -499,6 +539,8 @@ impl Preset {
         params.distortion_plus_roll    = self.distortion_plus_roll;
         params.midi_shake_enabled  = self.midi_shake_enabled;
         params.audio_shake_enabled = self.audio_shake_enabled;
+        params.ribbons_enabled   = self.ribbons_enabled;
+        params.ribbons_intensity = self.ribbons_intensity;
         params.bass_zoom_strength = self.bass_zoom_strength;
         params.painter_kind = match self.painter_kind.as_str() {
             "Spiral"     => PainterKind::Spiral,
@@ -1067,6 +1109,20 @@ pub struct MuxResult {
     pub error_message: Option<String>,
 }
 
+struct ExportRibbonState {
+    #[allow(dead_code)]
+    tex_a:  wgpu::Texture,
+    view_a: wgpu::TextureView,
+    #[allow(dead_code)]
+    tex_b:  wgpu::Texture,
+    view_b: wgpu::TextureView,
+    ping:   bool,  // true=read A write B; false=read B write A
+    bg_read_a:       wgpu::BindGroup,  // update pass: reads texture A
+    bg_read_b:       wgpu::BindGroup,  // update pass: reads texture B
+    composite_bg_a:  wgpu::BindGroup,  // composite pass: blits texture A
+    composite_bg_b:  wgpu::BindGroup,  // composite pass: blits texture B
+}
+
 pub struct ExportState {
     pub phase: ExportPhase,
     pub current_frame: u32,
@@ -1250,6 +1306,27 @@ struct GpuState {
     blit_bind_group: wgpu::BindGroup,
     blit_pipeline: wgpu::RenderPipeline,
 
+    // Ribbon system (ping-pong RGBA16F FBOs, PAINTER_TEXTURE_WIDTH × PAINTER_TEXTURE_HEIGHT)
+    ribbon_uniforms_buffer:  wgpu::Buffer,
+    ribbon_bgl:              wgpu::BindGroupLayout,
+    ribbon_sampler:          wgpu::Sampler,
+    #[allow(dead_code)]
+    ribbon_tex_a:            wgpu::Texture,
+    ribbon_view_a:           wgpu::TextureView,
+    #[allow(dead_code)]
+    ribbon_tex_b:            wgpu::Texture,
+    ribbon_view_b:           wgpu::TextureView,
+    ribbon_ping:             bool,
+    ribbon_bg_read_a:        wgpu::BindGroup,
+    ribbon_bg_read_b:        wgpu::BindGroup,
+    ribbon_composite_bg_a:   wgpu::BindGroup,
+    ribbon_composite_bg_b:   wgpu::BindGroup,
+    ribbon_update_pipeline:  wgpu::RenderPipeline,
+    ribbon_composite_pipeline: wgpu::RenderPipeline,
+
+    // Export ribbon FBOs (persistent across export frames, None when not exporting)
+    export_ribbon: Option<ExportRibbonState>,
+
     // CPU readback for recording
     readback_buffer: wgpu::Buffer,
     readback_padded_bytes_per_row: u32,
@@ -1350,6 +1427,22 @@ impl GpuState {
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
+    }
+
+    fn create_ribbon_fbo(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Ribbon FBO"),
+            size: wgpu::Extent3d {
+                width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+            },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -2324,6 +2417,160 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        // ── Ribbon system ─────────────────────────────────────────────────────────
+        let ribbon_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Ribbon uniforms"),
+                contents: bytemuck::cast_slice(&[RibbonUniforms {
+                    time_seconds: 0.0, beat_decay: 0.0, intensity: 0.5, _pad0: 0.0,
+                    colors: RIBBON_COLORS,
+                    params: RIBBON_PARAMS,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let ribbon_bgl = Self::make_uts_bgl(&device, "Ribbon BGL");
+        let ribbon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Ribbon sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let (ribbon_tex_a, ribbon_view_a) = Self::create_ribbon_fbo(&device);
+        let (ribbon_tex_b, ribbon_view_b) = Self::create_ribbon_fbo(&device);
+
+        // Clear both ribbon FBOs to transparent black
+        {
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Ribbon init clear"),
+            });
+            for view in [&ribbon_view_a, &ribbon_view_b] {
+                let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Ribbon init clear pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+            }
+            queue.submit(std::iter::once(enc.finish()));
+        }
+
+        let ribbon_bg_read_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Ribbon BG read A"),
+            layout: &ribbon_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ribbon_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&ribbon_view_a) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&ribbon_sampler) },
+            ],
+        });
+        let ribbon_bg_read_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Ribbon BG read B"),
+            layout: &ribbon_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ribbon_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&ribbon_view_b) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&ribbon_sampler) },
+            ],
+        });
+        let ribbon_composite_bg_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Ribbon composite BG A"),
+            layout: &skin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ribbon_view_a) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&ribbon_sampler) },
+            ],
+        });
+        let ribbon_composite_bg_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Ribbon composite BG B"),
+            layout: &skin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ribbon_view_b) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&ribbon_sampler) },
+            ],
+        });
+        let ribbon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Ribbon shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ribbons.wgsl").into()),
+        });
+        let ribbon_update_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Ribbon update pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None, bind_group_layouts: &[&ribbon_bgl], push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &ribbon_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ribbon_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+        let ribbon_composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Ribbon composite shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ribbon_composite.wgsl").into()),
+        });
+        let ribbon_composite_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Ribbon composite pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None, bind_group_layouts: &[&skin_bgl], push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &ribbon_composite_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ribbon_composite_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: PAINTER_FORMAT,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation:  wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation:  wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         Self {
             surface, device, queue, config, size,
             uniforms_buffer,
@@ -2347,6 +2594,13 @@ impl GpuState {
             shape_sampler,
             scene_texture, scene_view,
             blit_bgl, blit_bind_group, blit_pipeline,
+            ribbon_uniforms_buffer, ribbon_bgl, ribbon_sampler,
+            ribbon_tex_a, ribbon_view_a, ribbon_tex_b, ribbon_view_b,
+            ribbon_ping: false,
+            ribbon_bg_read_a, ribbon_bg_read_b,
+            ribbon_composite_bg_a, ribbon_composite_bg_b,
+            ribbon_update_pipeline, ribbon_composite_pipeline,
+            export_ribbon: None,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
             offline_target: None,
@@ -2604,6 +2858,7 @@ impl GpuState {
                             Err(_) => log::error!("Mux thread panicked"),
                         }
                         self.export_state = None;
+                        self.export_ribbon = None;
                         // fall through to live render below
                     } else {
                         self.render_mux_phase_preview(menu);
@@ -2612,6 +2867,7 @@ impl GpuState {
                 }
                 ExportPhase::Complete | ExportPhase::Failed => {
                     self.export_state = None;
+                    self.export_ribbon = None;
                     // fall through to live render below
                 }
             }
@@ -2761,6 +3017,64 @@ impl GpuState {
                 pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
             }
             pass.draw(0..3, 0..1);
+        }
+
+        // Pass 1a: ribbon update (ping-pong RGBA16F FBOs)
+        // Pass 1b: ribbon composite → painter FBO (additive blend, LoadOp::Load)
+        if self.params.ribbons_enabled {
+            self.queue.write_buffer(&self.ribbon_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[RibbonUniforms {
+                    time_seconds: shader_time,
+                    beat_decay:   self.shader_beat_decay,
+                    intensity:    self.params.ribbons_intensity,
+                    _pad0:        0.0,
+                    colors: RIBBON_COLORS,
+                    params: RIBBON_PARAMS,
+                }]));
+            let ping = self.ribbon_ping;
+            self.ribbon_ping = !self.ribbon_ping;
+            {
+                let (write_view, read_bg) = if ping {
+                    (&self.ribbon_view_b, &self.ribbon_bg_read_a)
+                } else {
+                    (&self.ribbon_view_a, &self.ribbon_bg_read_b)
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Ribbon update pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: write_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.ribbon_update_pipeline);
+                pass.set_bind_group(0, read_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            {
+                let composite_bg = if ping {
+                    &self.ribbon_composite_bg_b   // just wrote B
+                } else {
+                    &self.ribbon_composite_bg_a   // just wrote A
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Ribbon composite pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.painter_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.ribbon_composite_pipeline);
+                pass.set_bind_group(0, composite_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
 
         // Pass 2: shape → shape FBO
@@ -3111,6 +3425,71 @@ impl GpuState {
             export_rms_smoothed:   0.0,
             offline_analyzer:      audio::OfflineAnalyzer::new(),
         });
+
+        // Initialize export ribbon FBOs, cleared to transparent black
+        {
+            let (tex_a, view_a) = Self::create_ribbon_fbo(&self.device);
+            let (tex_b, view_b) = Self::create_ribbon_fbo(&self.device);
+            {
+                let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Export ribbon init clear"),
+                });
+                for v in [&view_a, &view_b] {
+                    let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Export ribbon clear"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: v, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                    });
+                }
+                self.queue.submit(std::iter::once(enc.finish()));
+            }
+            let bg_read_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export ribbon BG read A"),
+                layout: &self.ribbon_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ribbon_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ribbon_sampler) },
+                ],
+            });
+            let bg_read_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export ribbon BG read B"),
+                layout: &self.ribbon_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ribbon_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ribbon_sampler) },
+                ],
+            });
+            let composite_bg_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export ribbon composite BG A"),
+                layout: &self.skin_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.ribbon_sampler) },
+                ],
+            });
+            let composite_bg_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export ribbon composite BG B"),
+                layout: &self.skin_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.ribbon_sampler) },
+                ],
+            });
+            self.export_ribbon = Some(ExportRibbonState {
+                tex_a, view_a, tex_b, view_b,
+                ping: false,
+                bg_read_a, bg_read_b,
+                composite_bg_a, composite_bg_b,
+            });
+        }
         Ok(())
     }
 
@@ -3392,6 +3771,72 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
+        // Pass 1a/1b: ribbon update + composite (export path)
+        if self.params.ribbons_enabled {
+            let exp_beat = self.export_state.as_ref()
+                .map(|e| e.offline_analyzer.beat_decay)
+                .unwrap_or(0.0);
+            self.queue.write_buffer(&self.ribbon_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[RibbonUniforms {
+                    time_seconds: shader_time,
+                    beat_decay:   exp_beat,
+                    intensity:    self.params.ribbons_intensity,
+                    _pad0:        0.0,
+                    colors: RIBBON_COLORS,
+                    params: RIBBON_PARAMS,
+                }]));
+            // Capture and flip ping state; None means no export ribbon allocated → skip
+            let ping_opt = if let Some(r) = self.export_ribbon.as_mut() {
+                let p = r.ping;
+                r.ping = !r.ping;
+                Some(p)
+            } else {
+                None
+            };
+            if let (Some(ping), Some(exp_r)) = (ping_opt, &self.export_ribbon) {
+                {
+                    let (write_view, read_bg) = if ping {
+                        (&exp_r.view_b, &exp_r.bg_read_a)
+                    } else {
+                        (&exp_r.view_a, &exp_r.bg_read_b)
+                    };
+                    let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Export ribbon update pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: write_view, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.ribbon_update_pipeline);
+                    pass.set_bind_group(0, read_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                {
+                    // composite the freshly-written texture onto painter_view
+                    // (painter_view is shared with live path — cross-contamination accepted for export)
+                    let composite_bg = if ping { &exp_r.composite_bg_b } else { &exp_r.composite_bg_a };
+                    let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Export ribbon composite pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.painter_view, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.ribbon_composite_pipeline);
+                    pass.set_bind_group(0, composite_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+        }
+
         // Pass 2: shape → export-res shape view
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3668,6 +4113,8 @@ impl GpuState {
         if !self.params.locks.distortion_enabled   { self.params.distortion_enabled   = rng.gen_bool(0.5); }
         if !self.params.locks.midi_shake_enabled   { self.params.midi_shake_enabled   = rng.gen_bool(0.5); }
         if !self.params.locks.audio_shake_enabled  { self.params.audio_shake_enabled  = rng.gen_bool(0.5); }
+        if !self.params.locks.ribbons_enabled      { self.params.ribbons_enabled      = rng.gen_bool(0.5); }
+        if !self.params.locks.ribbons_intensity    { self.params.ribbons_intensity    = rng.gen_range(0.2_f32..=1.0); }
         // DP angles reroll independently of enabled (per spec).
         if !self.params.locks.distortion_plus_enabled { self.params.distortion_plus_enabled = rng.gen_bool(0.40); }
         if !self.params.locks.distortion_plus_yaw     { self.params.distortion_plus_yaw     = rng.gen_range(-180.0_f32..=180.0); }
@@ -4454,6 +4901,8 @@ impl ApplicationHandler for App {
                         ParamChange::DistortionPlusRoll(v)      => gpu.params.distortion_plus_roll     = v,
                         ParamChange::MidiShakeEnabled(v)     => gpu.params.midi_shake_enabled  = v,
                         ParamChange::AudioShakeEnabled(v)    => gpu.params.audio_shake_enabled = v,
+                        ParamChange::RibbonsEnabled(v)       => gpu.params.ribbons_enabled     = v,
+                        ParamChange::RibbonsIntensity(v)     => gpu.params.ribbons_intensity   = v,
                         ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength  = v,
                         ParamChange::CurrentShape(v)         => gpu.params.current_shape = v,
                         ParamChange::FrameShape(v)           => gpu.params.frame_shape = v,
@@ -4524,6 +4973,8 @@ impl ApplicationHandler for App {
                                 LockTarget::BassZoomStrength   => gpu.params.locks.bass_zoom_strength   = !gpu.params.locks.bass_zoom_strength,
                                 LockTarget::MidiShakeEnabled   => gpu.params.locks.midi_shake_enabled   = !gpu.params.locks.midi_shake_enabled,
                                 LockTarget::AudioShakeEnabled  => gpu.params.locks.audio_shake_enabled  = !gpu.params.locks.audio_shake_enabled,
+                                LockTarget::RibbonsEnabled     => gpu.params.locks.ribbons_enabled      = !gpu.params.locks.ribbons_enabled,
+                                LockTarget::RibbonsIntensity   => gpu.params.locks.ribbons_intensity    = !gpu.params.locks.ribbons_intensity,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -4679,6 +5130,8 @@ mod tests {
             distortion_plus_roll:    90.0,
             midi_shake_enabled:  false,
             audio_shake_enabled: true,
+            ribbons_enabled:   true,
+            ribbons_intensity: 0.8,
             bass_zoom_strength: 0.8,
             painter_kind: PainterKind::PrintHead,
             contrast: 1.5,
@@ -4732,6 +5185,8 @@ mod tests {
         assert_eq!(restored.distortion_plus_roll,    original.distortion_plus_roll,    "distortion_plus_roll failed");
         assert_eq!(restored.midi_shake_enabled,  original.midi_shake_enabled,  "midi_shake_enabled failed");
         assert_eq!(restored.audio_shake_enabled, original.audio_shake_enabled, "audio_shake_enabled failed");
+        assert_eq!(restored.ribbons_enabled,   original.ribbons_enabled,   "ribbons_enabled failed");
+        assert_eq!(restored.ribbons_intensity, original.ribbons_intensity, "ribbons_intensity failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
         assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");
         assert_eq!(restored.contrast,        original.contrast,        "contrast failed");
