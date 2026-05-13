@@ -6,7 +6,7 @@ mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
 use help_overlay::HelpOverlay;
-use menu_bar::{MenuAction, MenuBar, ParamChange};
+use menu_bar::{ExportProgress, MenuAction, MenuBar, ParamChange};
 use midi::{MidiCapture, MidiEvent};
 use recorder::Recorder;
 use shape::{ShapeKind, Vertex};
@@ -147,16 +147,13 @@ impl PainterKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResolutionPreset {
     SD480,
+    #[default]
     HD720,
     FullHD,
     UHD4K,
-}
-
-impl Default for ResolutionPreset {
-    fn default() -> Self { ResolutionPreset::HD720 }
 }
 
 impl ResolutionPreset {
@@ -178,14 +175,11 @@ impl ResolutionPreset {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FramerateChoice {
     Fps30,
+    #[default]
     Fps60,
-}
-
-impl Default for FramerateChoice {
-    fn default() -> Self { FramerateChoice::Fps60 }
 }
 
 impl FramerateChoice {
@@ -2107,7 +2101,7 @@ impl GpuState {
         self.readback_padded_bytes_per_row = rp;
     }
 
-    fn render_mux_phase_preview(&mut self) {
+    fn render_mux_phase_preview(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) {
         if let Ok(swap_frame) = self.surface.get_current_texture() {
             let swap_view = swap_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
             if let Some(target) = &self.offline_target {
@@ -2141,6 +2135,12 @@ impl GpuState {
                     pass.set_bind_group(0, &preview_bg, &[]);
                     pass.draw(0..3, 0..1);
                 }
+                if let Some((menu_bar, window)) = menu {
+                    menu_bar.render(
+                        &self.device, &self.queue, &mut enc, window,
+                        &swap_view, self.size.width, self.size.height, &self.params,
+                    );
+                }
                 self.queue.submit(std::iter::once(enc.finish()));
             }
             swap_frame.present();
@@ -2152,7 +2152,7 @@ impl GpuState {
             let phase = self.export_state.as_ref().unwrap().phase;
             match phase {
                 ExportPhase::Rendering => {
-                    self.render_export_frame();
+                    self.render_export_frame(menu);
                     return Ok(());
                 }
                 ExportPhase::Muxing => {
@@ -2174,7 +2174,7 @@ impl GpuState {
                         self.export_state = None;
                         // fall through to live render below
                     } else {
-                        self.render_mux_phase_preview();
+                        self.render_mux_phase_preview(menu);
                         return Ok(());
                     }
                 }
@@ -2629,7 +2629,7 @@ impl GpuState {
         Ok(())
     }
 
-    fn render_export_frame(&mut self) {
+    fn render_export_frame(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) {
         // ── Phase 1: snapshot state, check completion ─────────────────────────
         let (frame_index, total, fps, output_dir, sender) = {
             let e = self.export_state.as_ref().unwrap();
@@ -2934,7 +2934,7 @@ impl GpuState {
         }
 
         // Readback: copy offline_target → staging buffer
-        let aligned_bpr = ((off_w * 4 + 255) / 256) * 256;
+        let aligned_bpr = (off_w * 4).div_ceil(256) * 256;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Export readback"),
             size: (aligned_bpr * off_h) as u64,
@@ -3026,6 +3026,12 @@ impl GpuState {
                     pass.set_pipeline(&self.blit_pipeline);
                     pass.set_bind_group(0, &preview_bg, &[]);
                     pass.draw(0..3, 0..1);
+                }
+                if let Some((menu_bar, window)) = menu {
+                    menu_bar.render(
+                        &self.device, &self.queue, &mut blit_enc, window,
+                        &swap_view, self.size.width, self.size.height, &self.params,
+                    );
                 }
                 self.queue.submit(std::iter::once(blit_enc.finish()));
                 swap_frame.present();
@@ -3606,7 +3612,17 @@ impl ApplicationHandler for App {
                     if let Some(midi) = &self.midi {
                         while midi.event_rx.try_recv().is_ok() {}
                     }
-                    match gpu.render(None) {
+                    // Snapshot export progress before render (render may advance current_frame).
+                    let progress_snap = gpu.export_state.as_ref().map(|e| ExportProgress {
+                        current_frame: e.current_frame,
+                        total_frames:  e.total_frames,
+                        is_muxing:     e.phase == ExportPhase::Muxing,
+                    });
+                    if let Some(menu) = self.menu_bar.as_mut() {
+                        menu.export_progress = progress_snap;
+                    }
+                    let menu = self.menu_bar.as_mut().map(|m| (m as &mut MenuBar, window.as_ref() as &winit::window::Window));
+                    match gpu.render(menu) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             gpu.resize(gpu.size);
@@ -3636,7 +3652,7 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                let file_playing = gpu.audio_player.as_ref().map_or(false, |p| p.is_playing());
+                let file_playing = gpu.audio_player.as_ref().is_some_and(|p| p.is_playing());
 
                 // Mic beat events — drain always; only apply shake when file is not playing
                 if let Some(audio) = &self.audio {
@@ -3713,7 +3729,7 @@ impl ApplicationHandler for App {
                     None
                 };
                 if let Some(menu) = self.menu_bar.as_mut() {
-                    menu.is_exporting = gpu.export_state.is_some();
+                    menu.export_progress = None; // not exporting in normal render path
                     menu.player_info = player_info;
                 }
 
@@ -3966,7 +3982,7 @@ fn clean_old_exports() {
         Err(_) => return,
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_str().map_or(false, |n| n.starts_with("export-")) {
+        if entry.file_name().to_str().is_some_and(|n| n.starts_with("export-")) {
             let path = entry.path();
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => log::info!("Cleaned leftover export dir: {}", path.display()),

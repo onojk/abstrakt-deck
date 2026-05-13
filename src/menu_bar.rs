@@ -87,6 +87,13 @@ pub enum ParamChange {
     TriggerExport,
 }
 
+#[derive(Clone, Copy)]
+pub struct ExportProgress {
+    pub current_frame: u32,
+    pub total_frames: u32,
+    pub is_muxing: bool,
+}
+
 pub struct MenuBar {
     pub ctx: Context,
     state: State,
@@ -98,7 +105,7 @@ pub struct MenuBar {
     skin_thumbnail_aspect: f32,
     pub current_crop_y_offset: f32,
     pub player_info: Option<PlayerInfo>,
-    pub is_exporting: bool,
+    pub export_progress: Option<ExportProgress>,
 }
 
 impl MenuBar {
@@ -128,7 +135,7 @@ impl MenuBar {
             skin_thumbnail_aspect: 1.0,
             current_crop_y_offset: 0.5,
             player_info: None,
-            is_exporting: false,
+            export_progress: None,
         }
     }
 
@@ -200,6 +207,7 @@ impl MenuBar {
         self.skin_thumbnail = None;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -219,7 +227,7 @@ impl MenuBar {
         let skin_aspect = self.skin_thumbnail_aspect;
         let mut current_crop = self.current_crop_y_offset;
         let player_info_snap = self.player_info.clone();
-        let is_exporting_snap = self.is_exporting;
+        let export_progress_snap = self.export_progress;
         let mut frame_actions: Vec<MenuAction> = Vec::new();
         let mut frame_changes: Vec<ParamChange> = Vec::new();
 
@@ -326,7 +334,7 @@ impl MenuBar {
                                 ui,
                                 current_params,
                                 player_info_snap.as_ref(),
-                                is_exporting_snap,
+                                export_progress_snap,
                                 &mut frame_changes,
                             );
                             ui.separator();
@@ -832,7 +840,7 @@ impl MenuBar {
         ui: &mut egui::Ui,
         params: &crate::VisualParams,
         player_info: Option<&PlayerInfo>,
-        is_exporting: bool,
+        export_progress: Option<ExportProgress>,
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Export", |ui| {
@@ -914,6 +922,7 @@ impl MenuBar {
             ui.separator();
 
             let audio_loaded = player_info.is_some();
+            let is_exporting = export_progress.is_some();
             ui.add_enabled_ui(audio_loaded && !is_exporting, |ui| {
                 if ui.button("Export...").clicked() {
                     changes.push(ParamChange::TriggerExport);
@@ -922,8 +931,25 @@ impl MenuBar {
             if !audio_loaded {
                 ui.label("⚠ Load audio first (File → Open Audio...)");
             }
-            if is_exporting {
-                ui.label("⏳ Export in progress...");
+            if let Some(p) = export_progress {
+                if p.is_muxing {
+                    ui.add(
+                        egui::ProgressBar::new(1.0)
+                            .text("Muxing (ffmpeg)…")
+                            .animate(true),
+                    );
+                } else {
+                    let fraction = if p.total_frames > 0 {
+                        p.current_frame as f32 / p.total_frames as f32
+                    } else {
+                        0.0
+                    };
+                    let pct = (fraction * 100.0) as u32;
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .text(format!("{}/{} ({}%)", p.current_frame, p.total_frames, pct)),
+                    );
+                }
             }
         });
     }
