@@ -2391,10 +2391,11 @@ impl GpuState {
                 (rotation_radians / std::f32::consts::TAU * 0.25).fract();
         }
 
+        let shader_time = elapsed.rem_euclid(600.0);
         self.queue.write_buffer(
             &self.uniforms_buffer, 0,
             bytemuck::cast_slice(&[GlobalUniforms {
-                time_seconds: elapsed,
+                time_seconds: shader_time,
                 resolution_x: self.size.width as f32,
                 resolution_y: self.size.height as f32,
                 _pad: 0.0,
@@ -2422,7 +2423,7 @@ impl GpuState {
                 distortion_enabled:   if self.params.distortion_enabled { 1.0 } else { 0.0 },
                 distortion_amplitude: self.params.distortion_amplitude,
                 distortion_frequency: self.params.distortion_frequency,
-                time_seconds:         elapsed,
+                time_seconds:         shader_time,
                 painter_scroll_phase: self.painter_scroll_phase,
                 contrast:        self.params.contrast,
                 saturation:      self.params.saturation,
@@ -2989,9 +2990,10 @@ impl GpuState {
             glam::Vec3::new(0.0, 0.5, 3.0), glam::Vec3::ZERO, glam::Vec3::Y,
         );
 
+        let shader_time = frame_time.rem_euclid(600.0);
         self.queue.write_buffer(&self.uniforms_buffer, 0,
             bytemuck::cast_slice(&[GlobalUniforms {
-                time_seconds: frame_time,
+                time_seconds: shader_time,
                 resolution_x: off_w as f32, resolution_y: off_h as f32, _pad: 0.0,
             }]));
         self.queue.write_buffer(&self.kaleido_uniforms_buffer, 0,
@@ -3010,7 +3012,7 @@ impl GpuState {
                 distortion_enabled:   if self.params.distortion_enabled { 1.0 } else { 0.0 },
                 distortion_amplitude: self.params.distortion_amplitude,
                 distortion_frequency: self.params.distortion_frequency,
-                time_seconds:         frame_time,
+                time_seconds:         shader_time,
                 painter_scroll_phase: self.painter_scroll_phase,
                 contrast:        self.params.contrast,
                 saturation:      self.params.saturation,
