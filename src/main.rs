@@ -45,9 +45,10 @@ struct GlobalUniforms {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PainterAudioUniforms {
     time_seconds: f32,
-    bass:         f32,  // bass_zoom_smoothed — peaks on bass/beat hits
-    mid:          f32,  // bass_mid_smoothed
-    _pad:         f32,
+    bass:         f32,       // = bands[0], convenience field for PrintHead / legacy
+    mid:          f32,       // = bands[3], convenience field
+    beat_decay:   f32,       // exp(-5*dt) decay, reset to 1.0 on beat onset
+    bands:        [f32; 8],  // 8-band energies, Android-parity cutoffs
 }
 
 #[repr(C)]
@@ -931,16 +932,16 @@ impl AudioPlayer {
     }
 }
 
-/// Compute (bass, mid, rms) from the file at the player's current position.
-/// Uses a 1024-frame mono window centred on the playhead.
-fn compute_file_energies(player: &AudioPlayer, audio: &LoadedAudio) -> (f32, f32, f32) {
-    const WINDOW: usize = 1024;
+/// Compute (8-band energies, rms) from the file at the player's current position.
+/// Uses a 2048-frame mono window centred on the playhead (matches FFT size).
+fn compute_file_energies(player: &AudioPlayer, audio: &LoadedAudio) -> ([f32; 8], f32) {
+    const WINDOW: usize = 2048;
     let ch = audio.channels.max(1) as usize;
     let total_frames = audio.samples.len() / ch;
     let pos = player.position_frames();
     let start = pos.saturating_sub(WINDOW / 2).min(total_frames);
     let end   = (start + WINDOW).min(total_frames);
-    if start >= end { return (0.0, 0.0, 0.0); }
+    if start >= end { return ([0.0; 8], 0.0); }
     let mono: Vec<f32> = (start..end)
         .map(|f| {
             let i = f * ch;
@@ -949,8 +950,8 @@ fn compute_file_energies(player: &AudioPlayer, audio: &LoadedAudio) -> (f32, f32
         })
         .collect();
     let rms = (mono.iter().map(|x| x * x).sum::<f32>() / mono.len() as f32).sqrt();
-    let (bass, mid) = audio::compute_band_energies(&mono, audio.sample_rate);
-    (bass, mid, rms)
+    let bands = audio::compute_band_energies(&mono, audio.sample_rate);
+    (bands, rms)
 }
 
 fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32) -> Vec<u8> {
@@ -1070,9 +1071,9 @@ pub struct ExportState {
     pub frame_save_thread: Option<std::thread::JoinHandle<()>>,
     pub mux_thread: Option<std::thread::JoinHandle<MuxResult>>,
     // Smoothed audio energies — EMA prevents FFT window-shift jitter at 60fps
-    pub export_bass_smoothed: f32,
-    pub export_mid_smoothed:  f32,
-    pub export_rms_smoothed:  f32,
+    pub export_bands_smoothed: [f32; 8],
+    pub export_rms_smoothed:   f32,
+    pub offline_analyzer:      audio::OfflineAnalyzer,
 }
 
 fn spawn_frame_save_worker() -> (Sender<FrameSaveJob>, std::thread::JoinHandle<()>) {
@@ -1274,6 +1275,11 @@ struct GpuState {
     last_party_trigger:    Instant,
     bass_mid_smoothed:     f32,
     bass_mid_baseline:     f32,
+
+    // 8-band EMA for shader uniforms; separate from bass_zoom_smoothed (used for zoom)
+    bands_smoothed:      [f32; 8],
+    shader_beat_decay:   f32,
+    last_audio_update:   Instant,
 
     pub params: VisualParams,
 }
@@ -2011,7 +2017,8 @@ impl GpuState {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("PainterAudio buffer"),
                 contents: bytemuck::cast_slice(&[PainterAudioUniforms {
-                    time_seconds: 0.0, bass: 0.0, mid: 0.0, _pad: 0.0,
+                    time_seconds: 0.0, bass: 0.0, mid: 0.0, beat_decay: 0.0,
+                    bands: [0.0; 8],
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -2353,6 +2360,9 @@ impl GpuState {
             last_party_trigger:    Instant::now(),
             bass_mid_smoothed:  0.0,
             bass_mid_baseline:  0.0,
+            bands_smoothed:     [0.0; 8],
+            shader_beat_decay:  0.0,
+            last_audio_update:  Instant::now(),
             params: VisualParams::default(),
         }
     }
@@ -2705,9 +2715,10 @@ impl GpuState {
         self.queue.write_buffer(&self.painter_audio_buffer, 0,
             bytemuck::cast_slice(&[PainterAudioUniforms {
                 time_seconds: shader_time,
-                bass: self.bass_zoom_smoothed,
-                mid:  self.bass_mid_smoothed,
-                _pad: 0.0,
+                bass:         self.bands_smoothed[0],
+                mid:          self.bands_smoothed[3],
+                beat_decay:   self.shader_beat_decay,
+                bands:        self.bands_smoothed,
             }]));
 
         // Pass 1: painter → painter FBO
@@ -3087,9 +3098,9 @@ impl GpuState {
             frame_save_sender: Some(frame_save_sender),
             frame_save_thread: Some(frame_save_thread),
             mux_thread: None,
-            export_bass_smoothed: 0.0,
-            export_mid_smoothed:  0.0,
-            export_rms_smoothed:  0.0,
+            export_bands_smoothed: [0.0; 8],
+            export_rms_smoothed:   0.0,
+            offline_analyzer:      audio::OfflineAnalyzer::new(),
         });
         Ok(())
     }
@@ -3153,13 +3164,14 @@ impl GpuState {
         let frame_time = frame_index as f32 / fps as f32;
 
         // ── Phase 2: audio energies at this frame (with EMA smoothing) ──────────
-        // Raw FFT windows at 60fps shift by ~800 samples with only ~224 overlap,
+        // Raw FFT windows at 60fps shift by ~1400 samples with only ~648 overlap,
         // causing jitter. Alpha=0.25 gives a ~4-frame (~67ms) smoothing window.
         let (bass, mid, rms) = {
-            let (raw_b, raw_m, raw_r) = if let Some(audio) = self.loaded_audio.clone() {
+            let dt = 1.0 / fps as f32;
+            let (raw_bands, raw_r) = if let Some(audio) = self.loaded_audio.clone() {
                 let ch = audio.channels as usize;
                 let pos = (frame_time * audio.sample_rate as f32) as usize;
-                let window = 1024usize;
+                let window = 2048usize;
                 let start = pos.saturating_sub(window / 2) * ch;
                 let end = (start + window * ch).min(audio.samples.len());
                 if start < end && ch > 0 {
@@ -3171,19 +3183,26 @@ impl GpuState {
                         mono.push(sum / ch as f32);
                         i += ch;
                     }
-                    let (b, m) = audio::compute_band_energies(&mono, audio.sample_rate);
                     let r = (mono.iter().map(|x| x * x).sum::<f32>() / mono.len() as f32)
                         .sqrt().min(1.0);
-                    (b, m, r)
-                } else { (0.0, 0.0, 0.0) }
-            } else { (0.0, 0.0, 0.0) };
+                    let exp = self.export_state.as_mut().unwrap();
+                    let (bands, _) = exp.offline_analyzer.analyze_frame(&mono, audio.sample_rate, dt);
+                    (bands, r)
+                } else {
+                    let exp = self.export_state.as_mut().unwrap();
+                    exp.offline_analyzer.analyze_frame(&[], audio.sample_rate, dt);
+                    ([0.0f32; 8], 0.0)
+                }
+            } else { ([0.0f32; 8], 0.0) };
 
             const ALPHA: f32 = 0.25;
             let exp = self.export_state.as_mut().unwrap();
-            exp.export_bass_smoothed = exp.export_bass_smoothed * (1.0 - ALPHA) + raw_b * ALPHA;
-            exp.export_mid_smoothed  = exp.export_mid_smoothed  * (1.0 - ALPHA) + raw_m * ALPHA;
-            exp.export_rms_smoothed  = exp.export_rms_smoothed  * (1.0 - ALPHA) + raw_r * ALPHA;
-            (exp.export_bass_smoothed, exp.export_mid_smoothed, exp.export_rms_smoothed)
+            for (i, &raw) in raw_bands.iter().enumerate() {
+                exp.export_bands_smoothed[i] =
+                    exp.export_bands_smoothed[i] * (1.0 - ALPHA) + raw * ALPHA;
+            }
+            exp.export_rms_smoothed = exp.export_rms_smoothed * (1.0 - ALPHA) + raw_r * ALPHA;
+            (exp.export_bands_smoothed[0], exp.export_bands_smoothed[3], exp.export_rms_smoothed)
         };
 
         // ── Phase 3: state updates (needs &mut self) ──────────────────────────
@@ -3309,13 +3328,19 @@ impl GpuState {
         });
 
         // ── Phase 6: render passes ────────────────────────────────────────────
-        self.queue.write_buffer(&self.painter_audio_buffer, 0,
-            bytemuck::cast_slice(&[PainterAudioUniforms {
-                time_seconds: shader_time,
-                bass: self.bass_zoom_smoothed,
-                mid:  self.bass_mid_smoothed,
-                _pad: 0.0,
-            }]));
+        {
+            let exp = self.export_state.as_ref().unwrap();
+            let eb = exp.export_bands_smoothed;
+            let bd = exp.offline_analyzer.beat_decay;
+            self.queue.write_buffer(&self.painter_audio_buffer, 0,
+                bytemuck::cast_slice(&[PainterAudioUniforms {
+                    time_seconds: shader_time,
+                    bass:         eb[0],
+                    mid:          eb[3],
+                    beat_decay:   bd,
+                    bands:        eb,
+                }]));
+        }
 
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Export frame encoder"),
@@ -4207,7 +4232,7 @@ impl ApplicationHandler for App {
                 }
 
                 // Choose audio source: file player if active, otherwise mic
-                let file_energies: Option<(f32, f32, f32)> = if file_playing {
+                let file_energies: Option<([f32; 8], f32)> = if file_playing {
                     if let (Some(player), Some(audio)) = (&gpu.audio_player, &gpu.loaded_audio) {
                         Some(compute_file_energies(player, audio))
                     } else {
@@ -4217,8 +4242,13 @@ impl ApplicationHandler for App {
                     None
                 };
 
-                let (bass_energy, mid_energy) = match file_energies {
-                    Some((bass, mid, rms)) => {
+                // Per-frame beat_decay decay for the file-playing path.
+                // For the mic path, BeatAnalyzer maintains its own decay per chunk.
+                let frame_dt = gpu.last_audio_update.elapsed().as_secs_f32().clamp(0.001, 0.1);
+                gpu.last_audio_update = Instant::now();
+
+                let raw_bands: [f32; 8] = match file_energies {
+                    Some((bands, rms)) => {
                         // Beat-shake from file: RMS threshold crossing
                         if gpu.params.shake_enabled {
                             let threshold = gpu.file_rms_baseline * 1.5 + 0.01;
@@ -4226,20 +4256,30 @@ impl ApplicationHandler for App {
                                 let strength = ((rms / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
                                 gpu.kick_shake(strength);
                                 gpu.last_file_beat = Instant::now();
+                                gpu.shader_beat_decay = gpu.shader_beat_decay.max(strength);
                             }
                         }
                         gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
-                        (bass, mid)
+                        gpu.shader_beat_decay *= (-5.0 * frame_dt).exp();
+                        bands
                     }
                     None => {
-                        self.audio.as_ref()
-                            .map(|a| { let s = a.state.lock(); (s.bass_energy, s.mid_energy) })
-                            .unwrap_or((0.0, 0.0))
+                        let (bands, bd) = self.audio.as_ref()
+                            .map(|a| { let s = a.state.lock(); (s.bands, s.beat_decay) })
+                            .unwrap_or(([0.0; 8], 0.0));
+                        gpu.shader_beat_decay = bd;
+                        bands
                     }
                 };
 
-                gpu.update_bass_zoom(bass_energy);
-                gpu.update_modes(bass_energy, mid_energy);
+                const BANDS_ALPHA: f32 = 0.25;
+                for (i, &raw) in raw_bands.iter().enumerate() {
+                    gpu.bands_smoothed[i] =
+                        gpu.bands_smoothed[i] * (1.0 - BANDS_ALPHA) + raw * BANDS_ALPHA;
+                }
+
+                gpu.update_bass_zoom(raw_bands[0]);
+                gpu.update_modes(raw_bands[0], raw_bands[3]);
 
                 // Update player info displayed in the panel
                 let player_info = if let (Some(player), Some(audio)) =
