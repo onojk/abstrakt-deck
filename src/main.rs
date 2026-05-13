@@ -268,6 +268,7 @@ pub struct ParamLocks {
     pub saturation: bool,
     // Audio
     pub bass_zoom_strength: bool,
+    pub beat_reactivity: bool,
     pub midi_shake_enabled: bool,
     pub audio_shake_enabled: bool,
     // Ribbons
@@ -320,6 +321,16 @@ pub struct VisualParams {
     pub ribbons_enabled:   bool,
     pub ribbons_intensity: f32,
     pub bass_zoom_strength: f32,
+    /// Master multiplier for beat-driven animation magnitudes.
+    /// Default 0.25 matches Android. Effective multiplier is
+    /// (beat_reactivity * 4.0), so:
+    ///   0.0  = no beat-driven animation
+    ///   0.25 = Android-default intensity (1.0×)
+    ///   1.0  = 4× intensity (kick_shake unclamped; beat_decay
+    ///          and ribbon collapse saturate at 1.0 above 0.25)
+    /// Excluded from random/party randomization per Android
+    /// convention — user-controlled only.
+    pub beat_reactivity: f32,
     pub painter_kind: PainterKind,
     pub contrast: f32,
     pub saturation: f32,
@@ -342,7 +353,7 @@ impl Default for VisualParams {
         Self {
             current_shape: ShapeKind::Cylinder,
             fold_count: 12.0,
-            zoom: 0.6,
+            zoom: 1.0,
             rotation_speed_scale: 1.0,
             frame_shape: FrameShape::Hexagon,
             frame_size: 0.85,
@@ -363,6 +374,7 @@ impl Default for VisualParams {
             ribbons_enabled:   false,
             ribbons_intensity: 0.5,
             bass_zoom_strength: 0.3,
+            beat_reactivity: 0.25,
             painter_kind: PainterKind::HueStripe,
             contrast: 1.0,
             saturation: 1.0,
@@ -436,6 +448,8 @@ struct Preset {
     #[serde(default = "default_half_f32")]
     ribbons_intensity: f32,
     bass_zoom_strength: f32,
+    #[serde(default = "default_quarter_f32")]
+    beat_reactivity: f32,
     painter_kind: String,
     #[serde(default = "default_one_f32")]
     contrast: f32,
@@ -467,10 +481,11 @@ struct Preset {
     audio_source_mode: String,
 }
 
-fn default_one_f32()  -> f32  { 1.0 }
-fn default_half_f32() -> f32  { 0.5 }
-fn default_one_u32()  -> u32  { 1 }
-fn default_true()     -> bool { true }
+fn default_one_f32()          -> f32    { 1.0 }
+fn default_half_f32()         -> f32    { 0.5 }
+fn default_quarter_f32()      -> f32    { 0.25 }
+fn default_one_u32()          -> u32    { 1 }
+fn default_true()             -> bool   { true }
 fn default_audio_source_mode() -> String { "File".to_string() }
 
 impl Preset {
@@ -499,6 +514,7 @@ impl Preset {
             ribbons_enabled:   params.ribbons_enabled,
             ribbons_intensity: params.ribbons_intensity,
             bass_zoom_strength: params.bass_zoom_strength,
+            beat_reactivity: params.beat_reactivity,
             painter_kind: params.painter_kind.name().to_string(),
             contrast: params.contrast,
             saturation: params.saturation,
@@ -555,6 +571,7 @@ impl Preset {
         params.ribbons_enabled   = self.ribbons_enabled;
         params.ribbons_intensity = self.ribbons_intensity;
         params.bass_zoom_strength = self.bass_zoom_strength;
+        params.beat_reactivity    = self.beat_reactivity;
         params.painter_kind = match self.painter_kind.as_str() {
             "Spiral"     => PainterKind::Spiral,
             "Plasma"     => PainterKind::Plasma,
@@ -1865,7 +1882,7 @@ impl GpuState {
                     resolution_x: w as f32,
                     resolution_y: h as f32,
                     fold_count: 12.0,
-                    zoom: 0.6,
+                    zoom: 1.0,
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -2769,7 +2786,7 @@ impl GpuState {
             &self.kaleido_uniforms_buffer, 0,
             bytemuck::cast_slice(&[KaleidoUniforms {
                 resolution_x: w as f32, resolution_y: h as f32,
-                fold_count: 12.0, zoom: 0.6,
+                fold_count: 12.0, zoom: 1.0,
             }]),
         );
         self.queue.write_buffer(
@@ -3001,12 +3018,13 @@ impl GpuState {
                 label: Some("Frame encoder"),
             });
 
+        let beat_r = self.params.beat_reactivity * 4.0;
         self.queue.write_buffer(&self.painter_audio_buffer, 0,
             bytemuck::cast_slice(&[PainterAudioUniforms {
                 time_seconds: shader_time,
                 bass:         self.bands_smoothed[0],
                 mid:          self.bands_smoothed[3],
-                beat_decay:   self.shader_beat_decay,
+                beat_decay:   (self.shader_beat_decay * beat_r).min(1.0),
                 bands:        self.bands_smoothed,
             }]));
 
@@ -3058,7 +3076,7 @@ impl GpuState {
                     time_seconds: shader_time,
                     intensity:    self.params.ribbons_intensity,
                     color:        RIBBON_COLOR,
-                    collapse:     [self.shader_beat_decay; 4],
+                    collapse:     [(self.shader_beat_decay * beat_r).min(1.0); 4],
                     bands:        [[b[0], b[1], b[2], b[3]], [b[4], b[5], b[6], b[7]]],
                 }]));
             let ping = self.ribbon_ping;
@@ -3339,7 +3357,7 @@ impl GpuState {
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let angle = (elapsed * 13.7) % std::f32::consts::TAU;
         let dir = glam::Vec3::new(angle.cos(), 0.0, angle.sin());
-        self.shake_velocity += dir * strength * 0.75;
+        self.shake_velocity += dir * strength * (self.params.beat_reactivity * 4.0) * 0.75;
     }
 
     pub fn update_bass_zoom(&mut self, raw_bass: f32) {
@@ -3753,12 +3771,13 @@ impl GpuState {
             let exp = self.export_state.as_ref().unwrap();
             let eb = exp.export_bands_smoothed;
             let bd = exp.offline_analyzer.beat_decay;
+            let beat_r = self.params.beat_reactivity * 4.0;
             self.queue.write_buffer(&self.painter_audio_buffer, 0,
                 bytemuck::cast_slice(&[PainterAudioUniforms {
                     time_seconds: shader_time,
                     bass:         eb[0],
                     mid:          eb[3],
-                    beat_decay:   bd,
+                    beat_decay:   (bd * beat_r).min(1.0),
                     bands:        eb,
                 }]));
         }
@@ -3809,6 +3828,7 @@ impl GpuState {
             let eb = self.export_state.as_ref()
                 .map(|e| e.export_bands_smoothed)
                 .unwrap_or([0.0; 8]);
+            let beat_r = self.params.beat_reactivity * 4.0;
             // All four rings driven by the same beat_decay this slice.
             // Android has per-ribbon collapse with distinct triggers
             // (see audit Section 1h "Beat-driven collapse animation");
@@ -3819,7 +3839,7 @@ impl GpuState {
                     time_seconds: shader_time,
                     intensity:    self.params.ribbons_intensity,
                     color:        RIBBON_COLOR,
-                    collapse:     [exp_beat; 4],
+                    collapse:     [(exp_beat * beat_r).min(1.0); 4],
                     bands:        [[eb[0], eb[1], eb[2], eb[3]], [eb[4], eb[5], eb[6], eb[7]]],
                 }]));
             // Capture and flip ping state; None means no export ribbon allocated → skip
@@ -4142,7 +4162,7 @@ impl GpuState {
         if !self.params.locks.distortion_amplitude { self.params.distortion_amplitude = rng.gen_range(0.0_f32..=0.25); }
         if !self.params.locks.distortion_frequency { self.params.distortion_frequency = rng.gen_range(1.0_f32..=6.0); }
         if !self.params.locks.contrast             { self.params.contrast             = rng.gen_range(0.7_f32..=1.8); }
-        if !self.params.locks.contrast_passes      { self.params.contrast_passes      = rng.gen_range(1u32..=4); }
+        if !self.params.locks.contrast_passes      { self.params.contrast_passes      = rng.gen_range(1u32..=6); }
         if !self.params.locks.saturation           { self.params.saturation           = rng.gen_range(0.6_f32..=1.6); }
         if !self.params.locks.bass_zoom_strength   { self.params.bass_zoom_strength   = rng.gen_range(0.0_f32..=0.6); }
         if !self.params.locks.invert_enabled       { self.params.invert_enabled       = rng.gen_bool(0.5); }
@@ -4965,6 +4985,7 @@ impl ApplicationHandler for App {
                         ParamChange::RibbonsEnabled(v)       => gpu.params.ribbons_enabled     = v,
                         ParamChange::RibbonsIntensity(v)     => gpu.params.ribbons_intensity   = v,
                         ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength  = v,
+                        ParamChange::BeatReactivity(v)       => gpu.params.beat_reactivity     = v,
                         ParamChange::CurrentShape(v)         => gpu.params.current_shape = v,
                         ParamChange::FrameShape(v)           => gpu.params.frame_shape = v,
                         ParamChange::PainterKind(v)          => gpu.params.painter_kind = v,
@@ -5032,6 +5053,7 @@ impl ApplicationHandler for App {
                                 LockTarget::ContrastPasses     => gpu.params.locks.contrast_passes     = !gpu.params.locks.contrast_passes,
                                 LockTarget::Saturation         => gpu.params.locks.saturation         = !gpu.params.locks.saturation,
                                 LockTarget::BassZoomStrength   => gpu.params.locks.bass_zoom_strength   = !gpu.params.locks.bass_zoom_strength,
+                                LockTarget::BeatReactivity     => gpu.params.locks.beat_reactivity      = !gpu.params.locks.beat_reactivity,
                                 LockTarget::MidiShakeEnabled   => gpu.params.locks.midi_shake_enabled   = !gpu.params.locks.midi_shake_enabled,
                                 LockTarget::AudioShakeEnabled  => gpu.params.locks.audio_shake_enabled  = !gpu.params.locks.audio_shake_enabled,
                                 LockTarget::RibbonsEnabled     => gpu.params.locks.ribbons_enabled      = !gpu.params.locks.ribbons_enabled,
@@ -5199,6 +5221,7 @@ mod tests {
             ribbons_enabled:   true,
             ribbons_intensity: 0.8,
             bass_zoom_strength: 0.8,
+            beat_reactivity: 0.75,
             painter_kind: PainterKind::PrintHead,
             contrast: 1.5,
             saturation: 0.7,
@@ -5255,6 +5278,7 @@ mod tests {
         assert_eq!(restored.ribbons_enabled,   original.ribbons_enabled,   "ribbons_enabled failed");
         assert_eq!(restored.ribbons_intensity, original.ribbons_intensity, "ribbons_intensity failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
+        assert_eq!(restored.beat_reactivity,    original.beat_reactivity,    "beat_reactivity failed");
         assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");
         assert_eq!(restored.contrast,        original.contrast,        "contrast failed");
         assert_eq!(restored.saturation,      original.saturation,      "saturation failed");

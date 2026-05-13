@@ -28,6 +28,7 @@ pub enum LockTarget {
     ContrastPasses,
     Saturation,
     BassZoomStrength,
+    BeatReactivity,
     MidiShakeEnabled,
     AudioShakeEnabled,
     RibbonsEnabled,
@@ -78,6 +79,7 @@ pub enum ParamChange {
     RibbonsEnabled(bool),
     RibbonsIntensity(f32),
     BassZoomStrength(f32),
+    BeatReactivity(f32),
     CurrentShape(crate::ShapeKind),
     FrameShape(crate::FrameShape),
     PainterKind(crate::PainterKind),
@@ -843,6 +845,19 @@ impl MenuBar {
                     let mut bass = params.bass_zoom_strength;
                     if ui.add(egui::Slider::new(&mut bass, 0.0..=1.0).text("Bass-Zoom Strength").step_by(0.05)).changed() {
                         changes.push(ParamChange::BassZoomStrength(bass));
+                    }
+                });
+            });
+
+            // Beat Reactivity
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.beat_reactivity).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BeatReactivity));
+                }
+                ui.add_enabled_ui(!params.locks.beat_reactivity, |ui| {
+                    let mut react = params.beat_reactivity;
+                    if ui.add(egui::Slider::new(&mut react, 0.0..=1.0).text("Beat Reactivity").step_by(0.05)).changed() {
+                        changes.push(ParamChange::BeatReactivity(react));
                     }
                 });
             });
