@@ -74,6 +74,15 @@ struct ShapeEffects {
     contrast_passes:      f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DistortionPlusUniforms {
+    yaw:   f32,  // radians
+    pitch: f32,
+    roll:  f32,
+    _pad:  f32,
+}
+
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=flower 7=star
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -217,6 +226,10 @@ pub struct ParamLocks {
     pub distortion_enabled: bool,
     pub distortion_amplitude: bool,
     pub distortion_frequency: bool,
+    pub distortion_plus_enabled: bool,
+    pub distortion_plus_yaw:     bool,
+    pub distortion_plus_pitch:   bool,
+    pub distortion_plus_roll:    bool,
     pub contrast: bool,
     pub contrast_passes: bool,
     pub saturation: bool,
@@ -241,6 +254,10 @@ pub struct VisualParams {
     pub distortion_enabled: bool,
     pub distortion_amplitude: f32,
     pub distortion_frequency: f32,
+    pub distortion_plus_enabled: bool,
+    pub distortion_plus_yaw:     f32,
+    pub distortion_plus_pitch:   f32,
+    pub distortion_plus_roll:    f32,
     pub shake_enabled: bool,
     pub bass_zoom_strength: f32,
     pub painter_kind: PainterKind,
@@ -276,6 +293,10 @@ impl Default for VisualParams {
             distortion_enabled: false,
             distortion_amplitude: 0.05,
             distortion_frequency: 3.0,
+            distortion_plus_enabled: false,
+            distortion_plus_yaw:     0.0,
+            distortion_plus_pitch:   0.0,
+            distortion_plus_roll:    0.0,
             shake_enabled: true,
             bass_zoom_strength: 0.3,
             painter_kind: PainterKind::HueStripe,
@@ -333,6 +354,14 @@ struct Preset {
     distortion_enabled: bool,
     distortion_amplitude: f32,
     distortion_frequency: f32,
+    #[serde(default)]
+    distortion_plus_enabled: bool,
+    #[serde(default)]
+    distortion_plus_yaw:     f32,
+    #[serde(default)]
+    distortion_plus_pitch:   f32,
+    #[serde(default)]
+    distortion_plus_roll:    f32,
     shake_enabled: bool,
     bass_zoom_strength: f32,
     painter_kind: String,
@@ -386,6 +415,10 @@ impl Preset {
             distortion_enabled: params.distortion_enabled,
             distortion_amplitude: params.distortion_amplitude,
             distortion_frequency: params.distortion_frequency,
+            distortion_plus_enabled: params.distortion_plus_enabled,
+            distortion_plus_yaw:     params.distortion_plus_yaw,
+            distortion_plus_pitch:   params.distortion_plus_pitch,
+            distortion_plus_roll:    params.distortion_plus_roll,
             shake_enabled: params.shake_enabled,
             bass_zoom_strength: params.bass_zoom_strength,
             painter_kind: params.painter_kind.name().to_string(),
@@ -434,6 +467,10 @@ impl Preset {
         params.distortion_enabled = self.distortion_enabled;
         params.distortion_amplitude = self.distortion_amplitude;
         params.distortion_frequency = self.distortion_frequency;
+        params.distortion_plus_enabled = self.distortion_plus_enabled;
+        params.distortion_plus_yaw     = self.distortion_plus_yaw;
+        params.distortion_plus_pitch   = self.distortion_plus_pitch;
+        params.distortion_plus_roll    = self.distortion_plus_roll;
         params.shake_enabled = self.shake_enabled;
         params.bass_zoom_strength = self.bass_zoom_strength;
         params.painter_kind = match self.painter_kind.as_str() {
@@ -1131,6 +1168,15 @@ struct GpuState {
     shape_effects_buffer: wgpu::Buffer,
     shape_effects_bind_group: wgpu::BindGroup,
 
+    // Pass 2.5 — distortion plus (shape FBO → dp FBO, optional equirectangular rotation)
+    #[allow(dead_code)]
+    distortion_plus_texture: wgpu::Texture,
+    distortion_plus_view: wgpu::TextureView,
+    distortion_plus_uniforms_buffer: wgpu::Buffer,
+    distortion_plus_bgl: wgpu::BindGroupLayout,
+    distortion_plus_bind_group: wgpu::BindGroup,
+    distortion_plus_pipeline: wgpu::RenderPipeline,
+
     // Pass 3 — kaleido fold (shape FBO → kaleido FBO)
     #[allow(dead_code)]
     kaleido_texture: wgpu::Texture,
@@ -1138,6 +1184,7 @@ struct GpuState {
     kaleido_uniforms_buffer: wgpu::Buffer,
     kaleido_bgl: wgpu::BindGroupLayout,
     kaleido_bind_group: wgpu::BindGroup,
+    kaleido_bind_group_distorted: wgpu::BindGroup,
     kaleido_pipeline: wgpu::RenderPipeline,
 
     // Pass 4 — frame overlay (kaleido FBO + SDF mask → sRGB swapchain)
@@ -1228,6 +1275,24 @@ impl GpuState {
     ) -> (wgpu::Texture, wgpu::TextureView) {
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Kaleido FBO"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
+    }
+
+    fn create_dp_fbo(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("DistortionPlus FBO"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1550,6 +1615,69 @@ impl GpuState {
                 }],
             });
 
+        // ── DistortionPlus FBO + uniforms + BGL + BG + pipeline ──────────────
+        let (distortion_plus_texture, distortion_plus_view) = Self::create_dp_fbo(&device, w, h);
+        let distortion_plus_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("DistortionPlus uniforms"),
+                contents: bytemuck::cast_slice(&[DistortionPlusUniforms {
+                    yaw: 0.0, pitch: 0.0, roll: 0.0, _pad: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let distortion_plus_bgl = Self::make_uts_bgl(&device, "DistortionPlus BGL");
+        let distortion_plus_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("DistortionPlus BG"),
+            layout: &distortion_plus_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: distortion_plus_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shape_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
+                },
+            ],
+        });
+        let dp_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("DistortionPlus shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/distortion_plus.wgsl").into()),
+        });
+        let distortion_plus_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("DistortionPlus pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&distortion_plus_bgl],
+                    push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &dp_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &dp_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         // ── Kaleido uniforms + BGL + BG ────────────────────────────────────────
         let kaleido_uniforms_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1574,6 +1702,24 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&shape_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
+                },
+            ],
+        });
+        let kaleido_bind_group_distorted = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Kaleido BG distorted"),
+            layout: &kaleido_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: kaleido_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&distortion_plus_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1956,8 +2102,10 @@ impl GpuState {
             transform_buffer, transform_bind_group,
             shape_pipeline, shape_bind_group,
             shape_effects_buffer, shape_effects_bind_group,
+            distortion_plus_texture, distortion_plus_view,
+            distortion_plus_uniforms_buffer, distortion_plus_bgl, distortion_plus_bind_group, distortion_plus_pipeline,
             kaleido_texture, kaleido_view,
-            kaleido_uniforms_buffer, kaleido_bgl, kaleido_bind_group, kaleido_pipeline,
+            kaleido_uniforms_buffer, kaleido_bgl, kaleido_bind_group, kaleido_bind_group_distorted, kaleido_pipeline,
             frame_uniforms_buffer, frame_bgl, frame_bind_group, frame_pipeline,
             shape_sampler,
             scene_texture, scene_view,
@@ -2011,7 +2159,32 @@ impl GpuState {
         self.kaleido_texture = kc;
         self.kaleido_view = kv;
 
+        // DP FBO references shape_view → recreate.
+        let (dpc, dpv) = Self::create_dp_fbo(&self.device, w, h);
+        self.distortion_plus_texture = dpc;
+        self.distortion_plus_view = dpv;
+        self.distortion_plus_bind_group =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DistortionPlus BG"),
+                layout: &self.distortion_plus_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.distortion_plus_uniforms_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.shape_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
+
         // Kaleido BG references shape_view → recreate.
+        // Kaleido BG distorted references dp_view → recreate.
         self.kaleido_bind_group =
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Kaleido BG"),
@@ -2024,6 +2197,25 @@ impl GpuState {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::TextureView(&self.shape_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
+        self.kaleido_bind_group_distorted =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Kaleido BG distorted"),
+                layout: &self.kaleido_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.kaleido_uniforms_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.distortion_plus_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -2343,8 +2535,41 @@ impl GpuState {
             pass.draw_indexed(0..buffers.index_count, 0, 0..1);
         }
 
+        // Pass 2.5: distortion plus (optional equirectangular rotation → dp FBO)
+        if self.params.distortion_plus_enabled {
+            self.queue.write_buffer(
+                &self.distortion_plus_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[DistortionPlusUniforms {
+                    yaw:   self.params.distortion_plus_yaw.to_radians(),
+                    pitch: self.params.distortion_plus_pitch.to_radians(),
+                    roll:  self.params.distortion_plus_roll.to_radians(),
+                    _pad:  0.0,
+                }]),
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("DistortionPlus pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.distortion_plus_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.distortion_plus_pipeline);
+            pass.set_bind_group(0, &self.distortion_plus_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // Pass 3: kaleido fold → kaleido FBO
         {
+            let kaleido_bg = if self.params.distortion_plus_enabled {
+                &self.kaleido_bind_group_distorted
+            } else {
+                &self.kaleido_bind_group
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Kaleido pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2358,7 +2583,7 @@ impl GpuState {
                 occlusion_query_set: None, timestamp_writes: None,
             });
             pass.set_pipeline(&self.kaleido_pipeline);
-            pass.set_bind_group(0, &self.kaleido_bind_group, &[]);
+            pass.set_bind_group(0, kaleido_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -2808,6 +3033,15 @@ impl GpuState {
         let (_exp_kaleido_tex, exp_kaleido_view) =
             Self::create_kaleido_fbo(&self.device, off_w, off_h);
 
+        // Per-frame dp FBO (must be at export resolution, not screen resolution).
+        let (_exp_dp_tex, exp_dp_view) = if self.params.distortion_plus_enabled {
+            let (t, v) = Self::create_dp_fbo(&self.device, off_w, off_h);
+            (Some(t), Some(v))
+        } else {
+            (None, None)
+        };
+
+        let kaleido_input_view = exp_dp_view.as_ref().unwrap_or(&exp_shape_view);
         let exp_kaleido_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Export Kaleido BG"),
             layout: &self.kaleido_bgl,
@@ -2815,7 +3049,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 0,
                     resource: self.kaleido_uniforms_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&exp_shape_view) },
+                    resource: wgpu::BindingResource::TextureView(kaleido_input_view) },
                 wgpu::BindGroupEntry { binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
             ],
@@ -2892,6 +3126,37 @@ impl GpuState {
             pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
             pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+        }
+
+        // Pass 2.5: distortion plus → export-res dp view (optional)
+        if let Some(ref dp_view) = exp_dp_view {
+            let exp_dp_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export DP BG"),
+                layout: &self.distortion_plus_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0,
+                        resource: self.distortion_plus_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&exp_shape_view) },
+                    wgpu::BindGroupEntry { binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Export DistortionPlus pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dp_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.distortion_plus_pipeline);
+            pass.set_bind_group(0, &exp_dp_bg, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         // Pass 3: kaleido → export-res kaleido view
@@ -3104,6 +3369,11 @@ impl GpuState {
         if !self.params.locks.colorize_enabled     { self.params.colorize_enabled     = rng.gen_bool(0.5); }
         if !self.params.locks.distortion_enabled   { self.params.distortion_enabled   = rng.gen_bool(0.5); }
         if !self.params.locks.shake_enabled        { self.params.shake_enabled        = rng.gen_bool(0.5); }
+        // DP angles reroll independently of enabled (per spec).
+        if !self.params.locks.distortion_plus_enabled { self.params.distortion_plus_enabled = rng.gen_bool(0.40); }
+        if !self.params.locks.distortion_plus_yaw     { self.params.distortion_plus_yaw     = rng.gen_range(-180.0_f32..=180.0); }
+        if !self.params.locks.distortion_plus_pitch   { self.params.distortion_plus_pitch   = rng.gen_range(-45.0_f32..=45.0); }
+        if !self.params.locks.distortion_plus_roll    { self.params.distortion_plus_roll    = rng.gen_range(-180.0_f32..=180.0); }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -3635,16 +3905,16 @@ impl ApplicationHandler for App {
                                 let exp = gpu.export_state.as_ref().unwrap();
                                 let headless = if !gpu.params.export_live_preview { " [headless]" } else { "" };
                                 format!(
-                                    "abstrakt-deck — slice 24i — EXPORTING {}/{} ({:.0}%){} — {:.1} fps",
+                                    "abstrakt-deck — slice 24o — EXPORTING {}/{} ({:.0}%){} — {:.1} fps",
                                     exp.current_frame, exp.total_frames,
                                     exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
                                     headless, fps_val,
                                 )
                             }
                             Some(ExportPhase::Muxing) => {
-                                "abstrakt-deck — slice 24i — MUXING (ffmpeg)...".to_string()
+                                "abstrakt-deck — slice 24o — MUXING (ffmpeg)...".to_string()
                             }
-                            _ => format!("abstrakt-deck — slice 24i — {:.1} fps", fps_val),
+                            _ => format!("abstrakt-deck — slice 24o — {:.1} fps", fps_val),
                         };
                         window.set_title(&title);
                     }
@@ -3859,9 +4129,13 @@ impl ApplicationHandler for App {
                         ParamChange::ColorizeEnabled(v)      => gpu.params.colorize_enabled = v,
                         ParamChange::ColorizeHue(v)          => gpu.params.colorize_hue = v,
                         ParamChange::ColorizeIntensity(v)    => gpu.params.colorize_intensity = v,
-                        ParamChange::DistortionEnabled(v)    => gpu.params.distortion_enabled = v,
-                        ParamChange::DistortionAmplitude(v)  => gpu.params.distortion_amplitude = v,
-                        ParamChange::DistortionFrequency(v)  => gpu.params.distortion_frequency = v,
+                        ParamChange::DistortionEnabled(v)       => gpu.params.distortion_enabled       = v,
+                        ParamChange::DistortionAmplitude(v)     => gpu.params.distortion_amplitude     = v,
+                        ParamChange::DistortionFrequency(v)     => gpu.params.distortion_frequency     = v,
+                        ParamChange::DistortionPlusEnabled(v)   => gpu.params.distortion_plus_enabled  = v,
+                        ParamChange::DistortionPlusYaw(v)       => gpu.params.distortion_plus_yaw      = v,
+                        ParamChange::DistortionPlusPitch(v)     => gpu.params.distortion_plus_pitch    = v,
+                        ParamChange::DistortionPlusRoll(v)      => gpu.params.distortion_plus_roll     = v,
                         ParamChange::ShakeEnabled(v)         => gpu.params.shake_enabled = v,
                         ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength = v,
                         ParamChange::CurrentShape(v)         => gpu.params.current_shape = v,
@@ -3920,9 +4194,13 @@ impl ApplicationHandler for App {
                                 LockTarget::ColorizeEnabled    => gpu.params.locks.colorize_enabled    = !gpu.params.locks.colorize_enabled,
                                 LockTarget::ColorizeHue        => gpu.params.locks.colorize_hue        = !gpu.params.locks.colorize_hue,
                                 LockTarget::ColorizeIntensity  => gpu.params.locks.colorize_intensity  = !gpu.params.locks.colorize_intensity,
-                                LockTarget::DistortionEnabled  => gpu.params.locks.distortion_enabled  = !gpu.params.locks.distortion_enabled,
-                                LockTarget::DistortionAmplitude => gpu.params.locks.distortion_amplitude = !gpu.params.locks.distortion_amplitude,
-                                LockTarget::DistortionFrequency => gpu.params.locks.distortion_frequency = !gpu.params.locks.distortion_frequency,
+                                LockTarget::DistortionEnabled    => gpu.params.locks.distortion_enabled    = !gpu.params.locks.distortion_enabled,
+                                LockTarget::DistortionAmplitude  => gpu.params.locks.distortion_amplitude  = !gpu.params.locks.distortion_amplitude,
+                                LockTarget::DistortionFrequency  => gpu.params.locks.distortion_frequency  = !gpu.params.locks.distortion_frequency,
+                                LockTarget::DistortionPlusEnabled => gpu.params.locks.distortion_plus_enabled = !gpu.params.locks.distortion_plus_enabled,
+                                LockTarget::DistortionPlusYaw     => gpu.params.locks.distortion_plus_yaw     = !gpu.params.locks.distortion_plus_yaw,
+                                LockTarget::DistortionPlusPitch   => gpu.params.locks.distortion_plus_pitch   = !gpu.params.locks.distortion_plus_pitch,
+                                LockTarget::DistortionPlusRoll    => gpu.params.locks.distortion_plus_roll    = !gpu.params.locks.distortion_plus_roll,
                                 LockTarget::Contrast           => gpu.params.locks.contrast           = !gpu.params.locks.contrast,
                                 LockTarget::ContrastPasses     => gpu.params.locks.contrast_passes     = !gpu.params.locks.contrast_passes,
                                 LockTarget::Saturation         => gpu.params.locks.saturation         = !gpu.params.locks.saturation,
@@ -3957,11 +4235,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24i — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24o — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24i — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24o — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -4077,6 +4355,10 @@ mod tests {
             distortion_enabled: true,
             distortion_amplitude: 0.3,
             distortion_frequency: 6.0,
+            distortion_plus_enabled: true,
+            distortion_plus_yaw:     45.0,
+            distortion_plus_pitch:   -20.0,
+            distortion_plus_roll:    90.0,
             shake_enabled: false,
             bass_zoom_strength: 0.8,
             painter_kind: PainterKind::Plasma,
@@ -4125,6 +4407,10 @@ mod tests {
         assert_eq!(restored.distortion_enabled, original.distortion_enabled, "distortion_enabled failed");
         assert_eq!(restored.distortion_amplitude, original.distortion_amplitude, "distortion_amplitude failed");
         assert_eq!(restored.distortion_frequency, original.distortion_frequency, "distortion_frequency failed");
+        assert_eq!(restored.distortion_plus_enabled, original.distortion_plus_enabled, "distortion_plus_enabled failed");
+        assert_eq!(restored.distortion_plus_yaw,     original.distortion_plus_yaw,     "distortion_plus_yaw failed");
+        assert_eq!(restored.distortion_plus_pitch,   original.distortion_plus_pitch,   "distortion_plus_pitch failed");
+        assert_eq!(restored.distortion_plus_roll,    original.distortion_plus_roll,    "distortion_plus_roll failed");
         assert_eq!(restored.shake_enabled, original.shake_enabled, "shake_enabled failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
         assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");

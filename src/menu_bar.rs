@@ -20,6 +20,10 @@ pub enum LockTarget {
     DistortionEnabled,
     DistortionAmplitude,
     DistortionFrequency,
+    DistortionPlusEnabled,
+    DistortionPlusYaw,
+    DistortionPlusPitch,
+    DistortionPlusRoll,
     Contrast,
     ContrastPasses,
     Saturation,
@@ -62,6 +66,10 @@ pub enum ParamChange {
     DistortionEnabled(bool),
     DistortionAmplitude(f32),
     DistortionFrequency(f32),
+    DistortionPlusEnabled(bool),
+    DistortionPlusYaw(f32),
+    DistortionPlusPitch(f32),
+    DistortionPlusRoll(f32),
     ShakeEnabled(bool),
     BassZoomStrength(f32),
     CurrentShape(crate::ShapeKind),
@@ -313,6 +321,8 @@ impl MenuBar {
                             Self::frame_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::effects_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::distortion_plus_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::audio_section(ui, current_params, &mut frame_changes);
                             ui.separator();
@@ -703,6 +713,73 @@ impl MenuBar {
                     }
                 });
             });
+        });
+    }
+
+    fn distortion_plus_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Distortion Plus", |ui| {
+            // Enabled toggle
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_plus_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionPlusEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_plus_enabled, |ui| {
+                    let mut en = params.distortion_plus_enabled;
+                    if ui.checkbox(&mut en, "Enabled").changed() {
+                        changes.push(ParamChange::DistortionPlusEnabled(en));
+                    }
+                });
+            });
+
+            // Yaw slider
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_plus_yaw).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionPlusYaw));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_plus_yaw, |ui| {
+                    let mut yaw = params.distortion_plus_yaw;
+                    if ui.add(egui::Slider::new(&mut yaw, -180.0..=180.0).text("Yaw").suffix("°").step_by(1.0)).changed() {
+                        changes.push(ParamChange::DistortionPlusYaw(yaw));
+                    }
+                });
+            });
+
+            // Pitch slider
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_plus_pitch).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionPlusPitch));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_plus_pitch, |ui| {
+                    let mut pitch = params.distortion_plus_pitch;
+                    if ui.add(egui::Slider::new(&mut pitch, -90.0..=90.0).text("Pitch").suffix("°").step_by(1.0)).changed() {
+                        changes.push(ParamChange::DistortionPlusPitch(pitch));
+                    }
+                });
+            });
+
+            // Roll slider
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.distortion_plus_roll).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DistortionPlusRoll));
+                }
+                ui.add_enabled_ui(!params.locks.distortion_plus_roll, |ui| {
+                    let mut roll = params.distortion_plus_roll;
+                    if ui.add(egui::Slider::new(&mut roll, -180.0..=180.0).text("Roll").suffix("°").step_by(1.0)).changed() {
+                        changes.push(ParamChange::DistortionPlusRoll(roll));
+                    }
+                });
+            });
+
+            // Reset button — zeroes angles only, does not toggle enabled
+            if ui.button("Reset angles").clicked() {
+                changes.push(ParamChange::DistortionPlusYaw(0.0));
+                changes.push(ParamChange::DistortionPlusPitch(0.0));
+                changes.push(ParamChange::DistortionPlusRoll(0.0));
+            }
         });
     }
 
