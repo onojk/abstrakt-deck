@@ -40,9 +40,6 @@ pub enum LockTarget {
     BlackholeWarpStrength,
     BlackholeWarpCurve,
     BlackholeAlphaRadius,
-    BlackholeFallbackHz,
-    BlackholePasses,
-    BlackholeTrailCount,
     BlackholeWanderAmount,
 }
 
@@ -120,9 +117,6 @@ pub enum ParamChange {
     BlackholeWarpStrength(f32),
     BlackholeWarpCurve(f32),
     BlackholeAlphaRadius(f32),
-    BlackholeFallbackHz(f32),
-    BlackholePasses(u32),
-    BlackholeTrailCount(u32),
     BlackholeWanderAmount(f32),
 }
 
@@ -992,6 +986,7 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Blackhole", |ui| {
+            // Enabled
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.blackhole_enabled).clicked() {
                     changes.push(ParamChange::ToggleLock(LockTarget::BlackholeEnabled));
@@ -1004,85 +999,53 @@ impl MenuBar {
                 });
             });
 
+            // blackhole_warp_strength → Feedback Strength
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.blackhole_warp_strength).clicked() {
                     changes.push(ParamChange::ToggleLock(LockTarget::BlackholeWarpStrength));
                 }
                 ui.add_enabled_ui(!params.locks.blackhole_warp_strength, |ui| {
                     let mut v = params.blackhole_warp_strength;
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Shrink Rate").step_by(0.05)).changed() {
+                    if ui.add(egui::Slider::new(&mut v, 0.5..=0.98).text("Feedback Strength").step_by(0.01)).changed() {
                         changes.push(ParamChange::BlackholeWarpStrength(v));
                     }
                 });
             });
 
+            // blackhole_warp_curve → Shrink Rate
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.blackhole_warp_curve).clicked() {
                     changes.push(ParamChange::ToggleLock(LockTarget::BlackholeWarpCurve));
                 }
                 ui.add_enabled_ui(!params.locks.blackhole_warp_curve, |ui| {
                     let mut v = params.blackhole_warp_curve;
-                    if ui.add(egui::Slider::new(&mut v, 1.0..=4.0).text("Fade Curve").step_by(0.1)).changed() {
+                    if ui.add(egui::Slider::new(&mut v, 0.85..=0.99).text("Shrink Rate").step_by(0.005)).changed() {
                         changes.push(ParamChange::BlackholeWarpCurve(v));
                     }
                 });
             });
 
+            // blackhole_alpha_radius → Edge Alpha
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.blackhole_alpha_radius).clicked() {
                     changes.push(ParamChange::ToggleLock(LockTarget::BlackholeAlphaRadius));
                 }
                 ui.add_enabled_ui(!params.locks.blackhole_alpha_radius, |ui| {
                     let mut v = params.blackhole_alpha_radius;
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Alpha Radius").step_by(0.05)).changed() {
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Edge Alpha").step_by(0.05)).changed() {
                         changes.push(ParamChange::BlackholeAlphaRadius(v));
                     }
                 });
             });
 
-            ui.horizontal(|ui| {
-                if Self::lock_button(ui, params.locks.blackhole_fallback_hz).clicked() {
-                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeFallbackHz));
-                }
-                ui.add_enabled_ui(!params.locks.blackhole_fallback_hz, |ui| {
-                    let mut v = params.blackhole_fallback_hz;
-                    if ui.add(egui::Slider::new(&mut v, 0.5..=3.0).text("Fallback Hz").step_by(0.1)).changed() {
-                        changes.push(ParamChange::BlackholeFallbackHz(v));
-                    }
-                });
-            });
-
-            ui.horizontal(|ui| {
-                if Self::lock_button(ui, params.locks.blackhole_passes).clicked() {
-                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholePasses));
-                }
-                ui.add_enabled_ui(!params.locks.blackhole_passes, |ui| {
-                    let mut v = params.blackhole_passes;
-                    if ui.add(egui::Slider::new(&mut v, 1u32..=12).text("Passes").integer()).changed() {
-                        changes.push(ParamChange::BlackholePasses(v));
-                    }
-                });
-            });
-
-            ui.horizontal(|ui| {
-                if Self::lock_button(ui, params.locks.blackhole_trail_count).clicked() {
-                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeTrailCount));
-                }
-                ui.add_enabled_ui(!params.locks.blackhole_trail_count, |ui| {
-                    let mut v = params.blackhole_trail_count;
-                    if ui.add(egui::Slider::new(&mut v, 1u32..=6).text("Trail Count").integer()).changed() {
-                        changes.push(ParamChange::BlackholeTrailCount(v));
-                    }
-                });
-            });
-
+            // blackhole_wander_amount → Wander Amount
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.blackhole_wander_amount).clicked() {
                     changes.push(ParamChange::ToggleLock(LockTarget::BlackholeWanderAmount));
                 }
                 ui.add_enabled_ui(!params.locks.blackhole_wander_amount, |ui| {
                     let mut v = params.blackhole_wander_amount;
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=0.4).text("Wander Amount").step_by(0.01)).changed() {
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=0.02).text("Wander Amount").step_by(0.001)).changed() {
                         changes.push(ParamChange::BlackholeWanderAmount(v));
                     }
                 });

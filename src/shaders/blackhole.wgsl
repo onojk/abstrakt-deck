@@ -1,23 +1,25 @@
-// blackhole.wgsl — Pass 5 (conditional): multi-snapshot recursive-shrink trail.
-// For each beat-captured snapshot, renders N nested copies that shrink toward a
-// wandering singularity center, creating a comet-tail "ghost diving into a black hole"
-// effect. Called once per active snapshot slot with ALPHA_BLENDING over an accumulator
-// that was pre-loaded with the live scene.  3 bindings (no scene_tex).
+// blackhole.wgsl — Pass 5 (conditional): classic video-feedback recursion.
+// Each frame the previous feedback output is sampled through a slightly-enlarged
+// UV window (shrink_rate < 1 shrinks prev content toward center), producing an
+// infinite-tunnel / two-mirrors effect without any beat-triggered snapshots.
+// 4 bindings: uniform[0], prev_feedback[1], scene[2], sampler[3].
+// Pipeline blend: REPLACE (compositing fully internal; output alpha = 1.0).
 
-struct BlackholePassUniforms {
-    center_x:       f32,   // offset  0: wandering singularity center U
-    center_y:       f32,   // offset  4: wandering singularity center V
-    shrink_rate:    f32,   // offset  8: scale factor per nested copy (0..1)
-    fade_curve:     f32,   // offset 12: temporal fade exponent
-    cycle_progress: f32,   // offset 16: snapshot age 0..1
-    slot_alpha:     f32,   // offset 20: pre-computed per-slot opacity (newest=1.0)
-    passes:         f32,   // offset 24: number of nested copies (cast from u32)
-    alpha_radius:   f32,   // offset 28: spatial fade start (0..1, fraction of corner dist)
-};
+struct FeedbackUniforms {
+    center_x:     f32,   // offset  0: tunnel vanishing-point U (wanders per frame)
+    center_y:     f32,   // offset  4: tunnel vanishing-point V
+    shrink_rate:  f32,   // offset  8: per-frame UV scale (< 1 shrinks prev into center)
+    strength:     f32,   // offset 12: feedback blend weight (0 = live only)
+    alpha_radius: f32,   // offset 16: spatial edge-fade start (0..1, fraction of half-diagonal)
+    _pad0:        f32,   // offset 20
+    _pad1:        f32,   // offset 24
+    _pad2:        f32,   // offset 28
+};                       // 32 bytes — 2 × vec4 rows, satisfies WGSL uniform alignment
 
-@group(0) @binding(0) var<uniform> u: BlackholePassUniforms;
-@group(0) @binding(1) var snapshot_tex: texture_2d<f32>;
-@group(0) @binding(2) var samp:         sampler;
+@group(0) @binding(0) var<uniform> u: FeedbackUniforms;
+@group(0) @binding(1) var prev_tex:  texture_2d<f32>;
+@group(0) @binding(2) var scene_tex: texture_2d<f32>;
+@group(0) @binding(3) var samp:      sampler;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -36,40 +38,31 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let uv  = in.uv;
+    let uv     = in.uv;
     let center = vec2<f32>(u.center_x, u.center_y);
-    let dir = uv - center;
-    let n_passes = max(i32(u.passes), 1);
+    let dir    = uv - center;
 
-    // Spatial alpha: snapshot fades to 0 at screen edges so live scene bleeds through.
-    // sqrt(0.5) = distance from center to corner in UV space.
+    // Spatial alpha: live scene bleeds through at screen edges.
+    // sqrt(0.5) = distance from (0.5,0.5) to corner in UV space.
     let max_r: f32    = 0.7071;
     let r: f32        = length(uv - vec2<f32>(0.5));
     let spatial_alpha = 1.0 - smoothstep(u.alpha_radius * max_r, max_r, r);
 
-    // Temporal fade: snapshot fades to transparent as it ages.
-    let temporal_alpha = pow(max(1.0 - u.cycle_progress, 0.0), u.fade_curve);
-    let base_alpha = u.slot_alpha * temporal_alpha * spatial_alpha;
+    // Map this pixel to where it came from in the previous frame.
+    // Dividing by shrink_rate < 1 expands the lookup outward, which makes
+    // the previous frame's content appear to shrink toward center each frame.
+    let prev_uv = center + dir / u.shrink_rate;
 
-    // Accumulate nested copies front-to-back (i=0 = outermost/faintest first,
-    // i=n-1 = innermost/brightest last = comet head on top).
-    var out_rgb = vec3<f32>(0.0);
-    var out_a   = 0.0;
+    // Analytically zero out-of-bounds samples — avoids non-uniform control
+    // flow restriction on textureSample while still zero-ing border pixels.
+    let ib        = step(vec2<f32>(0.0), prev_uv) * step(prev_uv, vec2<f32>(1.0));
+    let in_bounds = ib.x * ib.y;
 
-    for (var i = 0; i < n_passes; i++) {
-        // scale < 1 for i > 0: copy shrinks toward the singularity center.
-        let scale      = pow(u.shrink_rate, f32(i));
-        let sample_uv  = clamp(center + dir * scale, vec2<f32>(0.0), vec2<f32>(1.0));
-        let s          = textureSample(snapshot_tex, samp, sample_uv);
+    let prev  = textureSample(prev_tex,  samp, clamp(prev_uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+    let live  = textureSample(scene_tex, samp, uv);
 
-        // Inner copies (high i, small scale) are most opaque — comet head glows brightest.
-        let copy_frac  = f32(i + 1) / f32(n_passes);
-        let src_a      = base_alpha * copy_frac * s.a;
+    let alpha = u.strength * spatial_alpha * in_bounds;
+    let rgb   = mix(live.rgb, prev.rgb, alpha);
 
-        // Porter-Duff "over": this copy on top of accumulated result.
-        out_rgb = s.rgb * src_a + out_rgb * (1.0 - src_a);
-        out_a   = src_a + out_a * (1.0 - src_a);
-    }
-
-    return vec4<f32>(out_rgb, out_a);
+    return vec4<f32>(rgb, 1.0);
 }
