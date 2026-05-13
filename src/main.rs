@@ -1300,6 +1300,23 @@ struct ExportRibbonState {
     composite_bg_b:  wgpu::BindGroup,  // composite pass: blits texture B
 }
 
+struct ExportFeedbackState {
+    #[allow(dead_code)]
+    tex_a: wgpu::Texture,
+    view_a: wgpu::TextureView,
+    #[allow(dead_code)]
+    tex_b: wgpu::Texture,
+    view_b: wgpu::TextureView,
+    bg_a:      wgpu::BindGroup,  // feedback_bgl: prev=A, scene=offline_target; write target=B
+    bg_b:      wgpu::BindGroup,  // feedback_bgl: prev=B, scene=offline_target; write target=A
+    blit_bg_a: wgpu::BindGroup,  // blit_bgl: blit A → offline_target
+    blit_bg_b: wgpu::BindGroup,  // blit_bgl: blit B → offline_target
+    current_is_a: bool,
+    wander_pos: [f32; 2],
+    wander_vel: [f32; 2],
+    rng: rand::rngs::StdRng,
+}
+
 pub struct ExportState {
     pub phase: ExportPhase,
     pub current_frame: u32,
@@ -1315,6 +1332,10 @@ pub struct ExportState {
     pub export_bands_smoothed: [f32; 8],
     pub export_rms_smoothed:   f32,
     pub offline_analyzer:      audio::OfflineAnalyzer,
+    // f32 accumulators for deterministic mode-timer replay (replaces Instant in export path)
+    pub export_random_elapsed:   f32,
+    pub export_reactive_elapsed: f32,
+    pub export_party_elapsed:    f32,
 }
 
 fn spawn_frame_save_worker() -> (Sender<FrameSaveJob>, std::thread::JoinHandle<()>) {
@@ -1533,6 +1554,8 @@ struct GpuState {
 
     // Export ribbon FBOs (persistent across export frames, None when not exporting)
     export_ribbon: Option<ExportRibbonState>,
+    // Export feedback FBOs for blackhole pass (None when not exporting or blackhole disabled)
+    export_feedback: Option<ExportFeedbackState>,
 
     // CPU readback for recording
     readback_buffer: wgpu::Buffer,
@@ -3025,6 +3048,7 @@ impl GpuState {
             palette_uniforms_buffer, palette_bgl, palette_bind_group, palette_pipeline,
             palette_scratch_texture, palette_scratch_view,
             export_ribbon: None,
+            export_feedback: None,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
             offline_target: None,
@@ -3350,6 +3374,7 @@ impl GpuState {
                         }
                         self.export_state = None;
                         self.export_ribbon = None;
+                        self.export_feedback = None;
                         // fall through to live render below
                     } else {
                         self.render_mux_phase_preview(menu);
@@ -3359,6 +3384,7 @@ impl GpuState {
                 ExportPhase::Complete | ExportPhase::Failed => {
                     self.export_state = None;
                     self.export_ribbon = None;
+                    self.export_feedback = None;
                     // fall through to live render below
                 }
             }
@@ -3947,50 +3973,95 @@ impl GpuState {
         }
     }
 
-    pub fn update_modes(&mut self, bass: f32, mid: f32) {
-        let now = Instant::now();
+    pub fn update_modes(&mut self, bass: f32, mid: f32, frame_dt: Option<f32>) {
         let bass_mid = bass + mid;
-
         let smooth_alpha   = 0.3_f32;
         let baseline_alpha = 0.005_f32;
         self.bass_mid_smoothed = self.bass_mid_smoothed * (1.0 - smooth_alpha)  + bass_mid * smooth_alpha;
         self.bass_mid_baseline = self.bass_mid_baseline * (1.0 - baseline_alpha) + bass_mid * baseline_alpha;
 
-        // Random Mode: timer-based full reroll
-        if self.params.random_mode_enabled {
-            // Android-spec: 5000ms - (4800ms × aggressiveness) → 5s..0.2s
-            let interval = 5.0 - 4.8 * self.params.random_mode_aggressiveness;
-            if now.duration_since(self.last_random_change).as_secs_f32() >= interval {
-                self.randomize_all_params();
-                self.last_random_change = now;
-                log::info!("Random Mode: full reroll (interval {:.1}s)", interval);
-            }
-        }
-
-        // Reactive Mode: audio-triggered painter cycle
-        if self.params.reactive_mode_enabled {
-            let threshold_mult = lerp(2.5, 1.05, self.params.reactive_mode_aggressiveness);
-            let cooldown       = lerp(8.0, 0.5,  self.params.reactive_mode_aggressiveness);
-            if now.duration_since(self.last_reactive_trigger).as_secs_f32() >= cooldown {
-                let trigger_level = self.bass_mid_baseline * threshold_mult;
-                if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
-                    self.params.painter_kind = self.params.painter_kind.next();
-                    self.last_reactive_trigger = now;
-                    log::info!("Reactive Mode: painter -> {}", self.params.painter_kind.name());
+        match frame_dt {
+            Some(dt) => {
+                // Export path: f32 accumulators instead of Instant for deterministic replay.
+                if self.export_state.is_none() { return; }
+                if self.params.random_mode_enabled {
+                    let interval = 5.0 - 4.8 * self.params.random_mode_aggressiveness;
+                    let elapsed = {
+                        let exp = self.export_state.as_mut().unwrap();
+                        exp.export_random_elapsed += dt;
+                        exp.export_random_elapsed
+                    };
+                    if elapsed >= interval {
+                        self.export_state.as_mut().unwrap().export_random_elapsed = 0.0;
+                        self.randomize_all_params();
+                        log::info!("Random Mode: full reroll (interval {:.1}s)", interval);
+                    }
+                }
+                if self.params.reactive_mode_enabled {
+                    let threshold_mult = lerp(2.5, 1.05, self.params.reactive_mode_aggressiveness);
+                    let cooldown       = lerp(8.0, 0.5,  self.params.reactive_mode_aggressiveness);
+                    let elapsed = {
+                        let exp = self.export_state.as_mut().unwrap();
+                        exp.export_reactive_elapsed += dt;
+                        exp.export_reactive_elapsed
+                    };
+                    let trigger_level = self.bass_mid_baseline * threshold_mult;
+                    if elapsed >= cooldown && self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                        self.export_state.as_mut().unwrap().export_reactive_elapsed = 0.0;
+                        self.params.painter_kind = self.params.painter_kind.next();
+                        log::info!("Reactive Mode: painter -> {}", self.params.painter_kind.name());
+                    }
+                }
+                if self.params.party_mode_enabled {
+                    let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
+                    let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
+                    let elapsed = {
+                        let exp = self.export_state.as_mut().unwrap();
+                        exp.export_party_elapsed += dt;
+                        exp.export_party_elapsed
+                    };
+                    let trigger_level = self.bass_mid_baseline * threshold_mult;
+                    if elapsed >= cooldown && self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                        self.export_state.as_mut().unwrap().export_party_elapsed = 0.0;
+                        self.randomize_all_params();
+                        log::info!("Party Mode: full reroll on beat");
+                    }
                 }
             }
-        }
-
-        // Party Mode: audio-triggered full reroll
-        if self.params.party_mode_enabled {
-            let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
-            let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
-            if now.duration_since(self.last_party_trigger).as_secs_f32() >= cooldown {
-                let trigger_level = self.bass_mid_baseline * threshold_mult;
-                if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
-                    self.randomize_all_params();
-                    self.last_party_trigger = now;
-                    log::info!("Party Mode: full reroll on beat");
+            None => {
+                // Live path: wall-clock Instant (unchanged behavior).
+                let now = Instant::now();
+                if self.params.random_mode_enabled {
+                    let interval = 5.0 - 4.8 * self.params.random_mode_aggressiveness;
+                    if now.duration_since(self.last_random_change).as_secs_f32() >= interval {
+                        self.randomize_all_params();
+                        self.last_random_change = now;
+                        log::info!("Random Mode: full reroll (interval {:.1}s)", interval);
+                    }
+                }
+                if self.params.reactive_mode_enabled {
+                    let threshold_mult = lerp(2.5, 1.05, self.params.reactive_mode_aggressiveness);
+                    let cooldown       = lerp(8.0, 0.5,  self.params.reactive_mode_aggressiveness);
+                    if now.duration_since(self.last_reactive_trigger).as_secs_f32() >= cooldown {
+                        let trigger_level = self.bass_mid_baseline * threshold_mult;
+                        if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                            self.params.painter_kind = self.params.painter_kind.next();
+                            self.last_reactive_trigger = now;
+                            log::info!("Reactive Mode: painter -> {}", self.params.painter_kind.name());
+                        }
+                    }
+                }
+                if self.params.party_mode_enabled {
+                    let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
+                    let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
+                    if now.duration_since(self.last_party_trigger).as_secs_f32() >= cooldown {
+                        let trigger_level = self.bass_mid_baseline * threshold_mult;
+                        if self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                            self.randomize_all_params();
+                            self.last_party_trigger = now;
+                            log::info!("Party Mode: full reroll on beat");
+                        }
+                    }
                 }
             }
         }
@@ -4049,6 +4120,10 @@ impl GpuState {
             export_bands_smoothed: [0.0; 8],
             export_rms_smoothed:   0.0,
             offline_analyzer:      audio::OfflineAnalyzer::new(),
+            // Zero-initialized: each mode fires relative to export start, not wall clock.
+            export_random_elapsed:   0.0,
+            export_reactive_elapsed: 0.0,
+            export_party_elapsed:    0.0,
         });
 
         // Initialize export ribbon FBOs, cleared to transparent black
@@ -4115,6 +4190,95 @@ impl GpuState {
                 composite_bg_a, composite_bg_b,
             });
         }
+
+        // Allocate export feedback ping-pong FBOs at offline_target resolution if blackhole enabled.
+        if self.params.blackhole_enabled {
+            use rand::SeedableRng;
+            let fmt = self.offline_target.as_ref().unwrap().format;
+            let make_fb_tex = |device: &wgpu::Device, label: &'static str| {
+                let t = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: off_w, height: off_h, depth_or_array_layers: 1 },
+                    mip_level_count: 1, sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: fmt,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+                (t, v)
+            };
+            let (tex_a, view_a) = make_fb_tex(&self.device, "Export feedback A");
+            let (tex_b, view_b) = make_fb_tex(&self.device, "Export feedback B");
+            // Clear both to opaque black so frame 0 shows live scene only.
+            {
+                let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Export feedback init clear"),
+                });
+                for v in [&view_a, &view_b] {
+                    let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Export feedback clear"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: v, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                    });
+                }
+                self.queue.submit(std::iter::once(enc.finish()));
+            }
+            let offline_view = &self.offline_target.as_ref().unwrap().view;
+            // bg_a: prev=A, scene=offline_target — bind group used when writing to B.
+            let bg_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export feedback BG A"),
+                layout: &self.feedback_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.feedback_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(offline_view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            // bg_b: prev=B, scene=offline_target — bind group used when writing to A.
+            let bg_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export feedback BG B"),
+                layout: &self.feedback_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.feedback_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(offline_view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let blit_bg_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export feedback blit BG A"),
+                layout: &self.blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let blit_bg_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export feedback blit BG B"),
+                layout: &self.blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            self.export_feedback = Some(ExportFeedbackState {
+                tex_a, view_a, tex_b, view_b,
+                bg_a, bg_b, blit_bg_a, blit_bg_b,
+                current_is_a: true,
+                wander_pos: [0.5, 0.5],
+                wander_vel: [0.0, 0.0],
+                // Deterministic seed: same wander path on every export of the same session.
+                rng: rand::rngs::StdRng::seed_from_u64(0x600D_5EED_0000_0000),
+            });
+        }
         Ok(())
     }
 
@@ -4149,6 +4313,7 @@ impl GpuState {
                 None => {
                     log::warn!("Save canceled — PNG frames kept at {}", output_dir.display());
                     self.export_state = None;
+                    self.export_feedback = None;
                     return;
                 }
             };
@@ -4220,7 +4385,7 @@ impl GpuState {
 
         // ── Phase 3: state updates (needs &mut self) ──────────────────────────
         self.update_bass_zoom(bass);
-        self.update_modes(bass, mid);
+        self.update_modes(bass, mid, Some(1.0 / fps as f32));
 
         // Beat-shake detection for the export timeline
         {
@@ -4610,6 +4775,88 @@ impl GpuState {
             pass.set_pipeline(&self.frame_pipeline);
             pass.set_bind_group(0, &exp_frame_bg, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        // Pass 5 (export path): blackhole video-feedback + blit-back to offline_target.
+        // Two-step: feedback(prev, scene=offline_target) → inactive_fb, then blit inactive_fb →
+        // offline_target. Can't render feedback directly to offline_target while reading it.
+        if self.params.blackhole_enabled {
+            // Wander update (mutable borrow of export_feedback, released at end of block).
+            let maybe_fb = if let Some(ef) = self.export_feedback.as_mut() {
+                use rand::Rng;
+                let wa = self.params.blackhole_wander_amount;
+                ef.wander_vel[0] += ef.rng.gen_range(-0.001_f32..=0.001);
+                ef.wander_vel[1] += ef.rng.gen_range(-0.001_f32..=0.001);
+                ef.wander_vel[0] *= 0.95;
+                ef.wander_vel[1] *= 0.95;
+                ef.wander_vel[0] -= (ef.wander_pos[0] - 0.5) * 0.02;
+                ef.wander_vel[1] -= (ef.wander_pos[1] - 0.5) * 0.02;
+                ef.wander_pos[0] += ef.wander_vel[0];
+                ef.wander_pos[1] += ef.wander_vel[1];
+                ef.wander_pos[0] = ef.wander_pos[0].clamp(0.5 - wa, 0.5 + wa);
+                ef.wander_pos[1] = ef.wander_pos[1].clamp(0.5 - wa, 0.5 + wa);
+                // strength = 0 on frame 0: prev_tex is cleared black, show live scene only.
+                let eff = if frame_index == 0 { 0.0 } else { self.params.blackhole_warp_strength };
+                Some((ef.wander_pos, ef.current_is_a, eff))
+            } else {
+                None
+            }; // mutable borrow of self.export_feedback released here
+
+            if let Some((center, current_is_a, eff_str)) = maybe_fb {
+                self.queue.write_buffer(&self.feedback_uniforms_buffer, 0, bytemuck::cast_slice(&[FeedbackUniforms {
+                    center_x:     center[0],
+                    center_y:     center[1],
+                    shrink_rate:  self.params.blackhole_warp_curve,
+                    strength:     eff_str,
+                    alpha_radius: self.params.blackhole_alpha_radius,
+                    _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
+                }]));
+                // Render passes (immutable borrows of separate self fields; NLL field-split OK).
+                if let Some(ef) = self.export_feedback.as_ref() {
+                    let offline_view = &self.offline_target.as_ref().unwrap().view;
+                    // current_is_a=true → A is prev, write to B; blit B → offline_target.
+                    let (write_view, read_bg, blit_bg) = if current_is_a {
+                        (&ef.view_b, &ef.bg_a, &ef.blit_bg_b)
+                    } else {
+                        (&ef.view_a, &ef.bg_b, &ef.blit_bg_a)
+                    };
+                    {
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Export feedback pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: write_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.feedback_pipeline);
+                        pass.set_bind_group(0, read_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                    {
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Export feedback blit-back"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: offline_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.blit_pipeline);
+                        pass.set_bind_group(0, blit_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                } // immutable borrow of self.export_feedback released here
+                if let Some(ef) = self.export_feedback.as_mut() {
+                    ef.current_is_a = !current_is_a;
+                }
+            }
         }
 
         // Readback: copy offline_target → staging buffer
@@ -5456,7 +5703,7 @@ impl ApplicationHandler for App {
                 }
 
                 gpu.update_bass_zoom(raw_bands[0]);
-                gpu.update_modes(raw_bands[0], raw_bands[3]);
+                gpu.update_modes(raw_bands[0], raw_bands[3], None);
 
                 // Update player info displayed in the panel
                 let player_info = if let (Some(player), Some(audio)) =
