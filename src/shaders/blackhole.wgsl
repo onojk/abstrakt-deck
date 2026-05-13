@@ -12,7 +12,7 @@ struct BlackholePassUniforms {
     cycle_progress: f32,   // offset 16: snapshot age 0..1
     slot_alpha:     f32,   // offset 20: pre-computed per-slot opacity (newest=1.0)
     passes:         f32,   // offset 24: number of nested copies (cast from u32)
-    _pad:           f32,   // offset 28
+    alpha_radius:   f32,   // offset 28: spatial fade start (0..1, fraction of corner dist)
 };
 
 @group(0) @binding(0) var<uniform> u: BlackholePassUniforms;
@@ -41,9 +41,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dir = uv - center;
     let n_passes = max(i32(u.passes), 1);
 
+    // Spatial alpha: snapshot fades to 0 at screen edges so live scene bleeds through.
+    // sqrt(0.5) = distance from center to corner in UV space.
+    let max_r: f32    = 0.7071;
+    let r: f32        = length(uv - vec2<f32>(0.5));
+    let spatial_alpha = 1.0 - smoothstep(u.alpha_radius * max_r, max_r, r);
+
     // Temporal fade: snapshot fades to transparent as it ages.
     let temporal_alpha = pow(max(1.0 - u.cycle_progress, 0.0), u.fade_curve);
-    let base_alpha = u.slot_alpha * temporal_alpha;
+    let base_alpha = u.slot_alpha * temporal_alpha * spatial_alpha;
 
     // Accumulate nested copies front-to-back (i=0 = outermost/faintest first,
     // i=n-1 = innermost/brightest last = comet head on top).

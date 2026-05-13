@@ -39,6 +39,7 @@ pub enum LockTarget {
     BlackholeEnabled,
     BlackholeWarpStrength,
     BlackholeWarpCurve,
+    BlackholeAlphaRadius,
     BlackholeFallbackHz,
     BlackholePasses,
     BlackholeTrailCount,
@@ -118,6 +119,7 @@ pub enum ParamChange {
     BlackholeEnabled(bool),
     BlackholeWarpStrength(f32),
     BlackholeWarpCurve(f32),
+    BlackholeAlphaRadius(f32),
     BlackholeFallbackHz(f32),
     BlackholePasses(u32),
     BlackholeTrailCount(u32),
@@ -1022,6 +1024,18 @@ impl MenuBar {
                     let mut v = params.blackhole_warp_curve;
                     if ui.add(egui::Slider::new(&mut v, 1.0..=4.0).text("Fade Curve").step_by(0.1)).changed() {
                         changes.push(ParamChange::BlackholeWarpCurve(v));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.blackhole_alpha_radius).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeAlphaRadius));
+                }
+                ui.add_enabled_ui(!params.locks.blackhole_alpha_radius, |ui| {
+                    let mut v = params.blackhole_alpha_radius;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Alpha Radius").step_by(0.05)).changed() {
+                        changes.push(ParamChange::BlackholeAlphaRadius(v));
                     }
                 });
             });

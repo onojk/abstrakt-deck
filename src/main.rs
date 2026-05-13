@@ -46,7 +46,7 @@ struct BlackholePassUniforms {
     cycle_progress: f32,
     slot_alpha:     f32,
     passes:         f32,
-    _pad:           f32,
+    alpha_radius:   f32,
 }
 
 #[derive(Clone)]
@@ -2852,7 +2852,7 @@ impl GpuState {
 
         let zero_uniforms = bytemuck::cast_slice(&[BlackholePassUniforms {
             center_x: 0.5, center_y: 0.5, shrink_rate: 0.7, fade_curve: 2.0,
-            cycle_progress: 0.0, slot_alpha: 1.0, passes: 6.0, _pad: 0.0,
+            cycle_progress: 0.0, slot_alpha: 1.0, passes: 6.0, alpha_radius: 0.5,
         }]);
         let mut blackhole_slot_buffers:      Vec<wgpu::Buffer>     = Vec::with_capacity(MAX_TRAIL_COUNT);
         let mut blackhole_slot_bind_groups:  Vec<wgpu::BindGroup>  = Vec::with_capacity(MAX_TRAIL_COUNT);
@@ -3807,6 +3807,7 @@ impl GpuState {
 
             let shrink_rate  = self.params.blackhole_warp_strength;
             let fade_curve   = self.params.blackhole_warp_curve;
+            let alpha_radius = self.params.blackhole_alpha_radius;
             let passes_f     = self.params.blackhole_passes as f32;
 
             // Pre-pass: blit live scene → accumulator (establishes base layer).
@@ -3845,7 +3846,7 @@ impl GpuState {
                         cycle_progress: *cycle_progress,
                         slot_alpha,
                         passes:         passes_f,
-                        _pad:           0.0,
+                        alpha_radius,
                     }]),
                 );
                 {
@@ -4873,6 +4874,7 @@ impl GpuState {
         if !self.params.locks.blackhole_enabled       { self.params.blackhole_enabled       = rng.gen_bool(0.10); }
         if !self.params.locks.blackhole_warp_strength { self.params.blackhole_warp_strength = rng.gen_range(0.4_f32..=0.95); }
         if !self.params.locks.blackhole_warp_curve    { self.params.blackhole_warp_curve    = rng.gen_range(1.0_f32..=4.0); }
+        if !self.params.locks.blackhole_alpha_radius  { self.params.blackhole_alpha_radius  = rng.gen_range(0.3_f32..=1.0); }
         if !self.params.locks.blackhole_fallback_hz   { self.params.blackhole_fallback_hz   = rng.gen_range(0.5_f32..=3.0); }
         if !self.params.locks.blackhole_passes        { self.params.blackhole_passes        = rng.gen_range(2u32..=8); }
         if !self.params.locks.blackhole_trail_count   { self.params.blackhole_trail_count   = rng.gen_range(1u32..=6); }
@@ -5764,6 +5766,7 @@ impl ApplicationHandler for App {
                                 LockTarget::BlackholeEnabled       => gpu.params.locks.blackhole_enabled       = !gpu.params.locks.blackhole_enabled,
                                 LockTarget::BlackholeWarpStrength  => gpu.params.locks.blackhole_warp_strength = !gpu.params.locks.blackhole_warp_strength,
                                 LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
+                                LockTarget::BlackholeAlphaRadius   => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
                                 LockTarget::BlackholeFallbackHz    => gpu.params.locks.blackhole_fallback_hz   = !gpu.params.locks.blackhole_fallback_hz,
                                 LockTarget::BlackholePasses        => gpu.params.locks.blackhole_passes        = !gpu.params.locks.blackhole_passes,
                                 LockTarget::BlackholeTrailCount    => gpu.params.locks.blackhole_trail_count   = !gpu.params.locks.blackhole_trail_count,
@@ -5801,6 +5804,7 @@ impl ApplicationHandler for App {
                         ParamChange::BlackholeEnabled(v)       => gpu.params.blackhole_enabled       = v,
                         ParamChange::BlackholeWarpStrength(v)  => gpu.params.blackhole_warp_strength = v,
                         ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
+                        ParamChange::BlackholeAlphaRadius(v)   => gpu.params.blackhole_alpha_radius  = v,
                         ParamChange::BlackholeFallbackHz(v)    => gpu.params.blackhole_fallback_hz   = v,
                         ParamChange::BlackholePasses(v)        => gpu.params.blackhole_passes        = v,
                         ParamChange::BlackholeTrailCount(v)    => gpu.params.blackhole_trail_count   = v,
