@@ -33,20 +33,7 @@ const PAINTER_TEXTURE_HEIGHT: u32 = 256;
 const SKIN_MIP_LEVELS: u32        = 13; // ilog2(4096) + 1
 const PAINTER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-// 4 ribbons: [r, g, b, speed_rad_per_s]
-const RIBBON_COLORS: [[f32; 4]; 4] = [
-    [1.0, 0.3, 0.1, 0.4],  // orange-red
-    [0.1, 0.6, 1.0, 0.3],  // cyan-blue
-    [0.8, 0.1, 0.9, 0.5],  // purple
-    [0.1, 0.9, 0.4, 0.2],  // green
-];
-// 4 ribbons: [frequency, phase_offset, gaussian_width_uv, amplitude_uv]
-const RIBBON_PARAMS: [[f32; 4]; 4] = [
-    [2.5, 0.0,  0.020, 0.30],
-    [3.2, 1.2,  0.015, 0.25],
-    [1.8, 2.4,  0.025, 0.35],
-    [4.1, 0.7,  0.012, 0.20],
-];
+const RIBBON_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -112,12 +99,12 @@ struct DistortionPlusUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct RibbonUniforms {
-    time_seconds: f32,
-    beat_decay:   f32,
-    intensity:    f32,
-    _pad0:        f32,
-    colors: [[f32; 4]; 4],  // [r, g, b, speed] per ribbon (matches WGSL array<vec4<f32>,4>)
-    params: [[f32; 4]; 4],  // [freq, phase, width, amplitude] per ribbon
+    resolution:   [f32; 2],      // offset  0: vec2<f32> in WGSL, [f32;2] in Rust (same layout)
+    time_seconds: f32,           // offset  8
+    intensity:    f32,           // offset 12
+    color:        [f32; 4],      // offset 16: vec4<f32>
+    collapse:     [f32; 4],      // offset 32: vec4<f32>
+    bands:        [[f32; 4]; 2], // offset 48: array<vec4<f32>,2>  — total 80 bytes
 }
 
 // 0=none 1=circle 2=square 3=rounded 4=hexagon 5=octagon 6=flower 7=star
@@ -2422,9 +2409,12 @@ impl GpuState {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Ribbon uniforms"),
                 contents: bytemuck::cast_slice(&[RibbonUniforms {
-                    time_seconds: 0.0, beat_decay: 0.0, intensity: 0.5, _pad0: 0.0,
-                    colors: RIBBON_COLORS,
-                    params: RIBBON_PARAMS,
+                    resolution:   [PAINTER_TEXTURE_WIDTH as f32, PAINTER_TEXTURE_HEIGHT as f32],
+                    time_seconds: 0.0,
+                    intensity:    0.5,
+                    color:        RIBBON_COLOR,
+                    collapse:     [0.0; 4],
+                    bands:        [[0.0; 4]; 2],
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -2546,18 +2536,7 @@ impl GpuState {
                     module: &ribbon_composite_shader, entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: PAINTER_FORMAT,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation:  wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation:  wgpu::BlendOperation::Add,
-                            },
-                        }),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -3020,16 +2999,21 @@ impl GpuState {
         }
 
         // Pass 1a: ribbon update (ping-pong RGBA16F FBOs)
-        // Pass 1b: ribbon composite → painter FBO (additive blend, LoadOp::Load)
+        // Pass 1b: ribbon composite → painter FBO (alpha blend, LoadOp::Load)
         if self.params.ribbons_enabled {
+            let b = self.bands_smoothed;
+            // All four rings driven by the same beat_decay this slice.
+            // Android has per-ribbon collapse with distinct triggers
+            // (see audit Section 1h "Beat-driven collapse animation");
+            // a future slice can split these out for per-ring variety.
             self.queue.write_buffer(&self.ribbon_uniforms_buffer, 0,
                 bytemuck::cast_slice(&[RibbonUniforms {
+                    resolution:   [PAINTER_TEXTURE_WIDTH as f32, PAINTER_TEXTURE_HEIGHT as f32],
                     time_seconds: shader_time,
-                    beat_decay:   self.shader_beat_decay,
                     intensity:    self.params.ribbons_intensity,
-                    _pad0:        0.0,
-                    colors: RIBBON_COLORS,
-                    params: RIBBON_PARAMS,
+                    color:        RIBBON_COLOR,
+                    collapse:     [self.shader_beat_decay; 4],
+                    bands:        [[b[0], b[1], b[2], b[3]], [b[4], b[5], b[6], b[7]]],
                 }]));
             let ping = self.ribbon_ping;
             self.ribbon_ping = !self.ribbon_ping;
@@ -3776,14 +3760,21 @@ impl GpuState {
             let exp_beat = self.export_state.as_ref()
                 .map(|e| e.offline_analyzer.beat_decay)
                 .unwrap_or(0.0);
+            let eb = self.export_state.as_ref()
+                .map(|e| e.export_bands_smoothed)
+                .unwrap_or([0.0; 8]);
+            // All four rings driven by the same beat_decay this slice.
+            // Android has per-ribbon collapse with distinct triggers
+            // (see audit Section 1h "Beat-driven collapse animation");
+            // a future slice can split these out for per-ring variety.
             self.queue.write_buffer(&self.ribbon_uniforms_buffer, 0,
                 bytemuck::cast_slice(&[RibbonUniforms {
+                    resolution:   [PAINTER_TEXTURE_WIDTH as f32, PAINTER_TEXTURE_HEIGHT as f32],
                     time_seconds: shader_time,
-                    beat_decay:   exp_beat,
                     intensity:    self.params.ribbons_intensity,
-                    _pad0:        0.0,
-                    colors: RIBBON_COLORS,
-                    params: RIBBON_PARAMS,
+                    color:        RIBBON_COLOR,
+                    collapse:     [exp_beat; 4],
+                    bands:        [[eb[0], eb[1], eb[2], eb[3]], [eb[4], eb[5], eb[6], eb[7]]],
                 }]));
             // Capture and flip ping state; None means no export ribbon allocated → skip
             let ping_opt = if let Some(r) = self.export_ribbon.as_mut() {
