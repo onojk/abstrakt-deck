@@ -254,7 +254,8 @@ pub struct ParamLocks {
     pub saturation: bool,
     // Audio
     pub bass_zoom_strength: bool,
-    pub shake_enabled: bool,
+    pub midi_shake_enabled: bool,
+    pub audio_shake_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -277,7 +278,8 @@ pub struct VisualParams {
     pub distortion_plus_yaw:     f32,
     pub distortion_plus_pitch:   f32,
     pub distortion_plus_roll:    f32,
-    pub shake_enabled: bool,
+    pub midi_shake_enabled:  bool,
+    pub audio_shake_enabled: bool,
     pub bass_zoom_strength: f32,
     pub painter_kind: PainterKind,
     pub contrast: f32,
@@ -316,7 +318,8 @@ impl Default for VisualParams {
             distortion_plus_yaw:     0.0,
             distortion_plus_pitch:   0.0,
             distortion_plus_roll:    0.0,
-            shake_enabled: true,
+            midi_shake_enabled:  true,
+            audio_shake_enabled: false,
             bass_zoom_strength: 0.3,
             painter_kind: PainterKind::HueStripe,
             contrast: 1.0,
@@ -381,7 +384,10 @@ struct Preset {
     distortion_plus_pitch:   f32,
     #[serde(default)]
     distortion_plus_roll:    f32,
-    shake_enabled: bool,
+    #[serde(default = "default_true")]
+    midi_shake_enabled:  bool,
+    #[serde(default)]
+    audio_shake_enabled: bool,
     bass_zoom_strength: f32,
     painter_kind: String,
     #[serde(default = "default_one_f32")]
@@ -438,7 +444,8 @@ impl Preset {
             distortion_plus_yaw:     params.distortion_plus_yaw,
             distortion_plus_pitch:   params.distortion_plus_pitch,
             distortion_plus_roll:    params.distortion_plus_roll,
-            shake_enabled: params.shake_enabled,
+            midi_shake_enabled:  params.midi_shake_enabled,
+            audio_shake_enabled: params.audio_shake_enabled,
             bass_zoom_strength: params.bass_zoom_strength,
             painter_kind: params.painter_kind.name().to_string(),
             contrast: params.contrast,
@@ -490,7 +497,8 @@ impl Preset {
         params.distortion_plus_yaw     = self.distortion_plus_yaw;
         params.distortion_plus_pitch   = self.distortion_plus_pitch;
         params.distortion_plus_roll    = self.distortion_plus_roll;
-        params.shake_enabled = self.shake_enabled;
+        params.midi_shake_enabled  = self.midi_shake_enabled;
+        params.audio_shake_enabled = self.audio_shake_enabled;
         params.bass_zoom_strength = self.bass_zoom_strength;
         params.painter_kind = match self.painter_kind.as_str() {
             "Spiral"     => PainterKind::Spiral,
@@ -3011,7 +3019,8 @@ impl GpuState {
 
         // Random Mode: timer-based full reroll
         if self.params.random_mode_enabled {
-            let interval = lerp(30.0, 1.0, self.params.random_mode_aggressiveness);
+            // Android-spec: 5000ms - (4800ms × aggressiveness) → 5s..0.2s
+            let interval = 5.0 - 4.8 * self.params.random_mode_aggressiveness;
             if now.duration_since(self.last_random_change).as_secs_f32() >= interval {
                 self.randomize_all_params();
                 self.last_random_change = now;
@@ -3212,7 +3221,10 @@ impl GpuState {
         // Beat-shake detection for the export timeline
         {
             let threshold = self.file_rms_baseline * 1.5 + 0.01;
-            if rms > threshold && self.last_file_beat.elapsed().as_millis() > 120 {
+            if self.params.audio_shake_enabled
+                && rms > threshold
+                && self.last_file_beat.elapsed().as_millis() > 120
+            {
                 let strength = ((rms / (threshold + 0.001)).min(3.0) / 3.0).clamp(0.0, 1.0);
                 self.kick_shake(strength);
                 self.last_file_beat = Instant::now();
@@ -3654,7 +3666,8 @@ impl GpuState {
         if !self.params.locks.invert_enabled       { self.params.invert_enabled       = rng.gen_bool(0.5); }
         if !self.params.locks.colorize_enabled     { self.params.colorize_enabled     = rng.gen_bool(0.5); }
         if !self.params.locks.distortion_enabled   { self.params.distortion_enabled   = rng.gen_bool(0.5); }
-        if !self.params.locks.shake_enabled        { self.params.shake_enabled        = rng.gen_bool(0.5); }
+        if !self.params.locks.midi_shake_enabled   { self.params.midi_shake_enabled   = rng.gen_bool(0.5); }
+        if !self.params.locks.audio_shake_enabled  { self.params.audio_shake_enabled  = rng.gen_bool(0.5); }
         // DP angles reroll independently of enabled (per spec).
         if !self.params.locks.distortion_plus_enabled { self.params.distortion_plus_enabled = rng.gen_bool(0.40); }
         if !self.params.locks.distortion_plus_yaw     { self.params.distortion_plus_yaw     = rng.gen_range(-180.0_f32..=180.0); }
@@ -3866,9 +3879,11 @@ fn apply_midi_event(gpu: &mut GpuState, event: MidiEvent) {
             }
         }
         MidiEvent::NoteOn(note, velocity) => {
-            let strength = velocity as f32 / 127.0;
-            gpu.kick_shake(strength);
-            log::debug!("MIDI Note On {} vel {} → shake {:.2}", note, velocity, strength);
+            if gpu.params.midi_shake_enabled {
+                let strength = velocity as f32 / 127.0;
+                gpu.kick_shake(strength);
+                log::debug!("MIDI Note On {} vel {} → shake {:.2}", note, velocity, strength);
+            }
         }
         MidiEvent::NoteOff(_) => {}
     }
@@ -4068,8 +4083,8 @@ impl ApplicationHandler for App {
                         log::info!("Party Mode: {}", gpu.params.party_mode_enabled);
                     }
                     KeyCode::Space => {
-                        gpu.params.shake_enabled = !gpu.params.shake_enabled;
-                        log::info!("shake_enabled = {}", gpu.params.shake_enabled);
+                        gpu.params.midi_shake_enabled = !gpu.params.midi_shake_enabled;
+                        log::info!("midi_shake_enabled = {}", gpu.params.midi_shake_enabled);
                     }
                     KeyCode::Tab if self.modifiers.shift_key() => {
                         gpu.params.current_shape = gpu.params.current_shape.next();
@@ -4216,7 +4231,7 @@ impl ApplicationHandler for App {
                         if !file_playing {
                             match event {
                                 AudioEvent::Beat(strength) => {
-                                    if gpu.params.shake_enabled {
+                                    if gpu.params.audio_shake_enabled {
                                         gpu.kick_shake(strength);
                                     }
                                 }
@@ -4250,7 +4265,7 @@ impl ApplicationHandler for App {
                 let raw_bands: [f32; 8] = match file_energies {
                     Some((bands, rms)) => {
                         // Beat-shake from file: RMS threshold crossing
-                        if gpu.params.shake_enabled {
+                        if gpu.params.audio_shake_enabled {
                             let threshold = gpu.file_rms_baseline * 1.5 + 0.01;
                             if rms > threshold && gpu.last_file_beat.elapsed().as_millis() > 120 {
                                 let strength = ((rms / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
@@ -4437,8 +4452,9 @@ impl ApplicationHandler for App {
                         ParamChange::DistortionPlusYaw(v)       => gpu.params.distortion_plus_yaw      = v,
                         ParamChange::DistortionPlusPitch(v)     => gpu.params.distortion_plus_pitch    = v,
                         ParamChange::DistortionPlusRoll(v)      => gpu.params.distortion_plus_roll     = v,
-                        ParamChange::ShakeEnabled(v)         => gpu.params.shake_enabled = v,
-                        ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength = v,
+                        ParamChange::MidiShakeEnabled(v)     => gpu.params.midi_shake_enabled  = v,
+                        ParamChange::AudioShakeEnabled(v)    => gpu.params.audio_shake_enabled = v,
+                        ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength  = v,
                         ParamChange::CurrentShape(v)         => gpu.params.current_shape = v,
                         ParamChange::FrameShape(v)           => gpu.params.frame_shape = v,
                         ParamChange::PainterKind(v)          => gpu.params.painter_kind = v,
@@ -4457,10 +4473,10 @@ impl ApplicationHandler for App {
                             gpu.params.random_mode_enabled = v;
                             if v { gpu.last_random_change = Instant::now(); }
                         }
-                        ParamChange::RandomModeAggressiveness(v)  => gpu.params.random_mode_aggressiveness  = v,
-                        ParamChange::ReactiveModeEnabled(v)       => gpu.params.reactive_mode_enabled       = v,
+                        ParamChange::RandomModeAggressiveness(v)   => gpu.params.random_mode_aggressiveness   = v,
+                        ParamChange::ReactiveModeEnabled(v)        => gpu.params.reactive_mode_enabled        = v,
                         ParamChange::ReactiveModeAggressiveness(v) => gpu.params.reactive_mode_aggressiveness = v,
-                        ParamChange::PartyModeEnabled(v)          => gpu.params.party_mode_enabled          = v,
+                        ParamChange::PartyModeEnabled(v)           => gpu.params.party_mode_enabled           = v,
                         ParamChange::PartyModeAggressiveness(v)   => gpu.params.party_mode_aggressiveness   = v,
                         ParamChange::PlayerToggle => {
                             if let Some(player) = &gpu.audio_player {
@@ -4505,8 +4521,9 @@ impl ApplicationHandler for App {
                                 LockTarget::Contrast           => gpu.params.locks.contrast           = !gpu.params.locks.contrast,
                                 LockTarget::ContrastPasses     => gpu.params.locks.contrast_passes     = !gpu.params.locks.contrast_passes,
                                 LockTarget::Saturation         => gpu.params.locks.saturation         = !gpu.params.locks.saturation,
-                                LockTarget::BassZoomStrength   => gpu.params.locks.bass_zoom_strength  = !gpu.params.locks.bass_zoom_strength,
-                                LockTarget::ShakeEnabled       => gpu.params.locks.shake_enabled       = !gpu.params.locks.shake_enabled,
+                                LockTarget::BassZoomStrength   => gpu.params.locks.bass_zoom_strength   = !gpu.params.locks.bass_zoom_strength,
+                                LockTarget::MidiShakeEnabled   => gpu.params.locks.midi_shake_enabled   = !gpu.params.locks.midi_shake_enabled,
+                                LockTarget::AudioShakeEnabled  => gpu.params.locks.audio_shake_enabled  = !gpu.params.locks.audio_shake_enabled,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -4583,7 +4600,7 @@ fn main() {
     println!("  1-7    frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star)");
     println!("  - =    frame size");
     println!("  R G    cycle frame color hue");
-    println!("  space  toggle beat-reactive shake");
+    println!("  space  toggle MIDI shake");
     println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
     println!("  / '   bass-zoom intensity (0 to 1)");
     println!("  I      toggle color invert");
@@ -4660,7 +4677,8 @@ mod tests {
             distortion_plus_yaw:     45.0,
             distortion_plus_pitch:   -20.0,
             distortion_plus_roll:    90.0,
-            shake_enabled: false,
+            midi_shake_enabled:  false,
+            audio_shake_enabled: true,
             bass_zoom_strength: 0.8,
             painter_kind: PainterKind::PrintHead,
             contrast: 1.5,
@@ -4712,7 +4730,8 @@ mod tests {
         assert_eq!(restored.distortion_plus_yaw,     original.distortion_plus_yaw,     "distortion_plus_yaw failed");
         assert_eq!(restored.distortion_plus_pitch,   original.distortion_plus_pitch,   "distortion_plus_pitch failed");
         assert_eq!(restored.distortion_plus_roll,    original.distortion_plus_roll,    "distortion_plus_roll failed");
-        assert_eq!(restored.shake_enabled, original.shake_enabled, "shake_enabled failed");
+        assert_eq!(restored.midi_shake_enabled,  original.midi_shake_enabled,  "midi_shake_enabled failed");
+        assert_eq!(restored.audio_shake_enabled, original.audio_shake_enabled, "audio_shake_enabled failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
         assert_eq!(restored.painter_kind, original.painter_kind, "painter_kind failed");
         assert_eq!(restored.contrast,        original.contrast,        "contrast failed");

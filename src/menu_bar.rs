@@ -28,7 +28,8 @@ pub enum LockTarget {
     ContrastPasses,
     Saturation,
     BassZoomStrength,
-    ShakeEnabled,
+    MidiShakeEnabled,
+    AudioShakeEnabled,
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +71,8 @@ pub enum ParamChange {
     DistortionPlusYaw(f32),
     DistortionPlusPitch(f32),
     DistortionPlusRoll(f32),
-    ShakeEnabled(bool),
+    MidiShakeEnabled(bool),
+    AudioShakeEnabled(bool),
     BassZoomStrength(f32),
     CurrentShape(crate::ShapeKind),
     FrameShape(crate::FrameShape),
@@ -165,7 +167,11 @@ impl MenuBar {
         let response = self.state.on_window_event(window, event);
         match event {
             winit::event::WindowEvent::KeyboardInput { .. } => {
-                self.ctx.wants_keyboard_input()
+                // Only block our hotkeys if egui actually consumed this key
+                // (e.g. text typed into a text-edit widget). wants_keyboard_input()
+                // returns true whenever any widget has focus (sliders too) and
+                // would silently swallow B/N/Y/Space even with no text field active.
+                response.consumed
             }
             winit::event::WindowEvent::MouseInput { .. }
             | winit::event::WindowEvent::CursorMoved { .. }
@@ -792,15 +798,15 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Audio", |ui| {
-            // Beat-reactive Shake
+            // MIDI Shake
             ui.horizontal(|ui| {
-                if Self::lock_button(ui, params.locks.shake_enabled).clicked() {
-                    changes.push(ParamChange::ToggleLock(LockTarget::ShakeEnabled));
+                if Self::lock_button(ui, params.locks.midi_shake_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::MidiShakeEnabled));
                 }
-                ui.add_enabled_ui(!params.locks.shake_enabled, |ui| {
-                    let mut shake = params.shake_enabled;
-                    if ui.checkbox(&mut shake, "Beat-reactive Shake").changed() {
-                        changes.push(ParamChange::ShakeEnabled(shake));
+                ui.add_enabled_ui(!params.locks.midi_shake_enabled, |ui| {
+                    let mut shake = params.midi_shake_enabled;
+                    if ui.checkbox(&mut shake, "MIDI Shake  (Space)").changed() {
+                        changes.push(ParamChange::MidiShakeEnabled(shake));
                     }
                 });
             });
@@ -873,6 +879,21 @@ impl MenuBar {
                 {
                     changes.push(ParamChange::PartyModeAggressiveness(agg));
                 }
+            });
+
+            ui.separator();
+
+            // Beat-Reactive Shake: audio beats drive kick_shake()
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.audio_shake_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::AudioShakeEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.audio_shake_enabled, |ui| {
+                    let mut as_en = params.audio_shake_enabled;
+                    if ui.checkbox(&mut as_en, "Beat-Reactive Shake").changed() {
+                        changes.push(ParamChange::AudioShakeEnabled(as_en));
+                    }
+                });
             });
         });
     }
