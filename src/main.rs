@@ -275,6 +275,26 @@ pub struct ParamLocks {
     pub ribbons_intensity: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioSourceMode {
+    #[default]
+    File,
+    Mic,
+    Loopback,
+    Silent,
+}
+
+impl AudioSourceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            AudioSourceMode::File     => "File",
+            AudioSourceMode::Mic      => "Mic",
+            AudioSourceMode::Loopback => "Loopback",
+            AudioSourceMode::Silent   => "Silent",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisualParams {
     pub current_shape: ShapeKind,
@@ -314,6 +334,7 @@ pub struct VisualParams {
     pub export_resolution: ResolutionPreset,
     pub export_framerate:  FramerateChoice,
     pub export_live_preview: bool,
+    pub audio_source_mode: AudioSourceMode,
 }
 
 impl Default for VisualParams {
@@ -356,6 +377,7 @@ impl Default for VisualParams {
             export_resolution: ResolutionPreset::HD720,
             export_framerate:  FramerateChoice::Fps60,
             export_live_preview: true,
+            audio_source_mode: AudioSourceMode::File,
         }
     }
 }
@@ -441,12 +463,15 @@ struct Preset {
     export_framerate: FramerateChoice,
     #[serde(default = "default_true")]
     export_live_preview: bool,
+    #[serde(default = "default_audio_source_mode")]
+    audio_source_mode: String,
 }
 
 fn default_one_f32()  -> f32  { 1.0 }
 fn default_half_f32() -> f32  { 0.5 }
 fn default_one_u32()  -> u32  { 1 }
 fn default_true()     -> bool { true }
+fn default_audio_source_mode() -> String { "File".to_string() }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -488,6 +513,7 @@ impl Preset {
             export_resolution: params.export_resolution,
             export_framerate:  params.export_framerate,
             export_live_preview: params.export_live_preview,
+            audio_source_mode: params.audio_source_mode.as_str().to_string(),
         }
     }
 
@@ -551,6 +577,12 @@ impl Preset {
         params.export_resolution  = self.export_resolution;
         params.export_framerate   = self.export_framerate;
         params.export_live_preview = self.export_live_preview;
+        params.audio_source_mode = match self.audio_source_mode.as_str() {
+            "Mic"      => AudioSourceMode::Mic,
+            "Loopback" => AudioSourceMode::Loopback,
+            "Silent"   => AudioSourceMode::Silent,
+            _          => AudioSourceMode::File,
+        };
     }
 }
 
@@ -1034,6 +1066,20 @@ fn save_preset(gpu: &GpuState) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("Write: {}", e))?;
     log::info!("Preset saved to {}", path.display());
     Ok(())
+}
+
+fn start_audio_for_mode(mode: AudioSourceMode) -> Option<audio::AudioCapture> {
+    match mode {
+        AudioSourceMode::Mic => match audio::AudioCapture::start(false) {
+            Ok(a)  => { log::info!("Mic capture started"); Some(a) }
+            Err(e) => { log::warn!("Mic capture failed: {} — audio source will be silent", e); None }
+        },
+        AudioSourceMode::Loopback => match audio::AudioCapture::start(true) {
+            Ok(a)  => { log::info!("Loopback capture started"); Some(a) }
+            Err(e) => { log::warn!("Loopback capture failed: {} — audio source will be silent", e); None }
+        },
+        AudioSourceMode::File | AudioSourceMode::Silent => None,
+    }
 }
 
 fn load_preset(gpu: &mut GpuState) -> Result<(), String> {
@@ -4336,6 +4382,7 @@ struct App {
     modifiers: winit::keyboard::ModifiersState,
     is_fullscreen: bool,
     menu_bar: Option<MenuBar>,
+    prev_audio_source_mode: AudioSourceMode,
 }
 
 impl App {
@@ -4349,6 +4396,7 @@ impl App {
             modifiers: winit::keyboard::ModifiersState::empty(),
             is_fullscreen: false,
             menu_bar: None,
+            prev_audio_source_mode: AudioSourceMode::File,
         }
     }
 }
@@ -4372,17 +4420,9 @@ impl ApplicationHandler for App {
         self.menu_bar = Some(menu_bar);
         log::info!("Window and GPU initialized");
 
-        let audio = match AudioCapture::start() {
-            Ok(a) => Some(a),
-            Err(e) => {
-                log::warn!(
-                    "Audio capture failed: {} — visualizer will run without audio reactivity",
-                    e
-                );
-                None
-            }
-        };
-        self.audio = audio;
+        // Audio capture is started lazily when the user selects Mic or Loopback
+        // source mode. Default mode is File, so no capture at startup.
+        self.audio = None;
 
         let midi = match MidiCapture::start() {
             Ok(m) => Some(m),
@@ -4416,6 +4456,19 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested | WindowEvent::Resized(_) => {}
             _ if egui_consumed => return,
             _ => {}
+        }
+
+        // Audio mode sync: restart (or stop) AudioCapture when source mode changes.
+        // Must happen before self.gpu is mutably borrowed so we can write self.audio freely.
+        // Covers both panel button clicks and preset loads.
+        {
+            let current_mode = self.gpu.as_ref()
+                .map(|g| g.params.audio_source_mode)
+                .unwrap_or_default();
+            if current_mode != self.prev_audio_source_mode {
+                self.audio = start_audio_for_mode(current_mode);
+                self.prev_audio_source_mode = current_mode;
+            }
         }
 
         let Some(gpu) = self.gpu.as_mut() else { return };
@@ -4644,16 +4697,16 @@ impl ApplicationHandler for App {
                                 let exp = gpu.export_state.as_ref().unwrap();
                                 let headless = if !gpu.params.export_live_preview { " [headless]" } else { "" };
                                 format!(
-                                    "abstrakt-deck — slice 24o — EXPORTING {}/{} ({:.0}%){} — {:.1} fps",
+                                    "abstrakt-deck — slice 24s — EXPORTING {}/{} ({:.0}%){} — {:.1} fps",
                                     exp.current_frame, exp.total_frames,
                                     exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
                                     headless, fps_val,
                                 )
                             }
                             Some(ExportPhase::Muxing) => {
-                                "abstrakt-deck — slice 24o — MUXING (ffmpeg)...".to_string()
+                                "abstrakt-deck — slice 24s — MUXING (ffmpeg)...".to_string()
                             }
-                            _ => format!("abstrakt-deck — slice 24o — {:.1} fps", fps_val),
+                            _ => format!("abstrakt-deck — slice 24s — {:.1} fps", fps_val),
                         };
                         window.set_title(&title);
                     }
@@ -4663,10 +4716,14 @@ impl ApplicationHandler for App {
 
                 let file_playing = gpu.audio_player.as_ref().is_some_and(|p| p.is_playing());
 
-                // Mic beat events — drain always; only apply shake when file is not playing
+                // Drain audio capture beat events; apply shake only in Mic/Loopback modes.
                 if let Some(audio) = &self.audio {
+                    let live_mode = matches!(
+                        gpu.params.audio_source_mode,
+                        AudioSourceMode::Mic | AudioSourceMode::Loopback
+                    );
                     while let Ok(event) = audio.event_rx.try_recv() {
-                        if !file_playing {
+                        if live_mode {
                             match event {
                                 AudioEvent::Beat(strength) => {
                                     if gpu.params.audio_shake_enabled {
@@ -4684,39 +4741,52 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // Choose audio source: file player if active, otherwise mic
-                let file_energies: Option<([f32; 8], f32)> = if file_playing {
-                    if let (Some(player), Some(audio)) = (&gpu.audio_player, &gpu.loaded_audio) {
-                        Some(compute_file_energies(player, audio))
+                let mode = gpu.params.audio_source_mode;
+
+                // Compute file energies only in File mode while the player is active.
+                let file_energies: Option<([f32; 8], f32)> =
+                    if matches!(mode, AudioSourceMode::File) && file_playing {
+                        if let (Some(player), Some(audio)) = (&gpu.audio_player, &gpu.loaded_audio) {
+                            Some(compute_file_energies(player, audio))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
 
-                // Per-frame beat_decay decay for the file-playing path.
-                // For the mic path, BeatAnalyzer maintains its own decay per chunk.
                 let frame_dt = gpu.last_audio_update.elapsed().as_secs_f32().clamp(0.001, 0.1);
                 gpu.last_audio_update = Instant::now();
 
-                let raw_bands: [f32; 8] = match file_energies {
-                    Some((bands, rms)) => {
-                        // Beat-shake from file: RMS threshold crossing
-                        if gpu.params.audio_shake_enabled {
-                            let threshold = gpu.file_rms_baseline * 1.5 + 0.01;
-                            if rms > threshold && gpu.last_file_beat.elapsed().as_millis() > 120 {
-                                let strength = ((rms / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
-                                gpu.kick_shake(strength);
-                                gpu.last_file_beat = Instant::now();
-                                gpu.shader_beat_decay = gpu.shader_beat_decay.max(strength);
+                let raw_bands: [f32; 8] = match mode {
+                    AudioSourceMode::Silent => {
+                        gpu.shader_beat_decay = 0.0;
+                        [0.0; 8]
+                    }
+                    AudioSourceMode::File => {
+                        match file_energies {
+                            Some((bands, rms)) => {
+                                if gpu.params.audio_shake_enabled {
+                                    let threshold = gpu.file_rms_baseline * 1.5 + 0.01;
+                                    if rms > threshold && gpu.last_file_beat.elapsed().as_millis() > 120 {
+                                        let strength = ((rms / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
+                                        gpu.kick_shake(strength);
+                                        gpu.last_file_beat = Instant::now();
+                                        gpu.shader_beat_decay = gpu.shader_beat_decay.max(strength);
+                                    }
+                                }
+                                gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
+                                gpu.shader_beat_decay *= (-5.0 * frame_dt).exp();
+                                bands
+                            }
+                            None => {
+                                // File mode but not playing — decay and zero out.
+                                gpu.shader_beat_decay *= (-5.0 * frame_dt).exp();
+                                [0.0; 8]
                             }
                         }
-                        gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
-                        gpu.shader_beat_decay *= (-5.0 * frame_dt).exp();
-                        bands
                     }
-                    None => {
+                    AudioSourceMode::Mic | AudioSourceMode::Loopback => {
                         let (bands, bd) = self.audio.as_ref()
                             .map(|a| { let s = a.state.lock(); (s.bands, s.beat_decay) })
                             .unwrap_or(([0.0; 8], 0.0));
@@ -4988,6 +5058,11 @@ impl ApplicationHandler for App {
                                 Err(e) => log::error!("Export failed to start: {}", e),
                             }
                         }
+                        ParamChange::SetAudioSourceMode(v) => {
+                            gpu.params.audio_source_mode = v;
+                            // Actual AudioCapture restart is handled by the mode sync check
+                            // at the top of window_event on the next event.
+                        }
                     }
                 }
 
@@ -4995,11 +5070,11 @@ impl ApplicationHandler for App {
                     let title = if let Some(rec) = gpu.recorder.as_ref() {
                         let secs = rec.elapsed().as_secs();
                         format!(
-                            "abstrakt-deck — slice 24o — ● REC {}:{:02} — {:.1} fps",
+                            "abstrakt-deck — slice 24s — ● REC {}:{:02} — {:.1} fps",
                             secs / 60, secs % 60, fps
                         )
                     } else {
-                        format!("abstrakt-deck — slice 24o — {:.1} fps", fps)
+                        format!("abstrakt-deck — slice 24s — {:.1} fps", fps)
                     };
                     window.set_title(&title);
                 }
@@ -5142,6 +5217,7 @@ mod tests {
             export_resolution: ResolutionPreset::FullHD,
             export_framerate:  FramerateChoice::Fps30,
             export_live_preview: false,
+            audio_source_mode: AudioSourceMode::Mic,
         }
     }
 
@@ -5194,6 +5270,7 @@ mod tests {
         assert_eq!(restored.export_resolution,   original.export_resolution,   "export_resolution failed");
         assert_eq!(restored.export_framerate,    original.export_framerate,    "export_framerate failed");
         assert_eq!(restored.export_live_preview, original.export_live_preview, "export_live_preview failed");
+        assert_eq!(restored.audio_source_mode,   original.audio_source_mode,   "audio_source_mode failed");
     }
 
     #[test]

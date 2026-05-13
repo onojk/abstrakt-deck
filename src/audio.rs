@@ -66,19 +66,32 @@ fn bands_from_magnitudes(mags: &[f32], sample_rate: u32, fft_size: usize) -> [f3
 }
 
 impl AudioCapture {
-    pub fn start() -> Result<Self, String> {
+    /// `prefer_monitor`: if true, prefer a "monitor" (loopback) input device; falls back to
+    /// default input with a warning. If false, use default input directly (microphone).
+    pub fn start(prefer_monitor: bool) -> Result<Self, String> {
         let host = cpal::default_host();
 
-        let device = host
-            .input_devices()
-            .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
-            .find(|d| {
-                d.name()
-                    .map(|n| n.to_lowercase().contains("monitor"))
-                    .unwrap_or(false)
-            })
-            .or_else(|| host.default_input_device())
-            .ok_or_else(|| "No audio input device found".to_string())?;
+        let device = if prefer_monitor {
+            let monitor = host
+                .input_devices()
+                .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
+                .find(|d| {
+                    d.name()
+                        .map(|n| n.to_lowercase().contains("monitor"))
+                        .unwrap_or(false)
+                });
+            match monitor {
+                Some(d) => d,
+                None => {
+                    log::warn!("No monitor/loopback device found — falling back to default input device");
+                    host.default_input_device()
+                        .ok_or_else(|| "No audio input device found".to_string())?
+                }
+            }
+        } else {
+            host.default_input_device()
+                .ok_or_else(|| "No audio input device found".to_string())?
+        };
 
         let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
         log::info!("Audio device: {}", device_name);
@@ -175,6 +188,11 @@ struct BeatAnalyzer {
     beat_cooldown_ms: u64,
     rms_smoothed: f32,
     beat_decay: f32,
+    // Per-band AGC: tracks the running peak of each band energy.
+    // Initialised to 0.0 so the first real signal immediately sets the scale.
+    band_peak: [f32; 8],
+    agc_log_timer: Instant,
+    agc_logged: bool,
 }
 
 impl BeatAnalyzer {
@@ -194,6 +212,9 @@ impl BeatAnalyzer {
             beat_cooldown_ms: 120,
             rms_smoothed: 0.0,
             beat_decay: 0.0,
+            band_peak: [0.0; 8],
+            agc_log_timer: Instant::now(),
+            agc_logged: false,
         }
     }
 
@@ -262,7 +283,24 @@ impl BeatAnalyzer {
             .sum();
         self.prev_spectrum = magnitudes.clone();
 
-        let bands = bands_from_magnitudes(&magnitudes, self.sample_rate, self.fft_size);
+        let raw_bands = bands_from_magnitudes(&magnitudes, self.sample_rate, self.fft_size);
+
+        // Per-band AGC: track running peak, normalise output to [0, 1].
+        // band_peak starts at 0.0 so the first real signal immediately sets the scale.
+        let mut bands = [0.0f32; 8];
+        for b in 0..8 {
+            self.band_peak[b] = (self.band_peak[b] * 0.999).max(raw_bands[b]);
+            bands[b] = if self.band_peak[b] > 1e-9 {
+                (raw_bands[b] / self.band_peak[b]).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+
+        if !self.agc_logged && self.agc_log_timer.elapsed().as_secs() >= 5 {
+            log::debug!("AGC band_peak after 5s: {:?}", self.band_peak);
+            self.agc_logged = true;
+        }
 
         // Continuous exponential decay per chunk (dt = chunk duration in seconds)
         let dt = self.fft_size as f32 / self.sample_rate as f32;
@@ -292,7 +330,7 @@ impl BeatAnalyzer {
             }
         }
 
-        if flux > threshold && flux > 0.01 {
+        if flux > threshold && flux > 0.5 {
             let strength = ((flux / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
             self.beat_decay = self.beat_decay.max(1.0);
             self.last_beat = Some(Instant::now());

@@ -99,6 +99,7 @@ pub enum ParamChange {
     ExportFramerate(crate::FramerateChoice),
     SetExportLivePreview(bool),
     TriggerExport,
+    SetAudioSourceMode(crate::AudioSourceMode),
 }
 
 #[derive(Clone, Copy)]
@@ -804,6 +805,22 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Audio", |ui| {
+            // Source mode selector
+            ui.horizontal(|ui| {
+                ui.label("Source:");
+                for (mode, label) in [
+                    (crate::AudioSourceMode::File,     "File"),
+                    (crate::AudioSourceMode::Mic,      "Mic"),
+                    (crate::AudioSourceMode::Loopback, "Loopback"),
+                    (crate::AudioSourceMode::Silent,   "Silent"),
+                ] {
+                    let selected = params.audio_source_mode == mode;
+                    if ui.selectable_label(selected, label).clicked() && !selected {
+                        changes.push(ParamChange::SetAudioSourceMode(mode));
+                    }
+                }
+            });
+
             // MIDI Shake
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.midi_shake_enabled).clicked() {
