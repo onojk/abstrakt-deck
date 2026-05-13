@@ -33,6 +33,9 @@ pub enum LockTarget {
     AudioShakeEnabled,
     RibbonsEnabled,
     RibbonsIntensity,
+    PaletteMode,
+    PaletteTint,
+    PaletteMonoHue,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +105,9 @@ pub enum ParamChange {
     SetExportLivePreview(bool),
     TriggerExport,
     SetAudioSourceMode(crate::AudioSourceMode),
+    SetPaletteMode(crate::PaletteMode),
+    PaletteTint(f32),
+    PaletteMonoHue(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -364,6 +370,8 @@ impl MenuBar {
                             Self::modes_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::ribbons_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::palette_section(ui, current_params, &mut frame_changes);
                         });
                     });
             }
@@ -896,6 +904,66 @@ impl MenuBar {
                         changes.push(ParamChange::RibbonsIntensity(intensity));
                     }
                 });
+            });
+        });
+    }
+
+    fn palette_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Palette", |ui| {
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.palette_mode).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::PaletteMode));
+                }
+                ui.add_enabled_ui(!params.locks.palette_mode, |ui| {
+                    let mut current = params.palette_mode;
+                    egui::ComboBox::from_label("Mode")
+                        .selected_text(params.palette_mode.as_str())
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                crate::PaletteMode::Off,
+                                crate::PaletteMode::Warm,
+                                crate::PaletteMode::Cool,
+                                crate::PaletteMode::Earth,
+                                crate::PaletteMode::Neon,
+                                crate::PaletteMode::Monochrome,
+                            ] {
+                                if ui.selectable_value(&mut current, mode, mode.as_str()).clicked() {
+                                    changes.push(ParamChange::SetPaletteMode(mode));
+                                }
+                            }
+                        });
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.palette_tint).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::PaletteTint));
+                }
+                ui.add_enabled_ui(!params.locks.palette_tint, |ui| {
+                    let mut tint = params.palette_tint;
+                    if ui.add(egui::Slider::new(&mut tint, 0.0..=1.0).text("Tint").step_by(0.05)).changed() {
+                        changes.push(ParamChange::PaletteTint(tint));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.palette_mono_hue).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::PaletteMonoHue));
+                }
+                ui.add_enabled_ui(
+                    !params.locks.palette_mono_hue && params.palette_mode == crate::PaletteMode::Monochrome,
+                    |ui| {
+                        let mut hue = params.palette_mono_hue;
+                        if ui.add(egui::Slider::new(&mut hue, 0.0..=360.0).text("Mono Hue").step_by(1.0)).changed() {
+                            changes.push(ParamChange::PaletteMonoHue(hue));
+                        }
+                    },
+                );
             });
         });
     }

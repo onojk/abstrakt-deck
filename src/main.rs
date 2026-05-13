@@ -37,6 +37,15 @@ const RIBBON_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PaletteUniforms {
+    mode:     u32,
+    tint:     f32,
+    mono_hue: f32,
+    _pad:     f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobalUniforms {
     time_seconds: f32,
     resolution_x: f32,
@@ -274,6 +283,44 @@ pub struct ParamLocks {
     // Ribbons
     pub ribbons_enabled:   bool,
     pub ribbons_intensity: bool,
+    // Palette
+    pub palette_mode:     bool,
+    pub palette_tint:     bool,
+    pub palette_mono_hue: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaletteMode {
+    #[default]
+    Off,
+    Warm,
+    Cool,
+    Earth,
+    Neon,
+    Monochrome,
+}
+
+impl PaletteMode {
+    fn to_u32(self) -> u32 {
+        match self {
+            PaletteMode::Off        => 0,
+            PaletteMode::Warm       => 1,
+            PaletteMode::Cool       => 2,
+            PaletteMode::Earth      => 3,
+            PaletteMode::Neon       => 4,
+            PaletteMode::Monochrome => 5,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaletteMode::Off        => "Off",
+            PaletteMode::Warm       => "Warm",
+            PaletteMode::Cool       => "Cool",
+            PaletteMode::Earth      => "Earth",
+            PaletteMode::Neon       => "Neon",
+            PaletteMode::Monochrome => "Monochrome",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -346,6 +393,9 @@ pub struct VisualParams {
     pub export_framerate:  FramerateChoice,
     pub export_live_preview: bool,
     pub audio_source_mode: AudioSourceMode,
+    pub palette_mode:     PaletteMode,
+    pub palette_tint:     f32,
+    pub palette_mono_hue: f32,
 }
 
 impl Default for VisualParams {
@@ -390,6 +440,9 @@ impl Default for VisualParams {
             export_framerate:  FramerateChoice::Fps60,
             export_live_preview: true,
             audio_source_mode: AudioSourceMode::File,
+            palette_mode:     PaletteMode::Off,
+            palette_tint:     1.0,
+            palette_mono_hue: 200.0,
         }
     }
 }
@@ -479,6 +532,12 @@ struct Preset {
     export_live_preview: bool,
     #[serde(default = "default_audio_source_mode")]
     audio_source_mode: String,
+    #[serde(default = "default_palette_mode")]
+    palette_mode: String,
+    #[serde(default = "default_one_f32")]
+    palette_tint: f32,
+    #[serde(default = "default_palette_mono_hue")]
+    palette_mono_hue: f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -486,7 +545,9 @@ fn default_half_f32()         -> f32    { 0.5 }
 fn default_quarter_f32()      -> f32    { 0.25 }
 fn default_one_u32()          -> u32    { 1 }
 fn default_true()             -> bool   { true }
-fn default_audio_source_mode() -> String { "File".to_string() }
+fn default_audio_source_mode()  -> String { "File".to_string() }
+fn default_palette_mode()       -> String { "Off".to_string() }
+fn default_palette_mono_hue()   -> f32    { 200.0 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -530,6 +591,9 @@ impl Preset {
             export_framerate:  params.export_framerate,
             export_live_preview: params.export_live_preview,
             audio_source_mode: params.audio_source_mode.as_str().to_string(),
+            palette_mode:     params.palette_mode.as_str().to_string(),
+            palette_tint:     params.palette_tint,
+            palette_mono_hue: params.palette_mono_hue,
         }
     }
 
@@ -600,6 +664,16 @@ impl Preset {
             "Silent"   => AudioSourceMode::Silent,
             _          => AudioSourceMode::File,
         };
+        params.palette_mode = match self.palette_mode.as_str() {
+            "Warm"       => PaletteMode::Warm,
+            "Cool"       => PaletteMode::Cool,
+            "Earth"      => PaletteMode::Earth,
+            "Neon"       => PaletteMode::Neon,
+            "Monochrome" => PaletteMode::Monochrome,
+            _            => PaletteMode::Off,
+        };
+        params.palette_tint     = self.palette_tint;
+        params.palette_mono_hue = self.palette_mono_hue;
     }
 }
 
@@ -1374,6 +1448,16 @@ struct GpuState {
     ribbon_update_pipeline:  wgpu::RenderPipeline,
     ribbon_composite_pipeline: wgpu::RenderPipeline,
 
+    // Palette pass (pass 1c): scratch+copy approach (Option A)
+    palette_uniforms_buffer:  wgpu::Buffer,
+    #[allow(dead_code)]
+    palette_bgl:              wgpu::BindGroupLayout,
+    palette_bind_group:       wgpu::BindGroup,
+    palette_pipeline:         wgpu::RenderPipeline,
+    #[allow(dead_code)]
+    palette_scratch_texture:  wgpu::Texture,
+    palette_scratch_view:     wgpu::TextureView,
+
     // Export ribbon FBOs (persistent across export frames, None when not exporting)
     export_ribbon: Option<ExportRibbonState>,
 
@@ -1617,7 +1701,7 @@ impl GpuState {
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let painter_view = painter_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2613,6 +2697,65 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        // ── Palette pass resources (pass 1c) ────────────────────────────────
+        let palette_scratch_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Palette scratch"),
+            size: wgpu::Extent3d {
+                width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+            },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PAINTER_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let palette_scratch_view = palette_scratch_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let palette_uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Palette uniforms"),
+            contents: bytemuck::cast_slice(&[PaletteUniforms { mode: 0, tint: 1.0, mono_hue: 200.0, _pad: 0.0 }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let palette_bgl = Self::make_uts_bgl(&device, "Palette BGL");
+        let palette_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Palette BG"),
+            layout: &palette_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: palette_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&painter_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&painter_sampler) },
+            ],
+        });
+        let palette_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Palette shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/palette.wgsl").into()),
+        });
+        let palette_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Palette pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None, bind_group_layouts: &[&palette_bgl], push_constant_ranges: &[],
+            })),
+            vertex: wgpu::VertexState {
+                module: &palette_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &palette_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: PAINTER_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+
         Self {
             surface, device, queue, config, size,
             uniforms_buffer,
@@ -2642,6 +2785,8 @@ impl GpuState {
             ribbon_bg_read_a, ribbon_bg_read_b,
             ribbon_composite_bg_a, ribbon_composite_bg_b,
             ribbon_update_pipeline, ribbon_composite_pipeline,
+            palette_uniforms_buffer, palette_bgl, palette_bind_group, palette_pipeline,
+            palette_scratch_texture, palette_scratch_view,
             export_ribbon: None,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
@@ -3123,6 +3268,46 @@ impl GpuState {
                 pass.set_bind_group(0, composite_bg, &[]);
                 pass.draw(0..3, 0..1);
             }
+        }
+
+        // Pass 1c: palette clamp (optional, skipped when Off)
+        if self.params.palette_mode != PaletteMode::Off {
+            self.queue.write_buffer(&self.palette_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[PaletteUniforms {
+                    mode:     self.params.palette_mode.to_u32(),
+                    tint:     self.params.palette_tint,
+                    mono_hue: self.params.palette_mono_hue,
+                    _pad:     0.0,
+                }]));
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Palette pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.palette_scratch_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.palette_pipeline);
+                pass.set_bind_group(0, &self.palette_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.palette_scratch_texture,
+                    mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.painter_texture,
+                    mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+                },
+            );
         }
 
         // Pass 2: shape → shape FBO
@@ -3894,6 +4079,46 @@ impl GpuState {
             }
         }
 
+        // Pass 1c: palette clamp for export path
+        if self.params.palette_mode != PaletteMode::Off {
+            self.queue.write_buffer(&self.palette_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[PaletteUniforms {
+                    mode:     self.params.palette_mode.to_u32(),
+                    tint:     self.params.palette_tint,
+                    mono_hue: self.params.palette_mono_hue,
+                    _pad:     0.0,
+                }]));
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Export palette pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.palette_scratch_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None, occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.palette_pipeline);
+                pass.set_bind_group(0, &self.palette_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            enc.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.palette_scratch_texture,
+                    mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.painter_texture,
+                    mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+                },
+            );
+        }
+
         // Pass 2: shape → export-res shape view
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4177,6 +4402,18 @@ impl GpuState {
         if !self.params.locks.distortion_plus_yaw     { self.params.distortion_plus_yaw     = rng.gen_range(-180.0_f32..=180.0); }
         if !self.params.locks.distortion_plus_pitch   { self.params.distortion_plus_pitch   = rng.gen_range(-45.0_f32..=45.0); }
         if !self.params.locks.distortion_plus_roll    { self.params.distortion_plus_roll    = rng.gen_range(-180.0_f32..=180.0); }
+        if !self.params.locks.palette_mode {
+            self.params.palette_mode = match rng.gen_range(0u8..6) {
+                0 => PaletteMode::Off,
+                1 => PaletteMode::Warm,
+                2 => PaletteMode::Cool,
+                3 => PaletteMode::Earth,
+                4 => PaletteMode::Neon,
+                _ => PaletteMode::Monochrome,
+            };
+        }
+        if !self.params.locks.palette_tint     { self.params.palette_tint     = rng.gen_range(0.0_f32..=1.0); }
+        if !self.params.locks.palette_mono_hue { self.params.palette_mono_hue = rng.gen_range(0.0_f32..=360.0); }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -5058,6 +5295,9 @@ impl ApplicationHandler for App {
                                 LockTarget::AudioShakeEnabled  => gpu.params.locks.audio_shake_enabled  = !gpu.params.locks.audio_shake_enabled,
                                 LockTarget::RibbonsEnabled     => gpu.params.locks.ribbons_enabled      = !gpu.params.locks.ribbons_enabled,
                                 LockTarget::RibbonsIntensity   => gpu.params.locks.ribbons_intensity    = !gpu.params.locks.ribbons_intensity,
+                                LockTarget::PaletteMode        => gpu.params.locks.palette_mode         = !gpu.params.locks.palette_mode,
+                                LockTarget::PaletteTint        => gpu.params.locks.palette_tint         = !gpu.params.locks.palette_tint,
+                                LockTarget::PaletteMonoHue     => gpu.params.locks.palette_mono_hue     = !gpu.params.locks.palette_mono_hue,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -5085,6 +5325,9 @@ impl ApplicationHandler for App {
                             // Actual AudioCapture restart is handled by the mode sync check
                             // at the top of window_event on the next event.
                         }
+                        ParamChange::SetPaletteMode(v)  => gpu.params.palette_mode     = v,
+                        ParamChange::PaletteTint(v)     => gpu.params.palette_tint     = v,
+                        ParamChange::PaletteMonoHue(v)  => gpu.params.palette_mono_hue = v,
                     }
                 }
 
@@ -5241,6 +5484,9 @@ mod tests {
             export_framerate:  FramerateChoice::Fps30,
             export_live_preview: false,
             audio_source_mode: AudioSourceMode::Mic,
+            palette_mode:     PaletteMode::Cool,
+            palette_tint:     0.7,
+            palette_mono_hue: 280.0,
         }
     }
 
@@ -5295,6 +5541,9 @@ mod tests {
         assert_eq!(restored.export_framerate,    original.export_framerate,    "export_framerate failed");
         assert_eq!(restored.export_live_preview, original.export_live_preview, "export_live_preview failed");
         assert_eq!(restored.audio_source_mode,   original.audio_source_mode,   "audio_source_mode failed");
+        assert_eq!(restored.palette_mode,     original.palette_mode,     "palette_mode failed");
+        assert_eq!(restored.palette_tint,     original.palette_tint,     "palette_tint failed");
+        assert_eq!(restored.palette_mono_hue, original.palette_mono_hue, "palette_mono_hue failed");
     }
 
     #[test]
