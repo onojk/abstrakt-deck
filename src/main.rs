@@ -37,6 +37,15 @@ const RIBBON_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlackholeUniforms {
+    warp_strength:  f32,
+    warp_curve:     f32,
+    alpha_radius:   f32,
+    cycle_progress: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PaletteUniforms {
     mode:     u32,
     tint:     f32,
@@ -287,6 +296,12 @@ pub struct ParamLocks {
     pub palette_mode:     bool,
     pub palette_tint:     bool,
     pub palette_mono_hue: bool,
+    // Blackhole
+    pub blackhole_enabled:      bool,
+    pub blackhole_warp_strength: bool,
+    pub blackhole_warp_curve:    bool,
+    pub blackhole_alpha_radius:  bool,
+    pub blackhole_fallback_hz:   bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -396,6 +411,11 @@ pub struct VisualParams {
     pub palette_mode:     PaletteMode,
     pub palette_tint:     f32,
     pub palette_mono_hue: f32,
+    pub blackhole_enabled:       bool,
+    pub blackhole_warp_strength: f32,
+    pub blackhole_warp_curve:    f32,
+    pub blackhole_alpha_radius:  f32,
+    pub blackhole_fallback_hz:   f32,
 }
 
 impl Default for VisualParams {
@@ -443,6 +463,11 @@ impl Default for VisualParams {
             palette_mode:     PaletteMode::Off,
             palette_tint:     1.0,
             palette_mono_hue: 200.0,
+            blackhole_enabled:       false,
+            blackhole_warp_strength: 1.0,
+            blackhole_warp_curve:    2.0,
+            blackhole_alpha_radius:  0.5,
+            blackhole_fallback_hz:   1.0,
         }
     }
 }
@@ -538,6 +563,16 @@ struct Preset {
     palette_tint: f32,
     #[serde(default = "default_palette_mono_hue")]
     palette_mono_hue: f32,
+    #[serde(default)]
+    blackhole_enabled: bool,
+    #[serde(default = "default_one_f32")]
+    blackhole_warp_strength: f32,
+    #[serde(default = "default_blackhole_warp_curve")]
+    blackhole_warp_curve: f32,
+    #[serde(default = "default_blackhole_alpha_radius")]
+    blackhole_alpha_radius: f32,
+    #[serde(default = "default_one_f32")]
+    blackhole_fallback_hz: f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -546,8 +581,10 @@ fn default_quarter_f32()      -> f32    { 0.25 }
 fn default_one_u32()          -> u32    { 1 }
 fn default_true()             -> bool   { true }
 fn default_audio_source_mode()  -> String { "File".to_string() }
-fn default_palette_mode()       -> String { "Off".to_string() }
-fn default_palette_mono_hue()   -> f32    { 200.0 }
+fn default_palette_mode()          -> String { "Off".to_string() }
+fn default_palette_mono_hue()      -> f32    { 200.0 }
+fn default_blackhole_warp_curve()  -> f32    { 2.0 }
+fn default_blackhole_alpha_radius() -> f32   { 0.5 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -594,6 +631,11 @@ impl Preset {
             palette_mode:     params.palette_mode.as_str().to_string(),
             palette_tint:     params.palette_tint,
             palette_mono_hue: params.palette_mono_hue,
+            blackhole_enabled:       params.blackhole_enabled,
+            blackhole_warp_strength: params.blackhole_warp_strength,
+            blackhole_warp_curve:    params.blackhole_warp_curve,
+            blackhole_alpha_radius:  params.blackhole_alpha_radius,
+            blackhole_fallback_hz:   params.blackhole_fallback_hz,
         }
     }
 
@@ -674,6 +716,11 @@ impl Preset {
         };
         params.palette_tint     = self.palette_tint;
         params.palette_mono_hue = self.palette_mono_hue;
+        params.blackhole_enabled       = self.blackhole_enabled;
+        params.blackhole_warp_strength = self.blackhole_warp_strength;
+        params.blackhole_warp_curve    = self.blackhole_warp_curve;
+        params.blackhole_alpha_radius  = self.blackhole_alpha_radius;
+        params.blackhole_fallback_hz   = self.blackhole_fallback_hz;
     }
 }
 
@@ -1448,6 +1495,19 @@ struct GpuState {
     ribbon_update_pipeline:  wgpu::RenderPipeline,
     ribbon_composite_pipeline: wgpu::RenderPipeline,
 
+    // Blackhole pass (conditional pass 5): beat-synced snapshot-warp
+    snapshot_texture:           wgpu::Texture,
+    snapshot_view:              wgpu::TextureView,
+    blackhole_uniforms_buffer:  wgpu::Buffer,
+    #[allow(dead_code)]
+    blackhole_bgl:              wgpu::BindGroupLayout,
+    blackhole_bind_group:       wgpu::BindGroup,
+    blackhole_pipeline:         wgpu::RenderPipeline,
+    blackhole_cycle_progress:   f32,
+    blackhole_last_beat_seen:   bool,
+    blackhole_last_cycle_reset: Instant,
+    blackhole_was_enabled:      bool,
+
     // Palette pass (pass 1c): scratch+copy approach (Option A)
     palette_uniforms_buffer:  wgpu::Buffer,
     #[allow(dead_code)]
@@ -1473,6 +1533,7 @@ struct GpuState {
     help_overlay: HelpOverlay,
 
     start_time: Instant,
+    last_frame_time: Instant,
 
     shake_offset: glam::Vec3,
     shake_velocity: glam::Vec3,
@@ -2697,6 +2758,96 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        // ── Blackhole pass resources (conditional pass 5) ───────────────────
+        let snapshot_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blackhole snapshot"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let snapshot_view = snapshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let blackhole_uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Blackhole uniforms"),
+            contents: bytemuck::cast_slice(&[BlackholeUniforms {
+                warp_strength: 1.0, warp_curve: 2.0, alpha_radius: 0.5, cycle_progress: 0.0,
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let blackhole_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Blackhole BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blackhole_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blackhole BG"),
+            layout: &blackhole_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: blackhole_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&snapshot_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&scene_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&shape_sampler) },
+            ],
+        });
+        let blackhole_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Blackhole shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blackhole.wgsl").into()),
+        });
+        let blackhole_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Blackhole pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None, bind_group_layouts: &[&blackhole_bgl], push_constant_ranges: &[],
+            })),
+            vertex: wgpu::VertexState {
+                module: &blackhole_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blackhole_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+
         // ── Palette pass resources (pass 1c) ────────────────────────────────
         let palette_scratch_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Palette scratch"),
@@ -2785,6 +2936,12 @@ impl GpuState {
             ribbon_bg_read_a, ribbon_bg_read_b,
             ribbon_composite_bg_a, ribbon_composite_bg_b,
             ribbon_update_pipeline, ribbon_composite_pipeline,
+            snapshot_texture, snapshot_view,
+            blackhole_uniforms_buffer, blackhole_bgl, blackhole_bind_group, blackhole_pipeline,
+            blackhole_cycle_progress:   0.0,
+            blackhole_last_beat_seen:   false,
+            blackhole_last_cycle_reset: Instant::now(),
+            blackhole_was_enabled:      false,
             palette_uniforms_buffer, palette_bgl, palette_bind_group, palette_pipeline,
             palette_scratch_texture, palette_scratch_view,
             export_ribbon: None,
@@ -2794,6 +2951,7 @@ impl GpuState {
             export_state: None,
             help_overlay,
             start_time: Instant::now(),
+            last_frame_time: Instant::now(),
             shake_offset: glam::Vec3::ZERO,
             shake_velocity: glam::Vec3::ZERO,
             bass_zoom_smoothed: 0.0,
@@ -2969,6 +3127,29 @@ impl GpuState {
             ],
         });
 
+        // Recreate snapshot texture and rebuild blackhole bind group (both textures changed).
+        self.snapshot_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blackhole snapshot"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.snapshot_view = self.snapshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.blackhole_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blackhole BG"),
+            layout: &self.blackhole_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.blackhole_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.snapshot_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.scene_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+            ],
+        });
+        self.blackhole_cycle_progress = 0.0;
+
         let (rb, rp) = Self::create_readback_buffer(&self.device, w, h);
         self.readback_buffer = rb;
         self.readback_padded_bytes_per_row = rp;
@@ -3134,8 +3315,10 @@ impl GpuState {
         let cam = glam::Mat4::look_at_rh(
             glam::Vec3::new(0.0, 0.5, 3.0), glam::Vec3::ZERO, glam::Vec3::Y,
         );
-        // Spring-damping decay of shake offset toward zero
-        let dt = 1.0 / 60.0;
+        // Real-time dt for spring-damper and blackhole cycle.
+        // Previously hardcoded to 1/60; now frame-rate-accurate.
+        let dt = self.last_frame_time.elapsed().as_secs_f32().clamp(0.001, 0.1);
+        self.last_frame_time = Instant::now();
         let stiffness = 30.0_f32;
         let damping = 8.0_f32;
         let force = -stiffness * self.shake_offset - damping * self.shake_velocity;
@@ -3412,8 +3595,11 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 5: blit scene FBO → swapchain
-        {
+        // Pass 5: blit scene FBO → swapchain (or blackhole when enabled).
+        // Note: blackhole effect is live-path only for this slice.
+        // Export path always uses the existing direct blit.
+        // Deterministic snapshot timing for export deferred.
+        if !self.params.blackhole_enabled {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Blit pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3429,6 +3615,84 @@ impl GpuState {
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);
+            self.blackhole_was_enabled = false;
+        } else {
+            // ── Blackhole pass ──────────────────────────────────────────────
+            let blackhole_just_enabled = !self.blackhole_was_enabled;
+            self.blackhole_was_enabled = true;
+
+            let audio_active = match self.params.audio_source_mode {
+                AudioSourceMode::Silent => false,
+                AudioSourceMode::File => self.audio_player.as_ref()
+                    .map(|p| p.is_playing()).unwrap_or(false),
+                AudioSourceMode::Mic | AudioSourceMode::Loopback =>
+                    self.shader_beat_decay > 0.01,
+            };
+
+            let beat_now = self.shader_beat_decay > 0.7;
+            let rising_edge = beat_now
+                && !self.blackhole_last_beat_seen
+                && self.blackhole_last_cycle_reset.elapsed().as_millis() > 120;
+            self.blackhole_last_beat_seen = beat_now;
+
+            let cycle_duration = if audio_active {
+                2.0_f32
+            } else {
+                (1.0 / self.params.blackhole_fallback_hz).clamp(0.2, 2.0)
+            };
+
+            let should_capture = blackhole_just_enabled
+                || (audio_active && rising_edge)
+                || (!audio_active && self.blackhole_cycle_progress >= 1.0);
+
+            if should_capture {
+                encoder.copy_texture_to_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &self.scene_texture,
+                        mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::ImageCopyTexture {
+                        texture: &self.snapshot_texture,
+                        mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: self.size.width, height: self.size.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                self.blackhole_cycle_progress = 0.0;
+                self.blackhole_last_cycle_reset = Instant::now();
+            } else {
+                self.blackhole_cycle_progress =
+                    (self.blackhole_cycle_progress + dt / cycle_duration).min(1.0);
+            }
+
+            self.queue.write_buffer(&self.blackhole_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[BlackholeUniforms {
+                    warp_strength:  self.params.blackhole_warp_strength,
+                    warp_curve:     self.params.blackhole_warp_curve,
+                    alpha_radius:   self.params.blackhole_alpha_radius,
+                    cycle_progress: self.blackhole_cycle_progress,
+                }]));
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Blackhole pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &screen_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.blackhole_pipeline);
+                pass.set_bind_group(0, &self.blackhole_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
 
         // Pass 6: help overlay (animated slide-in, drawn on top of swapchain)
@@ -4414,6 +4678,11 @@ impl GpuState {
         }
         if !self.params.locks.palette_tint     { self.params.palette_tint     = rng.gen_range(0.0_f32..=1.0); }
         if !self.params.locks.palette_mono_hue { self.params.palette_mono_hue = rng.gen_range(0.0_f32..=360.0); }
+        if !self.params.locks.blackhole_enabled      { self.params.blackhole_enabled      = rng.gen_bool(0.10); }
+        if !self.params.locks.blackhole_warp_strength { self.params.blackhole_warp_strength = rng.gen_range(0.0_f32..=1.0); }
+        if !self.params.locks.blackhole_warp_curve   { self.params.blackhole_warp_curve   = rng.gen_range(1.0_f32..=4.0); }
+        if !self.params.locks.blackhole_alpha_radius { self.params.blackhole_alpha_radius = rng.gen_range(0.2_f32..=1.0); }
+        if !self.params.locks.blackhole_fallback_hz  { self.params.blackhole_fallback_hz  = rng.gen_range(0.5_f32..=3.0); }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -5298,6 +5567,11 @@ impl ApplicationHandler for App {
                                 LockTarget::PaletteMode        => gpu.params.locks.palette_mode         = !gpu.params.locks.palette_mode,
                                 LockTarget::PaletteTint        => gpu.params.locks.palette_tint         = !gpu.params.locks.palette_tint,
                                 LockTarget::PaletteMonoHue     => gpu.params.locks.palette_mono_hue     = !gpu.params.locks.palette_mono_hue,
+                                LockTarget::BlackholeEnabled      => gpu.params.locks.blackhole_enabled      = !gpu.params.locks.blackhole_enabled,
+                                LockTarget::BlackholeWarpStrength => gpu.params.locks.blackhole_warp_strength = !gpu.params.locks.blackhole_warp_strength,
+                                LockTarget::BlackholeWarpCurve    => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
+                                LockTarget::BlackholeAlphaRadius  => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
+                                LockTarget::BlackholeFallbackHz   => gpu.params.locks.blackhole_fallback_hz   = !gpu.params.locks.blackhole_fallback_hz,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -5328,6 +5602,11 @@ impl ApplicationHandler for App {
                         ParamChange::SetPaletteMode(v)  => gpu.params.palette_mode     = v,
                         ParamChange::PaletteTint(v)     => gpu.params.palette_tint     = v,
                         ParamChange::PaletteMonoHue(v)  => gpu.params.palette_mono_hue = v,
+                        ParamChange::BlackholeEnabled(v)      => gpu.params.blackhole_enabled      = v,
+                        ParamChange::BlackholeWarpStrength(v) => gpu.params.blackhole_warp_strength = v,
+                        ParamChange::BlackholeWarpCurve(v)    => gpu.params.blackhole_warp_curve    = v,
+                        ParamChange::BlackholeAlphaRadius(v)  => gpu.params.blackhole_alpha_radius  = v,
+                        ParamChange::BlackholeFallbackHz(v)   => gpu.params.blackhole_fallback_hz   = v,
                     }
                 }
 
@@ -5487,6 +5766,11 @@ mod tests {
             palette_mode:     PaletteMode::Cool,
             palette_tint:     0.7,
             palette_mono_hue: 280.0,
+            blackhole_enabled:       true,
+            blackhole_warp_strength: 0.7,
+            blackhole_warp_curve:    3.0,
+            blackhole_alpha_radius:  0.6,
+            blackhole_fallback_hz:   1.5,
         }
     }
 
@@ -5544,6 +5828,11 @@ mod tests {
         assert_eq!(restored.palette_mode,     original.palette_mode,     "palette_mode failed");
         assert_eq!(restored.palette_tint,     original.palette_tint,     "palette_tint failed");
         assert_eq!(restored.palette_mono_hue, original.palette_mono_hue, "palette_mono_hue failed");
+        assert_eq!(restored.blackhole_enabled,       original.blackhole_enabled,       "blackhole_enabled failed");
+        assert_eq!(restored.blackhole_warp_strength, original.blackhole_warp_strength, "blackhole_warp_strength failed");
+        assert_eq!(restored.blackhole_warp_curve,    original.blackhole_warp_curve,    "blackhole_warp_curve failed");
+        assert_eq!(restored.blackhole_alpha_radius,  original.blackhole_alpha_radius,  "blackhole_alpha_radius failed");
+        assert_eq!(restored.blackhole_fallback_hz,   original.blackhole_fallback_hz,   "blackhole_fallback_hz failed");
     }
 
     #[test]

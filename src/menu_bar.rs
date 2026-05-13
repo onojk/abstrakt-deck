@@ -36,6 +36,11 @@ pub enum LockTarget {
     PaletteMode,
     PaletteTint,
     PaletteMonoHue,
+    BlackholeEnabled,
+    BlackholeWarpStrength,
+    BlackholeWarpCurve,
+    BlackholeAlphaRadius,
+    BlackholeFallbackHz,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +113,11 @@ pub enum ParamChange {
     SetPaletteMode(crate::PaletteMode),
     PaletteTint(f32),
     PaletteMonoHue(f32),
+    BlackholeEnabled(bool),
+    BlackholeWarpStrength(f32),
+    BlackholeWarpCurve(f32),
+    BlackholeAlphaRadius(f32),
+    BlackholeFallbackHz(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -372,6 +382,8 @@ impl MenuBar {
                             Self::ribbons_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::palette_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::blackhole_section(ui, current_params, &mut frame_changes);
                         });
                     });
             }
@@ -964,6 +976,74 @@ impl MenuBar {
                         }
                     },
                 );
+            });
+        });
+    }
+
+    fn blackhole_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Blackhole", |ui| {
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.blackhole_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.blackhole_enabled, |ui| {
+                    let mut en = params.blackhole_enabled;
+                    if ui.checkbox(&mut en, "Enabled").changed() {
+                        changes.push(ParamChange::BlackholeEnabled(en));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.blackhole_warp_strength).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeWarpStrength));
+                }
+                ui.add_enabled_ui(!params.locks.blackhole_warp_strength, |ui| {
+                    let mut v = params.blackhole_warp_strength;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Warp Strength").step_by(0.05)).changed() {
+                        changes.push(ParamChange::BlackholeWarpStrength(v));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.blackhole_warp_curve).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeWarpCurve));
+                }
+                ui.add_enabled_ui(!params.locks.blackhole_warp_curve, |ui| {
+                    let mut v = params.blackhole_warp_curve;
+                    if ui.add(egui::Slider::new(&mut v, 1.0..=4.0).text("Warp Curve").step_by(0.1)).changed() {
+                        changes.push(ParamChange::BlackholeWarpCurve(v));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.blackhole_alpha_radius).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeAlphaRadius));
+                }
+                ui.add_enabled_ui(!params.locks.blackhole_alpha_radius, |ui| {
+                    let mut v = params.blackhole_alpha_radius;
+                    if ui.add(egui::Slider::new(&mut v, 0.2..=1.0).text("Alpha Radius").step_by(0.05)).changed() {
+                        changes.push(ParamChange::BlackholeAlphaRadius(v));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.blackhole_fallback_hz).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BlackholeFallbackHz));
+                }
+                ui.add_enabled_ui(!params.locks.blackhole_fallback_hz, |ui| {
+                    let mut v = params.blackhole_fallback_hz;
+                    if ui.add(egui::Slider::new(&mut v, 0.5..=3.0).text("Fallback Hz").step_by(0.1)).changed() {
+                        changes.push(ParamChange::BlackholeFallbackHz(v));
+                    }
+                });
             });
         });
     }
