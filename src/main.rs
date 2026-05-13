@@ -43,6 +43,15 @@ struct GlobalUniforms {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PainterAudioUniforms {
+    time_seconds: f32,
+    bass:         f32,  // bass_zoom_smoothed — peaks on bass/beat hits
+    mid:          f32,  // bass_mid_smoothed
+    _pad:         f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Transform {
     mvp: [[f32; 4]; 4],
 }
@@ -134,24 +143,33 @@ pub enum PainterKind {
     Spiral,
     Plasma,
     Skin,
+    AudioPaint,
+    PrintHead,
+    Image,
 }
 
 impl PainterKind {
     pub fn next(self) -> Self {
         match self {
-            PainterKind::HueStripe => PainterKind::Spiral,
-            PainterKind::Spiral    => PainterKind::Plasma,
-            PainterKind::Plasma    => PainterKind::Skin,
-            PainterKind::Skin      => PainterKind::HueStripe,
+            PainterKind::HueStripe  => PainterKind::Spiral,
+            PainterKind::Spiral     => PainterKind::Plasma,
+            PainterKind::Plasma     => PainterKind::Skin,
+            PainterKind::Skin       => PainterKind::AudioPaint,
+            PainterKind::AudioPaint => PainterKind::PrintHead,
+            PainterKind::PrintHead  => PainterKind::Image,
+            PainterKind::Image      => PainterKind::HueStripe,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            PainterKind::HueStripe => "HueStripe",
-            PainterKind::Spiral    => "Spiral",
-            PainterKind::Plasma    => "Plasma",
-            PainterKind::Skin      => "Skin",
+            PainterKind::HueStripe  => "HueStripe",
+            PainterKind::Spiral     => "Spiral",
+            PainterKind::Plasma     => "Plasma",
+            PainterKind::Skin       => "Skin",
+            PainterKind::AudioPaint => "AudioPaint",
+            PainterKind::PrintHead  => "PrintHead",
+            PainterKind::Image      => "Image",
         }
     }
 }
@@ -474,10 +492,13 @@ impl Preset {
         params.shake_enabled = self.shake_enabled;
         params.bass_zoom_strength = self.bass_zoom_strength;
         params.painter_kind = match self.painter_kind.as_str() {
-            "Spiral" => PainterKind::Spiral,
-            "Plasma" => PainterKind::Plasma,
-            "Skin"   => PainterKind::Skin,
-            _        => PainterKind::HueStripe,
+            "Spiral"     => PainterKind::Spiral,
+            "Plasma"     => PainterKind::Plasma,
+            "Skin"       => PainterKind::Skin,
+            "AudioPaint" => PainterKind::AudioPaint,
+            "PrintHead"  => PainterKind::PrintHead,
+            "Image"      => PainterKind::Image,
+            _            => PainterKind::HueStripe,
         };
         params.contrast        = self.contrast;
         params.saturation      = self.saturation;
@@ -1152,6 +1173,24 @@ struct GpuState {
     skin_bind_group: wgpu::BindGroup,
     skin_sampler: wgpu::Sampler,
     painter_skin_pipeline: wgpu::RenderPipeline,
+
+    // AudioPaint + PrintHead painter resources (shared audio uniform)
+    #[allow(dead_code)]
+    painter_audio_bgl: wgpu::BindGroupLayout,
+    painter_audio_buffer: wgpu::Buffer,
+    painter_audio_bind_group: wgpu::BindGroup,
+    painter_audio_paint_pipeline: wgpu::RenderPipeline,
+    painter_print_head_pipeline: wgpu::RenderPipeline,
+
+    // Image painter resources
+    #[allow(dead_code)]
+    painter_image_texture: wgpu::Texture,
+    #[allow(dead_code)]
+    painter_image_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    painter_image_sampler: wgpu::Sampler,
+    painter_image_bind_group: wgpu::BindGroup,
+    painter_image_pipeline: wgpu::RenderPipeline,
 
     // Pass 2 — shape (3D mesh with painter surface → screen-res, depth-tested)
     #[allow(dead_code)]
@@ -1953,6 +1992,185 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        // ── AudioPaint + PrintHead painter resources ──────────────────────────
+        let painter_audio_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("PainterAudio BGL"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let painter_audio_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("PainterAudio buffer"),
+                contents: bytemuck::cast_slice(&[PainterAudioUniforms {
+                    time_seconds: 0.0, bass: 0.0, mid: 0.0, _pad: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let painter_audio_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("PainterAudio BG"),
+            layout: &painter_audio_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: painter_audio_buffer.as_entire_binding(),
+            }],
+        });
+        let audio_painter_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None, bind_group_layouts: &[&painter_audio_bgl], push_constant_ranges: &[],
+            });
+        let ap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("AudioPaint shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/painter_audio_paint.wgsl").into()),
+        });
+        let painter_audio_paint_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("AudioPaint pipeline"),
+                layout: Some(&audio_painter_layout),
+                vertex: wgpu::VertexState {
+                    module: &ap_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ap_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+        let ph_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("PrintHead shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/painter_print_head.wgsl").into()),
+        });
+        let painter_print_head_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("PrintHead pipeline"),
+                layout: Some(&audio_painter_layout),
+                vertex: wgpu::VertexState {
+                    module: &ph_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ph_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
+        // ── Image painter resources ───────────────────────────────────────────
+        // Decode the bundled PNG (512×512, 16-bit RGB) to RGBA8 for upload.
+        let img_bytes = include_bytes!("../assets/default_painter_image.png");
+        let img_rgba  = image::load_from_memory(img_bytes)
+            .expect("default_painter_image.png failed to decode")
+            .to_rgba8();
+        let (img_w, img_h) = img_rgba.dimensions();
+        let painter_image_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Painter image texture"),
+            size: wgpu::Extent3d { width: img_w, height: img_h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &painter_image_texture, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            &img_rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(img_w * 4),
+                rows_per_image: Some(img_h),
+            },
+            wgpu::Extent3d { width: img_w, height: img_h, depth_or_array_layers: 1 },
+        );
+        let painter_image_view =
+            painter_image_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let painter_image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Painter image sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let painter_image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Painter image BG"),
+            layout: &skin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&painter_image_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&painter_image_sampler),
+                },
+            ],
+        });
+        let img_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Image painter shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/painter_image.wgsl").into()),
+        });
+        let painter_image_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Image painter pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None, bind_group_layouts: &[&skin_bgl], push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &img_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &img_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         let shape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shape shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shape.wgsl").into()),
@@ -2097,6 +2315,10 @@ impl GpuState {
             painter_uniforms_bind_group, painter_pipelines,
             painter_texture, painter_view, painter_sampler,
             skin_tex, skin_view, skin_bgl, skin_bind_group, skin_sampler, painter_skin_pipeline,
+            painter_audio_bgl, painter_audio_buffer, painter_audio_bind_group,
+            painter_audio_paint_pipeline, painter_print_head_pipeline,
+            painter_image_texture, painter_image_view, painter_image_sampler,
+            painter_image_bind_group, painter_image_pipeline,
             shape_texture, shape_view, shape_depth, shape_depth_view,
             shape_buffers,
             transform_buffer, transform_bind_group,
@@ -2480,6 +2702,14 @@ impl GpuState {
                 label: Some("Frame encoder"),
             });
 
+        self.queue.write_buffer(&self.painter_audio_buffer, 0,
+            bytemuck::cast_slice(&[PainterAudioUniforms {
+                time_seconds: shader_time,
+                bass: self.bass_zoom_smoothed,
+                mid:  self.bass_mid_smoothed,
+                _pad: 0.0,
+            }]));
+
         // Pass 1: painter → painter FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2497,6 +2727,15 @@ impl GpuState {
             if self.params.painter_kind == PainterKind::Skin {
                 pass.set_pipeline(&self.painter_skin_pipeline);
                 pass.set_bind_group(0, &self.skin_bind_group, &[]);
+            } else if self.params.painter_kind == PainterKind::AudioPaint {
+                pass.set_pipeline(&self.painter_audio_paint_pipeline);
+                pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+            } else if self.params.painter_kind == PainterKind::PrintHead {
+                pass.set_pipeline(&self.painter_print_head_pipeline);
+                pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+            } else if self.params.painter_kind == PainterKind::Image {
+                pass.set_pipeline(&self.painter_image_pipeline);
+                pass.set_bind_group(0, &self.painter_image_bind_group, &[]);
             } else {
                 let painter_pipeline = &self.painter_pipelines[&self.params.painter_kind];
                 pass.set_pipeline(painter_pipeline);
@@ -3070,6 +3309,14 @@ impl GpuState {
         });
 
         // ── Phase 6: render passes ────────────────────────────────────────────
+        self.queue.write_buffer(&self.painter_audio_buffer, 0,
+            bytemuck::cast_slice(&[PainterAudioUniforms {
+                time_seconds: shader_time,
+                bass: self.bass_zoom_smoothed,
+                mid:  self.bass_mid_smoothed,
+                _pad: 0.0,
+            }]));
+
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Export frame encoder"),
         });
@@ -3091,6 +3338,15 @@ impl GpuState {
             if self.params.painter_kind == PainterKind::Skin {
                 pass.set_pipeline(&self.painter_skin_pipeline);
                 pass.set_bind_group(0, &self.skin_bind_group, &[]);
+            } else if self.params.painter_kind == PainterKind::AudioPaint {
+                pass.set_pipeline(&self.painter_audio_paint_pipeline);
+                pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+            } else if self.params.painter_kind == PainterKind::PrintHead {
+                pass.set_pipeline(&self.painter_print_head_pipeline);
+                pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+            } else if self.params.painter_kind == PainterKind::Image {
+                pass.set_pipeline(&self.painter_image_pipeline);
+                pass.set_bind_group(0, &self.painter_image_bind_group, &[]);
             } else {
                 let p = &self.painter_pipelines[&self.params.painter_kind];
                 pass.set_pipeline(p);
@@ -3327,11 +3583,14 @@ impl GpuState {
         let mut rng = rand::thread_rng();
 
         if !self.params.locks.painter_kind {
-            self.params.painter_kind = match rng.gen_range(0u8..4) {
+            self.params.painter_kind = match rng.gen_range(0u8..7) {
                 0 => PainterKind::HueStripe,
                 1 => PainterKind::Spiral,
                 2 => PainterKind::Plasma,
-                _ => PainterKind::Skin,
+                3 => PainterKind::Skin,
+                4 => PainterKind::AudioPaint,
+                5 => PainterKind::PrintHead,
+                _ => PainterKind::Image,
             };
         }
         if !self.params.locks.current_shape {
@@ -4363,7 +4622,7 @@ mod tests {
             distortion_plus_roll:    90.0,
             shake_enabled: false,
             bass_zoom_strength: 0.8,
-            painter_kind: PainterKind::Plasma,
+            painter_kind: PainterKind::PrintHead,
             contrast: 1.5,
             saturation: 0.7,
             contrast_passes: 3,
