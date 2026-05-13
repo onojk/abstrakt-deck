@@ -14,7 +14,7 @@ use shape::{ShapeKind, Vertex};
 static CHEAT_SHEET_PNG: &[u8] = include_bytes!("../assets/cheat_sheet.png");
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,13 +34,25 @@ const SKIN_MIP_LEVELS: u32        = 13; // ilog2(4096) + 1
 const PAINTER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 const RIBBON_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
+const MAX_TRAIL_COUNT: usize = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BlackholeUniforms {
-    warp_strength:  f32,
-    warp_curve:     f32,
-    alpha_radius:   f32,
+struct BlackholePassUniforms {
+    center_x:       f32,
+    center_y:       f32,
+    shrink_rate:    f32,
+    fade_curve:     f32,
+    cycle_progress: f32,
+    slot_alpha:     f32,
+    passes:         f32,
+    _pad:           f32,
+}
+
+#[derive(Clone)]
+struct SnapshotSlot {
+    texture_index:  usize,
+    center:         [f32; 2],
     cycle_progress: f32,
 }
 
@@ -297,11 +309,14 @@ pub struct ParamLocks {
     pub palette_tint:     bool,
     pub palette_mono_hue: bool,
     // Blackhole
-    pub blackhole_enabled:      bool,
-    pub blackhole_warp_strength: bool,
-    pub blackhole_warp_curve:    bool,
-    pub blackhole_alpha_radius:  bool,
-    pub blackhole_fallback_hz:   bool,
+    pub blackhole_enabled:        bool,
+    pub blackhole_warp_strength:  bool,
+    pub blackhole_warp_curve:     bool,
+    pub blackhole_alpha_radius:   bool,
+    pub blackhole_fallback_hz:    bool,
+    pub blackhole_passes:         bool,
+    pub blackhole_trail_count:    bool,
+    pub blackhole_wander_amount:  bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -411,11 +426,14 @@ pub struct VisualParams {
     pub palette_mode:     PaletteMode,
     pub palette_tint:     f32,
     pub palette_mono_hue: f32,
-    pub blackhole_enabled:       bool,
-    pub blackhole_warp_strength: f32,
-    pub blackhole_warp_curve:    f32,
-    pub blackhole_alpha_radius:  f32,
-    pub blackhole_fallback_hz:   f32,
+    pub blackhole_enabled:        bool,
+    pub blackhole_warp_strength:  f32,
+    pub blackhole_warp_curve:     f32,
+    pub blackhole_alpha_radius:   f32,
+    pub blackhole_fallback_hz:    f32,
+    pub blackhole_passes:         u32,
+    pub blackhole_trail_count:    u32,
+    pub blackhole_wander_amount:  f32,
 }
 
 impl Default for VisualParams {
@@ -464,10 +482,13 @@ impl Default for VisualParams {
             palette_tint:     1.0,
             palette_mono_hue: 200.0,
             blackhole_enabled:       false,
-            blackhole_warp_strength: 1.0,
+            blackhole_warp_strength: 0.7,
             blackhole_warp_curve:    2.0,
             blackhole_alpha_radius:  0.5,
             blackhole_fallback_hz:   1.0,
+            blackhole_passes:        6,
+            blackhole_trail_count:   4,
+            blackhole_wander_amount: 0.15,
         }
     }
 }
@@ -565,7 +586,7 @@ struct Preset {
     palette_mono_hue: f32,
     #[serde(default)]
     blackhole_enabled: bool,
-    #[serde(default = "default_one_f32")]
+    #[serde(default = "default_blackhole_warp_strength")]
     blackhole_warp_strength: f32,
     #[serde(default = "default_blackhole_warp_curve")]
     blackhole_warp_curve: f32,
@@ -573,6 +594,12 @@ struct Preset {
     blackhole_alpha_radius: f32,
     #[serde(default = "default_one_f32")]
     blackhole_fallback_hz: f32,
+    #[serde(default = "default_blackhole_passes")]
+    blackhole_passes: u32,
+    #[serde(default = "default_blackhole_trail_count")]
+    blackhole_trail_count: u32,
+    #[serde(default = "default_blackhole_wander_amount")]
+    blackhole_wander_amount: f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -583,8 +610,12 @@ fn default_true()             -> bool   { true }
 fn default_audio_source_mode()  -> String { "File".to_string() }
 fn default_palette_mode()          -> String { "Off".to_string() }
 fn default_palette_mono_hue()      -> f32    { 200.0 }
+fn default_blackhole_warp_strength() -> f32  { 0.7 }
 fn default_blackhole_warp_curve()  -> f32    { 2.0 }
 fn default_blackhole_alpha_radius() -> f32   { 0.5 }
+fn default_blackhole_passes()        -> u32  { 6 }
+fn default_blackhole_trail_count()   -> u32  { 4 }
+fn default_blackhole_wander_amount() -> f32  { 0.15 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -636,6 +667,9 @@ impl Preset {
             blackhole_warp_curve:    params.blackhole_warp_curve,
             blackhole_alpha_radius:  params.blackhole_alpha_radius,
             blackhole_fallback_hz:   params.blackhole_fallback_hz,
+            blackhole_passes:        params.blackhole_passes,
+            blackhole_trail_count:   params.blackhole_trail_count,
+            blackhole_wander_amount: params.blackhole_wander_amount,
         }
     }
 
@@ -721,6 +755,9 @@ impl Preset {
         params.blackhole_warp_curve    = self.blackhole_warp_curve;
         params.blackhole_alpha_radius  = self.blackhole_alpha_radius;
         params.blackhole_fallback_hz   = self.blackhole_fallback_hz;
+        params.blackhole_passes        = self.blackhole_passes;
+        params.blackhole_trail_count   = self.blackhole_trail_count;
+        params.blackhole_wander_amount = self.blackhole_wander_amount;
     }
 }
 
@@ -1495,18 +1532,25 @@ struct GpuState {
     ribbon_update_pipeline:  wgpu::RenderPipeline,
     ribbon_composite_pipeline: wgpu::RenderPipeline,
 
-    // Blackhole pass (conditional pass 5): beat-synced snapshot-warp
-    snapshot_texture:           wgpu::Texture,
-    snapshot_view:              wgpu::TextureView,
-    blackhole_uniforms_buffer:  wgpu::Buffer,
+    // Blackhole pass v2 (conditional pass 5): recursive-shrink multi-snapshot trail
+    snapshot_textures:            Vec<wgpu::Texture>,     // MAX_TRAIL_COUNT slots
+    snapshot_views:               Vec<wgpu::TextureView>,
+    blackhole_slot_buffers:       Vec<wgpu::Buffer>,      // per-slot uniform buffers (32 B)
     #[allow(dead_code)]
-    blackhole_bgl:              wgpu::BindGroupLayout,
-    blackhole_bind_group:       wgpu::BindGroup,
-    blackhole_pipeline:         wgpu::RenderPipeline,
-    blackhole_cycle_progress:   f32,
-    blackhole_last_beat_seen:   bool,
-    blackhole_last_cycle_reset: Instant,
-    blackhole_was_enabled:      bool,
+    blackhole_slot_bgl:           wgpu::BindGroupLayout,
+    blackhole_slot_bind_groups:   Vec<wgpu::BindGroup>,
+    #[allow(dead_code)]
+    blackhole_accum_texture:      wgpu::Texture,
+    blackhole_accum_view:         wgpu::TextureView,
+    blackhole_accum_blit_bg:      wgpu::BindGroup,        // blit_bgl bind group for accum → swapchain
+    blackhole_pipeline:           wgpu::RenderPipeline,
+    // Per-frame state
+    snapshot_queue:               VecDeque<SnapshotSlot>,
+    texture_index_in_use:         Vec<bool>,
+    blackhole_wander_phase:       f32,
+    blackhole_last_beat_seen:     bool,
+    blackhole_last_cycle_reset:   Instant,
+    blackhole_was_enabled:        bool,
 
     // Palette pass (pass 1c): scratch+copy approach (Option A)
     palette_uniforms_buffer:  wgpu::Buffer,
@@ -2758,65 +2802,81 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
-        // ── Blackhole pass resources (conditional pass 5) ───────────────────
-        let snapshot_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Blackhole snapshot"),
+        // ── Blackhole pass v2 resources (conditional pass 5) ────────────────
+        // MAX_TRAIL_COUNT snapshot textures for the trail queue.
+        let mut snapshot_textures: Vec<wgpu::Texture> = Vec::with_capacity(MAX_TRAIL_COUNT);
+        let mut snapshot_views:    Vec<wgpu::TextureView> = Vec::with_capacity(MAX_TRAIL_COUNT);
+        for i in 0..MAX_TRAIL_COUNT {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("Snapshot {i}")),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: config.format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            snapshot_textures.push(tex);
+            snapshot_views.push(view);
+        }
+
+        let blackhole_accum_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blackhole accum"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: config.format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let snapshot_view = snapshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let blackhole_uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Blackhole uniforms"),
-            contents: bytemuck::cast_slice(&[BlackholeUniforms {
-                warp_strength: 1.0, warp_curve: 2.0, alpha_radius: 0.5, cycle_progress: 0.0,
-            }]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let blackhole_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Blackhole BGL"),
+        let blackhole_accum_view =
+            blackhole_accum_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let blackhole_accum_blit_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blackhole accum blit BG"),
+            layout: &blit_bgl,
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false, min_binding_size: None,
-                    }, count: None,
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&blackhole_accum_view),
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
                 },
             ],
         });
-        let blackhole_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Blackhole BG"),
-            layout: &blackhole_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: blackhole_uniforms_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&snapshot_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&scene_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&shape_sampler) },
-            ],
-        });
+
+        let blackhole_slot_bgl = Self::make_uts_bgl(&device, "Blackhole slot BGL");
+
+        let zero_uniforms = bytemuck::cast_slice(&[BlackholePassUniforms {
+            center_x: 0.5, center_y: 0.5, shrink_rate: 0.7, fade_curve: 2.0,
+            cycle_progress: 0.0, slot_alpha: 1.0, passes: 6.0, _pad: 0.0,
+        }]);
+        let mut blackhole_slot_buffers:      Vec<wgpu::Buffer>     = Vec::with_capacity(MAX_TRAIL_COUNT);
+        let mut blackhole_slot_bind_groups:  Vec<wgpu::BindGroup>  = Vec::with_capacity(MAX_TRAIL_COUNT);
+        for (i, snap_view) in snapshot_views.iter().enumerate() {
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("Blackhole slot buf {i}")),
+                contents: zero_uniforms,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("Blackhole slot BG {i}")),
+                layout: &blackhole_slot_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1,
+                        resource: wgpu::BindingResource::TextureView(snap_view) },
+                    wgpu::BindGroupEntry { binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&shape_sampler) },
+                ],
+            });
+            blackhole_slot_buffers.push(buf);
+            blackhole_slot_bind_groups.push(bg);
+        }
+
         let blackhole_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blackhole shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blackhole.wgsl").into()),
@@ -2824,7 +2884,7 @@ impl GpuState {
         let blackhole_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Blackhole pipeline"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None, bind_group_layouts: &[&blackhole_bgl], push_constant_ranges: &[],
+                label: None, bind_group_layouts: &[&blackhole_slot_bgl], push_constant_ranges: &[],
             })),
             vertex: wgpu::VertexState {
                 module: &blackhole_shader, entry_point: Some("vs_main"),
@@ -2834,7 +2894,7 @@ impl GpuState {
                 module: &blackhole_shader, entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -2936,9 +2996,13 @@ impl GpuState {
             ribbon_bg_read_a, ribbon_bg_read_b,
             ribbon_composite_bg_a, ribbon_composite_bg_b,
             ribbon_update_pipeline, ribbon_composite_pipeline,
-            snapshot_texture, snapshot_view,
-            blackhole_uniforms_buffer, blackhole_bgl, blackhole_bind_group, blackhole_pipeline,
-            blackhole_cycle_progress:   0.0,
+            snapshot_textures, snapshot_views,
+            blackhole_slot_buffers, blackhole_slot_bgl, blackhole_slot_bind_groups,
+            blackhole_accum_texture, blackhole_accum_view, blackhole_accum_blit_bg,
+            blackhole_pipeline,
+            snapshot_queue:             VecDeque::new(),
+            texture_index_in_use:       vec![false; MAX_TRAIL_COUNT],
+            blackhole_wander_phase:     0.0,
             blackhole_last_beat_seen:   false,
             blackhole_last_cycle_reset: Instant::now(),
             blackhole_was_enabled:      false,
@@ -3127,28 +3191,68 @@ impl GpuState {
             ],
         });
 
-        // Recreate snapshot texture and rebuild blackhole bind group (both textures changed).
-        self.snapshot_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Blackhole snapshot"),
+        // Recreate all blackhole v2 snapshot textures, accum, and bind groups.
+        self.snapshot_textures.clear();
+        self.snapshot_views.clear();
+        for i in 0..MAX_TRAIL_COUNT {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("Snapshot {i}")),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.snapshot_textures.push(tex);
+            self.snapshot_views.push(view);
+        }
+
+        let accum_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blackhole accum"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.config.format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        self.snapshot_view = self.snapshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.blackhole_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Blackhole BG"),
-            layout: &self.blackhole_bgl,
+        self.blackhole_accum_view = accum_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.blackhole_accum_texture = accum_tex;
+
+        self.blackhole_accum_blit_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Blackhole accum blit BG"),
+            layout: &self.blit_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.blackhole_uniforms_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.snapshot_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.scene_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.blackhole_accum_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                },
             ],
         });
-        self.blackhole_cycle_progress = 0.0;
+
+        for i in 0..MAX_TRAIL_COUNT {
+            self.blackhole_slot_bind_groups[i] = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("Blackhole slot BG {i}")),
+                layout: &self.blackhole_slot_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0,
+                        resource: self.blackhole_slot_buffers[i].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.snapshot_views[i]) },
+                    wgpu::BindGroupEntry { binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+        }
+
+        self.snapshot_queue.clear();
+        self.texture_index_in_use.fill(false);
 
         let (rb, rp) = Self::create_readback_buffer(&self.device, w, h);
         self.readback_buffer = rb;
@@ -3595,10 +3699,8 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 5: blit scene FBO → swapchain (or blackhole when enabled).
-        // Note: blackhole effect is live-path only for this slice.
-        // Export path always uses the existing direct blit.
-        // Deterministic snapshot timing for export deferred.
+        // Pass 5: blit scene FBO → swapchain (or blackhole v2 trail when enabled).
+        // Blackhole is live-path only; export path always uses the direct blit.
         if !self.params.blackhole_enabled {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Blit pass"),
@@ -3617,9 +3719,17 @@ impl GpuState {
             pass.draw(0..3, 0..1);
             self.blackhole_was_enabled = false;
         } else {
-            // ── Blackhole pass ──────────────────────────────────────────────
+            // ── Blackhole v2: recursive-shrink multi-snapshot trail ───────────
             let blackhole_just_enabled = !self.blackhole_was_enabled;
             self.blackhole_was_enabled = true;
+
+            // Advance wander phase and compute this frame's singularity center.
+            self.blackhole_wander_phase += dt;
+            let wa = self.params.blackhole_wander_amount;
+            let wander_center = [
+                0.5 + wa * (self.blackhole_wander_phase * 0.7 + 1.0).sin(),
+                0.5 + wa * (self.blackhole_wander_phase * 1.1 + 0.3).cos(),
+            ];
 
             let audio_active = match self.params.audio_source_mode {
                 AudioSourceMode::Silent => false,
@@ -3641,44 +3751,126 @@ impl GpuState {
                 (1.0 / self.params.blackhole_fallback_hz).clamp(0.2, 2.0)
             };
 
-            let should_capture = blackhole_just_enabled
-                || (audio_active && rising_edge)
-                || (!audio_active && self.blackhole_cycle_progress >= 1.0);
-
-            if should_capture {
-                encoder.copy_texture_to_texture(
-                    wgpu::ImageCopyTexture {
-                        texture: &self.scene_texture,
-                        mip_level: 0, origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::ImageCopyTexture {
-                        texture: &self.snapshot_texture,
-                        mip_level: 0, origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d {
-                        width: self.size.width, height: self.size.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                self.blackhole_cycle_progress = 0.0;
-                self.blackhole_last_cycle_reset = Instant::now();
-            } else {
-                self.blackhole_cycle_progress =
-                    (self.blackhole_cycle_progress + dt / cycle_duration).min(1.0);
+            // Advance cycle_progress for all active slots.
+            for slot in self.snapshot_queue.iter_mut() {
+                slot.cycle_progress = (slot.cycle_progress + dt / cycle_duration).min(1.0);
             }
 
-            self.queue.write_buffer(&self.blackhole_uniforms_buffer, 0,
-                bytemuck::cast_slice(&[BlackholeUniforms {
-                    warp_strength:  self.params.blackhole_warp_strength,
-                    warp_curve:     self.params.blackhole_warp_curve,
-                    alpha_radius:   self.params.blackhole_alpha_radius,
-                    cycle_progress: self.blackhole_cycle_progress,
-                }]));
+            // Expire slots whose cycle is complete (oldest first = front of queue).
+            while let Some(front) = self.snapshot_queue.front() {
+                if front.cycle_progress >= 1.0 {
+                    let freed = self.snapshot_queue.pop_front().unwrap();
+                    self.texture_index_in_use[freed.texture_index] = false;
+                } else {
+                    break;
+                }
+            }
+
+            // Capture a new snapshot on beat rising edge, first-enable, or fallback.
+            let max_trail = self.params.blackhole_trail_count as usize;
+            let should_capture = blackhole_just_enabled
+                || (audio_active && rising_edge)
+                || (!audio_active && self.snapshot_queue.is_empty());
+            if should_capture && self.snapshot_queue.len() < max_trail {
+                if let Some(tex_idx) = self.texture_index_in_use.iter().position(|&used| !used) {
+                    self.texture_index_in_use[tex_idx] = true;
+                    encoder.copy_texture_to_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: &self.scene_texture,
+                            mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::ImageCopyTexture {
+                            texture: &self.snapshot_textures[tex_idx],
+                            mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: self.size.width, height: self.size.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    self.snapshot_queue.push_back(SnapshotSlot {
+                        texture_index:  tex_idx,
+                        center:         wander_center,
+                        cycle_progress: 0.0,
+                    });
+                    self.blackhole_last_cycle_reset = Instant::now();
+                }
+            }
+
+            // Collect slot data before GPU commands to avoid borrow conflicts.
+            let trail_len = self.snapshot_queue.len();
+            let slot_data: Vec<(usize, [f32; 2], f32)> = self.snapshot_queue.iter()
+                .map(|s| (s.texture_index, s.center, s.cycle_progress))
+                .collect();
+
+            let shrink_rate  = self.params.blackhole_warp_strength;
+            let fade_curve   = self.params.blackhole_warp_curve;
+            let passes_f     = self.params.blackhole_passes as f32;
+
+            // Pre-pass: blit live scene → accumulator (establishes base layer).
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Blackhole pass"),
+                    label: Some("Blackhole pre-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.blackhole_accum_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &self.blit_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // Snapshot passes: oldest slot first so newest lands on top.
+            for (slot_pos, (tex_idx, center, cycle_progress)) in slot_data.iter().enumerate() {
+                let slot_alpha = if trail_len <= 1 {
+                    1.0_f32
+                } else {
+                    (slot_pos as f32 + 1.0) / trail_len as f32
+                };
+                self.queue.write_buffer(
+                    &self.blackhole_slot_buffers[*tex_idx], 0,
+                    bytemuck::cast_slice(&[BlackholePassUniforms {
+                        center_x:       center[0],
+                        center_y:       center[1],
+                        shrink_rate,
+                        fade_curve,
+                        cycle_progress: *cycle_progress,
+                        slot_alpha,
+                        passes:         passes_f,
+                        _pad:           0.0,
+                    }]),
+                );
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Blackhole snapshot pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.blackhole_accum_view, resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None, timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.blackhole_pipeline);
+                    pass.set_bind_group(0, &self.blackhole_slot_bind_groups[*tex_idx], &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+
+            // Final blit: accumulator → swapchain.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Blackhole final blit"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &screen_view, resolve_target: None,
                         ops: wgpu::Operations {
@@ -3689,8 +3881,8 @@ impl GpuState {
                     depth_stencil_attachment: None,
                     occlusion_query_set: None, timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.blackhole_pipeline);
-                pass.set_bind_group(0, &self.blackhole_bind_group, &[]);
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &self.blackhole_accum_blit_bg, &[]);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -4678,11 +4870,13 @@ impl GpuState {
         }
         if !self.params.locks.palette_tint     { self.params.palette_tint     = rng.gen_range(0.0_f32..=1.0); }
         if !self.params.locks.palette_mono_hue { self.params.palette_mono_hue = rng.gen_range(0.0_f32..=360.0); }
-        if !self.params.locks.blackhole_enabled      { self.params.blackhole_enabled      = rng.gen_bool(0.10); }
-        if !self.params.locks.blackhole_warp_strength { self.params.blackhole_warp_strength = rng.gen_range(0.0_f32..=1.0); }
-        if !self.params.locks.blackhole_warp_curve   { self.params.blackhole_warp_curve   = rng.gen_range(1.0_f32..=4.0); }
-        if !self.params.locks.blackhole_alpha_radius { self.params.blackhole_alpha_radius = rng.gen_range(0.2_f32..=1.0); }
-        if !self.params.locks.blackhole_fallback_hz  { self.params.blackhole_fallback_hz  = rng.gen_range(0.5_f32..=3.0); }
+        if !self.params.locks.blackhole_enabled       { self.params.blackhole_enabled       = rng.gen_bool(0.10); }
+        if !self.params.locks.blackhole_warp_strength { self.params.blackhole_warp_strength = rng.gen_range(0.4_f32..=0.95); }
+        if !self.params.locks.blackhole_warp_curve    { self.params.blackhole_warp_curve    = rng.gen_range(1.0_f32..=4.0); }
+        if !self.params.locks.blackhole_fallback_hz   { self.params.blackhole_fallback_hz   = rng.gen_range(0.5_f32..=3.0); }
+        if !self.params.locks.blackhole_passes        { self.params.blackhole_passes        = rng.gen_range(2u32..=8); }
+        if !self.params.locks.blackhole_trail_count   { self.params.blackhole_trail_count   = rng.gen_range(1u32..=6); }
+        if !self.params.locks.blackhole_wander_amount { self.params.blackhole_wander_amount = rng.gen_range(0.0_f32..=0.3); }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -5567,11 +5761,13 @@ impl ApplicationHandler for App {
                                 LockTarget::PaletteMode        => gpu.params.locks.palette_mode         = !gpu.params.locks.palette_mode,
                                 LockTarget::PaletteTint        => gpu.params.locks.palette_tint         = !gpu.params.locks.palette_tint,
                                 LockTarget::PaletteMonoHue     => gpu.params.locks.palette_mono_hue     = !gpu.params.locks.palette_mono_hue,
-                                LockTarget::BlackholeEnabled      => gpu.params.locks.blackhole_enabled      = !gpu.params.locks.blackhole_enabled,
-                                LockTarget::BlackholeWarpStrength => gpu.params.locks.blackhole_warp_strength = !gpu.params.locks.blackhole_warp_strength,
-                                LockTarget::BlackholeWarpCurve    => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
-                                LockTarget::BlackholeAlphaRadius  => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
-                                LockTarget::BlackholeFallbackHz   => gpu.params.locks.blackhole_fallback_hz   = !gpu.params.locks.blackhole_fallback_hz,
+                                LockTarget::BlackholeEnabled       => gpu.params.locks.blackhole_enabled       = !gpu.params.locks.blackhole_enabled,
+                                LockTarget::BlackholeWarpStrength  => gpu.params.locks.blackhole_warp_strength = !gpu.params.locks.blackhole_warp_strength,
+                                LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
+                                LockTarget::BlackholeFallbackHz    => gpu.params.locks.blackhole_fallback_hz   = !gpu.params.locks.blackhole_fallback_hz,
+                                LockTarget::BlackholePasses        => gpu.params.locks.blackhole_passes        = !gpu.params.locks.blackhole_passes,
+                                LockTarget::BlackholeTrailCount    => gpu.params.locks.blackhole_trail_count   = !gpu.params.locks.blackhole_trail_count,
+                                LockTarget::BlackholeWanderAmount  => gpu.params.locks.blackhole_wander_amount = !gpu.params.locks.blackhole_wander_amount,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -5602,11 +5798,13 @@ impl ApplicationHandler for App {
                         ParamChange::SetPaletteMode(v)  => gpu.params.palette_mode     = v,
                         ParamChange::PaletteTint(v)     => gpu.params.palette_tint     = v,
                         ParamChange::PaletteMonoHue(v)  => gpu.params.palette_mono_hue = v,
-                        ParamChange::BlackholeEnabled(v)      => gpu.params.blackhole_enabled      = v,
-                        ParamChange::BlackholeWarpStrength(v) => gpu.params.blackhole_warp_strength = v,
-                        ParamChange::BlackholeWarpCurve(v)    => gpu.params.blackhole_warp_curve    = v,
-                        ParamChange::BlackholeAlphaRadius(v)  => gpu.params.blackhole_alpha_radius  = v,
-                        ParamChange::BlackholeFallbackHz(v)   => gpu.params.blackhole_fallback_hz   = v,
+                        ParamChange::BlackholeEnabled(v)       => gpu.params.blackhole_enabled       = v,
+                        ParamChange::BlackholeWarpStrength(v)  => gpu.params.blackhole_warp_strength = v,
+                        ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
+                        ParamChange::BlackholeFallbackHz(v)    => gpu.params.blackhole_fallback_hz   = v,
+                        ParamChange::BlackholePasses(v)        => gpu.params.blackhole_passes        = v,
+                        ParamChange::BlackholeTrailCount(v)    => gpu.params.blackhole_trail_count   = v,
+                        ParamChange::BlackholeWanderAmount(v)  => gpu.params.blackhole_wander_amount = v,
                     }
                 }
 
@@ -5766,11 +5964,14 @@ mod tests {
             palette_mode:     PaletteMode::Cool,
             palette_tint:     0.7,
             palette_mono_hue: 280.0,
-            blackhole_enabled:       true,
-            blackhole_warp_strength: 0.7,
-            blackhole_warp_curve:    3.0,
-            blackhole_alpha_radius:  0.6,
-            blackhole_fallback_hz:   1.5,
+            blackhole_enabled:        true,
+            blackhole_warp_strength:  0.7,
+            blackhole_warp_curve:     3.0,
+            blackhole_alpha_radius:   0.6,
+            blackhole_fallback_hz:    1.5,
+            blackhole_passes:         4,
+            blackhole_trail_count:    3,
+            blackhole_wander_amount:  0.2,
         }
     }
 
@@ -5828,11 +6029,14 @@ mod tests {
         assert_eq!(restored.palette_mode,     original.palette_mode,     "palette_mode failed");
         assert_eq!(restored.palette_tint,     original.palette_tint,     "palette_tint failed");
         assert_eq!(restored.palette_mono_hue, original.palette_mono_hue, "palette_mono_hue failed");
-        assert_eq!(restored.blackhole_enabled,       original.blackhole_enabled,       "blackhole_enabled failed");
-        assert_eq!(restored.blackhole_warp_strength, original.blackhole_warp_strength, "blackhole_warp_strength failed");
-        assert_eq!(restored.blackhole_warp_curve,    original.blackhole_warp_curve,    "blackhole_warp_curve failed");
-        assert_eq!(restored.blackhole_alpha_radius,  original.blackhole_alpha_radius,  "blackhole_alpha_radius failed");
-        assert_eq!(restored.blackhole_fallback_hz,   original.blackhole_fallback_hz,   "blackhole_fallback_hz failed");
+        assert_eq!(restored.blackhole_enabled,        original.blackhole_enabled,        "blackhole_enabled failed");
+        assert_eq!(restored.blackhole_warp_strength,  original.blackhole_warp_strength,  "blackhole_warp_strength failed");
+        assert_eq!(restored.blackhole_warp_curve,     original.blackhole_warp_curve,     "blackhole_warp_curve failed");
+        assert_eq!(restored.blackhole_alpha_radius,   original.blackhole_alpha_radius,   "blackhole_alpha_radius failed");
+        assert_eq!(restored.blackhole_fallback_hz,    original.blackhole_fallback_hz,    "blackhole_fallback_hz failed");
+        assert_eq!(restored.blackhole_passes,         original.blackhole_passes,         "blackhole_passes failed");
+        assert_eq!(restored.blackhole_trail_count,    original.blackhole_trail_count,    "blackhole_trail_count failed");
+        assert_eq!(restored.blackhole_wander_amount,  original.blackhole_wander_amount,  "blackhole_wander_amount failed");
     }
 
     #[test]
