@@ -464,6 +464,9 @@ impl MenuBar {
                                 crate::ShapeKind::Sphere,
                                 crate::ShapeKind::Cube,
                                 crate::ShapeKind::Tetrahedron,
+                                crate::ShapeKind::Icosahedron,
+                                crate::ShapeKind::Urchin,
+                                crate::ShapeKind::Caltrop,
                             ] {
                                 ui.selectable_value(&mut shape, v, v.name());
                             }

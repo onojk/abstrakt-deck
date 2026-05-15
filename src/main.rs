@@ -650,6 +650,9 @@ impl Preset {
             "Sphere"      => ShapeKind::Sphere,
             "Cube"        => ShapeKind::Cube,
             "Tetrahedron" => ShapeKind::Tetrahedron,
+            "Icosahedron" => ShapeKind::Icosahedron,
+            "Urchin"      => ShapeKind::Urchin,
+            "Caltrop"     => ShapeKind::Caltrop,
             _             => ShapeKind::Cylinder,
         };
         params.fold_count = self.fold_count;
@@ -4997,11 +5000,14 @@ impl GpuState {
             };
         }
         if !self.params.locks.current_shape {
-            self.params.current_shape = match rng.gen_range(0u8..4) {
+            self.params.current_shape = match rng.gen_range(0u8..7) {
                 0 => ShapeKind::Cylinder,
                 1 => ShapeKind::Sphere,
                 2 => ShapeKind::Cube,
-                _ => ShapeKind::Tetrahedron,
+                3 => ShapeKind::Tetrahedron,
+                4 => ShapeKind::Icosahedron,
+                5 => ShapeKind::Urchin,
+                _ => ShapeKind::Caltrop,
             };
         }
         if !self.params.locks.frame_shape {
@@ -6037,7 +6043,7 @@ fn main() {
     println!("  - =    frame size");
     println!("  R G    cycle frame color hue");
     println!("  space  toggle MIDI shake");
-    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron)");
+    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop)");
     println!("  / '   bass-zoom intensity (0 to 1)");
     println!("  I      toggle color invert");
     println!("  T      toggle colorize tint");
@@ -6212,12 +6218,18 @@ mod tests {
 
     #[test]
     fn shape_kind_name_roundtrip() {
-        for kind in [ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron] {
+        for kind in [
+            ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron,
+            ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop,
+        ] {
             let name = kind.name();
             let parsed = match name {
                 "Sphere"      => ShapeKind::Sphere,
                 "Cube"        => ShapeKind::Cube,
                 "Tetrahedron" => ShapeKind::Tetrahedron,
+                "Icosahedron" => ShapeKind::Icosahedron,
+                "Urchin"      => ShapeKind::Urchin,
+                "Caltrop"     => ShapeKind::Caltrop,
                 _             => ShapeKind::Cylinder,
             };
             assert_eq!(parsed, kind, "ShapeKind {:?} did not round-trip via name()", kind);
@@ -6248,7 +6260,10 @@ mod tests {
 
     #[test]
     fn rotation_axes_are_normalized() {
-        for shape in [ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron] {
+        for shape in [
+            ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron,
+            ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop,
+        ] {
             let [x, y, z] = shape.rotation_axis();
             let length_sq = x * x + y * y + z * z;
             assert!(

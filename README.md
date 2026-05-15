@@ -24,7 +24,7 @@ More examples on the [official artist channel](https://www.youtube.com/channel/U
 ## Features
 
 ### Geometry
-- 4 shape types: Cylinder, Sphere, Cube, Tetrahedron
+- 7 shape types: Cylinder, Sphere, Cube, Tetrahedron, Icosahedron, Urchin, Caltrop
 - Configurable kaleido fold count (2–24)
 - Variable kaleido zoom (0.3–1.5) with bass-reactive modulation
 - Variable rotation speed (0–4×, freezable)
@@ -138,7 +138,7 @@ Press `M` to toggle the parameter panel (right sidebar). All sliders, dropdowns,
 | Key | Action |
 |-----|--------|
 | `?` | toggle cheat sheet overlay |
-| `Shift+Tab` | cycle 3D shape (Cylinder → Sphere → Cube → Tetrahedron) |
+| `Shift+Tab` | cycle 3D shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop) |
 | `P` | cycle painter (HueStripe → Spiral → Plasma → Skin) |
 | `[` / `]` | decrease / increase kaleido fold count (2 to 24) |
 | `Z` / `X` | decrease / increase kaleido zoom (0.3 to 1.5) |
