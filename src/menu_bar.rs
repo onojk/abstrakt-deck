@@ -408,6 +408,8 @@ impl MenuBar {
                             Self::blackhole_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::phantom_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::color_theory_section(ui, current_params, &mut frame_changes);
                         });
                     });
             }
@@ -1181,6 +1183,133 @@ impl MenuBar {
                         }
                     });
                 });
+            });
+        });
+    }
+
+    fn color_theory_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Color Theory  (H)", |ui| {
+
+            // Harmony dropdown
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_harmony).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorHarmony));
+                }
+                ui.add_enabled_ui(!params.locks.color_harmony, |ui| {
+                    let current = params.color_harmony;
+                    egui::ComboBox::from_id_salt("color_harmony_combo")
+                        .selected_text(current.name())
+                        .show_ui(ui, |ui| {
+                            for h in [
+                                crate::color::ColorHarmony::Monochromatic,
+                                crate::color::ColorHarmony::Analogous,
+                                crate::color::ColorHarmony::Complementary,
+                                crate::color::ColorHarmony::SplitComplementary,
+                                crate::color::ColorHarmony::Triadic,
+                                crate::color::ColorHarmony::Tetradic,
+                            ] {
+                                if ui.selectable_label(current == h, h.name()).clicked() {
+                                    changes.push(ParamChange::ColorHarmony(h));
+                                }
+                            }
+                        });
+                    ui.label("Harmony");
+                });
+            });
+
+            // Anchor hue slider + live color swatch
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_anchor_hue).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorAnchorHue));
+                }
+                ui.add_enabled_ui(!params.locks.color_anchor_hue, |ui| {
+                    let mut v = params.color_anchor_hue;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=360.0)
+                        .text("Anchor hue")
+                        .suffix("°")).changed()
+                    {
+                        changes.push(ParamChange::ColorAnchorHue(v));
+                    }
+                    let anchor_rgb = crate::color::hsv_to_rgb(
+                        params.color_anchor_hue,
+                        params.color_saturation,
+                        params.color_value,
+                    );
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(24.0, 16.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgb(
+                            (anchor_rgb[0] * 255.0) as u8,
+                            (anchor_rgb[1] * 255.0) as u8,
+                            (anchor_rgb[2] * 255.0) as u8,
+                        ),
+                    );
+                });
+            });
+
+            // Saturation slider
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_saturation).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorSaturation));
+                }
+                ui.add_enabled_ui(!params.locks.color_saturation, |ui| {
+                    let mut v = params.color_saturation;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)
+                        .text("Saturation").step_by(0.01)).changed()
+                    {
+                        changes.push(ParamChange::ColorSaturation(v));
+                    }
+                });
+            });
+
+            // Value (brightness) slider
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_value).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorValue));
+                }
+                ui.add_enabled_ui(!params.locks.color_value, |ui| {
+                    let mut v = params.color_value;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)
+                        .text("Value").step_by(0.01)).changed()
+                    {
+                        changes.push(ParamChange::ColorValue(v));
+                    }
+                });
+            });
+
+            // Palette preview: 6 swatches
+            ui.horizontal(|ui| {
+                ui.label("Preview:");
+                let palette = crate::color::palette_from_harmony(
+                    params.color_harmony,
+                    params.color_anchor_hue,
+                    params.color_saturation,
+                    params.color_value,
+                    6,
+                );
+                for c in palette {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(20.0, 20.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgb(
+                            (c[0] * 255.0) as u8,
+                            (c[1] * 255.0) as u8,
+                            (c[2] * 255.0) as u8,
+                        ),
+                    );
+                }
             });
         });
     }

@@ -5637,6 +5637,14 @@ impl ApplicationHandler for App {
                             log::info!("Phantom Alpha: {}", gpu.params.phantom_enabled);
                         }
                     }
+                    KeyCode::KeyH => {
+                        if !gpu.params.locks.color_harmony {
+                            gpu.params.color_harmony = gpu.params.color_harmony.next();
+                            log::info!("color harmony: {}", gpu.params.color_harmony.name());
+                        } else {
+                            log::info!("color harmony: LOCKED (skipping cycle)");
+                        }
+                    }
                     KeyCode::KeyB => {
                         gpu.params.reactive_mode_enabled = !gpu.params.reactive_mode_enabled;
                         log::info!("Reactive Mode: {}", gpu.params.reactive_mode_enabled);
@@ -6235,7 +6243,9 @@ fn main() {
     println!("  , .    rotation speed (0 to 4×)");
     println!("  1-7    frame shape (None/Circle/Square/Rounded/Hexagon/Octagon/Star)");
     println!("  - =    frame size");
-    println!("  R G    cycle frame color hue");
+    println!("  R      cycle frame color hue (+30°)");
+    println!("  G      toggle Phantom Alpha overlay");
+    println!("  H      cycle color harmony (Mono/Analogous/Comp/Split/Triad/Tetra)");
     println!("  space  toggle MIDI shake");
     println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop)");
     println!("  / '   bass-zoom intensity (0 to 1)");
