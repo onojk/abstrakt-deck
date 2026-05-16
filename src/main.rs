@@ -2,6 +2,7 @@ mod audio;
 mod help_overlay;
 mod menu_bar;
 mod midi;
+mod phantom;
 mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
@@ -46,6 +47,19 @@ struct FeedbackUniforms {
     _pad0:        f32,
     _pad1:        f32,
     _pad2:        f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ChromaUniforms {
+    pub key_color_r:   f32,  // offset  0
+    pub key_color_g:   f32,  // offset  4
+    pub key_color_b:   f32,  // offset  8
+    pub key_tolerance: f32,  // offset 12
+    pub key_softness:  f32,  // offset 16
+    pub key_strength:  f32,  // offset 20
+    pub opacity:       f32,  // offset 24
+    pub _pad:          f32,  // offset 28 — total 32 bytes
 }
 
 #[repr(C)]
@@ -306,6 +320,14 @@ pub struct ParamLocks {
     pub blackhole_warp_curve:     bool,
     pub blackhole_alpha_radius:   bool,
     pub blackhole_wander_amount:  bool,
+    // Phantom Alpha
+    pub phantom_enabled:       bool,
+    pub phantom_delay_seconds: bool,
+    pub phantom_key_color:     bool,
+    pub phantom_key_tolerance: bool,
+    pub phantom_key_softness:  bool,
+    pub phantom_key_strength:  bool,
+    pub phantom_opacity:       bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -420,6 +442,14 @@ pub struct VisualParams {
     pub blackhole_warp_curve:     f32,
     pub blackhole_alpha_radius:   f32,
     pub blackhole_wander_amount:  f32,
+    // Phantom Alpha (mutually exclusive with blackhole in live path)
+    pub phantom_enabled:       bool,
+    pub phantom_delay_seconds: f32,
+    pub phantom_key_color:     [f32; 3],
+    pub phantom_key_tolerance: f32,
+    pub phantom_key_softness:  f32,
+    pub phantom_key_strength:  f32,
+    pub phantom_opacity:       f32,
 }
 
 impl Default for VisualParams {
@@ -472,6 +502,13 @@ impl Default for VisualParams {
             blackhole_warp_curve:    0.97,
             blackhole_alpha_radius:  0.5,
             blackhole_wander_amount: 0.005,
+            phantom_enabled:       false,
+            phantom_delay_seconds: 1.0,
+            phantom_key_color:     [0.0, 0.0, 1.0],
+            phantom_key_tolerance: 0.15,
+            phantom_key_softness:  0.05,
+            phantom_key_strength:  1.0,
+            phantom_opacity:       0.85,
         }
     }
 }
@@ -577,6 +614,20 @@ struct Preset {
     blackhole_alpha_radius: f32,
     #[serde(default = "default_blackhole_wander_amount")]
     blackhole_wander_amount: f32,
+    #[serde(default)]
+    phantom_enabled: bool,
+    #[serde(default = "default_phantom_delay_seconds")]
+    phantom_delay_seconds: f32,
+    #[serde(default = "default_phantom_key_color")]
+    phantom_key_color: [f32; 3],
+    #[serde(default = "default_phantom_key_tolerance")]
+    phantom_key_tolerance: f32,
+    #[serde(default = "default_phantom_key_softness")]
+    phantom_key_softness: f32,
+    #[serde(default = "default_phantom_key_strength")]
+    phantom_key_strength: f32,
+    #[serde(default = "default_phantom_opacity")]
+    phantom_opacity: f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -591,6 +642,12 @@ fn default_blackhole_warp_strength() -> f32  { 0.92 }
 fn default_blackhole_warp_curve()    -> f32  { 0.97 }
 fn default_blackhole_alpha_radius()  -> f32  { 0.5 }
 fn default_blackhole_wander_amount() -> f32  { 0.005 }
+fn default_phantom_delay_seconds()   -> f32  { 1.0 }
+fn default_phantom_key_color() -> [f32; 3]   { [0.0, 0.0, 1.0] }
+fn default_phantom_key_tolerance()   -> f32  { 0.15 }
+fn default_phantom_key_softness()    -> f32  { 0.05 }
+fn default_phantom_key_strength()    -> f32  { 1.0 }
+fn default_phantom_opacity()         -> f32  { 0.85 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -642,6 +699,13 @@ impl Preset {
             blackhole_warp_curve:    params.blackhole_warp_curve,
             blackhole_alpha_radius:  params.blackhole_alpha_radius,
             blackhole_wander_amount: params.blackhole_wander_amount,
+            phantom_enabled:       params.phantom_enabled,
+            phantom_delay_seconds: params.phantom_delay_seconds,
+            phantom_key_color:     params.phantom_key_color,
+            phantom_key_tolerance: params.phantom_key_tolerance,
+            phantom_key_softness:  params.phantom_key_softness,
+            phantom_key_strength:  params.phantom_key_strength,
+            phantom_opacity:       params.phantom_opacity,
         }
     }
 
@@ -730,6 +794,13 @@ impl Preset {
         params.blackhole_warp_curve    = self.blackhole_warp_curve;
         params.blackhole_alpha_radius  = self.blackhole_alpha_radius;
         params.blackhole_wander_amount = self.blackhole_wander_amount;
+        params.phantom_enabled       = self.phantom_enabled;
+        params.phantom_delay_seconds = self.phantom_delay_seconds;
+        params.phantom_key_color     = self.phantom_key_color;
+        params.phantom_key_tolerance = self.phantom_key_tolerance;
+        params.phantom_key_softness  = self.phantom_key_softness;
+        params.phantom_key_strength  = self.phantom_key_strength;
+        params.phantom_opacity       = self.phantom_opacity;
     }
 }
 
@@ -1559,6 +1630,9 @@ struct GpuState {
     export_ribbon: Option<ExportRibbonState>,
     // Export feedback FBOs for blackhole pass (None when not exporting or blackhole disabled)
     export_feedback: Option<ExportFeedbackState>,
+
+    // Phantom Alpha: chroma-keyed delayed-frame overlay
+    phantom: phantom::PhantomAlpha,
 
     // CPU readback for recording
     readback_buffer: wgpu::Buffer,
@@ -3008,6 +3082,8 @@ impl GpuState {
             multiview: None, cache: None,
         });
 
+        let phantom = phantom::PhantomAlpha::new(&device, surface_format);
+
         Self {
             surface, device, queue, config, size,
             uniforms_buffer,
@@ -3052,6 +3128,7 @@ impl GpuState {
             palette_scratch_texture, palette_scratch_view,
             export_ribbon: None,
             export_feedback: None,
+            phantom,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
             offline_target: None,
@@ -3747,26 +3824,9 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 5: blit scene FBO → swapchain (or blackhole v2 trail when enabled).
-        // Blackhole is live-path only; export path always uses the direct blit.
-        if !self.params.blackhole_enabled {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Blit pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &screen_view, resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None, timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.blit_pipeline);
-            pass.set_bind_group(0, &self.blit_bind_group, &[]);
-            pass.draw(0..3, 0..1);
-            self.blackhole_was_enabled = false;
-        } else {
+        // Pass 5: blit scene FBO → swapchain.
+        // Priority: blackhole > phantom > plain blit. Blackhole and phantom are mutually exclusive.
+        if self.params.blackhole_enabled {
             // ── Blackhole v3: continuous video-feedback ping-pong ─────────────
             let just_enabled = !self.blackhole_was_enabled;
             self.blackhole_was_enabled = true;
@@ -3850,6 +3910,37 @@ impl GpuState {
             }
 
             self.feedback_current_is_a = !self.feedback_current_is_a;
+        } else if self.params.phantom_enabled {
+            let scene_view_for_capture = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.phantom.capture(&mut encoder, &self.device, &scene_view_for_capture);
+            self.phantom.composite(
+                &mut encoder, &self.device, &self.queue,
+                &scene_view_for_capture, &screen_view,
+                self.params.phantom_delay_seconds,
+                self.params.phantom_key_color,
+                self.params.phantom_key_tolerance,
+                self.params.phantom_key_softness,
+                self.params.phantom_key_strength,
+                self.params.phantom_opacity,
+            );
+            self.blackhole_was_enabled = false;
+        } else {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &screen_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.blit_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+            self.blackhole_was_enabled = false;
         }
 
         // Pass 6: help overlay (animated slide-in, drawn on top of swapchain)
@@ -3914,6 +4005,7 @@ impl GpuState {
             );
         }
 
+        self.phantom.advance_frame();
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // Map readback buffer and feed frame to recorder.
@@ -5064,6 +5156,24 @@ impl GpuState {
         if !self.params.locks.blackhole_warp_curve    { self.params.blackhole_warp_curve    = rng.gen_range(0.90_f32..=0.99); }
         if !self.params.locks.blackhole_alpha_radius  { self.params.blackhole_alpha_radius  = rng.gen_range(0.3_f32..=1.0); }
         if !self.params.locks.blackhole_wander_amount { self.params.blackhole_wander_amount = rng.gen_range(0.0_f32..=0.015); }
+        // Phantom: mutually exclusive with blackhole
+        if !self.params.locks.phantom_enabled {
+            self.params.phantom_enabled = if self.params.blackhole_enabled {
+                false
+            } else {
+                rng.gen_bool(0.15)
+            };
+        }
+        if !self.params.locks.phantom_delay_seconds { self.params.phantom_delay_seconds = rng.gen_range(0.5_f32..=3.0); }
+        if !self.params.locks.phantom_key_tolerance { self.params.phantom_key_tolerance = rng.gen_range(0.05_f32..=0.40); }
+        if !self.params.locks.phantom_key_softness  { self.params.phantom_key_softness  = rng.gen_range(0.02_f32..=0.15); }
+        if !self.params.locks.phantom_key_strength  { self.params.phantom_key_strength  = rng.gen_range(0.5_f32..=1.0); }
+        if !self.params.locks.phantom_opacity       { self.params.phantom_opacity       = rng.gen_range(0.5_f32..=1.0); }
+        if !self.params.locks.phantom_key_color {
+            let h = rng.gen_range(0.0_f32..360.0);
+            let (r, g, b) = hsv_to_rgb(h, 1.0, 1.0);
+            self.params.phantom_key_color = [r, g, b];
+        }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -5462,8 +5572,10 @@ impl ApplicationHandler for App {
                         log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                     }
                     KeyCode::KeyG => {
-                        gpu.params.frame_color_hue = (gpu.params.frame_color_hue + 120.0) % 360.0;
-                        log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
+                        if !gpu.params.blackhole_enabled {
+                            gpu.params.phantom_enabled = !gpu.params.phantom_enabled;
+                            log::info!("Phantom Alpha: {}", gpu.params.phantom_enabled);
+                        }
                     }
                     KeyCode::KeyB => {
                         gpu.params.reactive_mode_enabled = !gpu.params.reactive_mode_enabled;
@@ -5953,6 +6065,13 @@ impl ApplicationHandler for App {
                                 LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
                                 LockTarget::BlackholeAlphaRadius   => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
                                 LockTarget::BlackholeWanderAmount  => gpu.params.locks.blackhole_wander_amount = !gpu.params.locks.blackhole_wander_amount,
+                                LockTarget::PhantomEnabled       => gpu.params.locks.phantom_enabled       = !gpu.params.locks.phantom_enabled,
+                                LockTarget::PhantomDelaySeconds  => gpu.params.locks.phantom_delay_seconds = !gpu.params.locks.phantom_delay_seconds,
+                                LockTarget::PhantomKeyColor      => gpu.params.locks.phantom_key_color     = !gpu.params.locks.phantom_key_color,
+                                LockTarget::PhantomKeyTolerance  => gpu.params.locks.phantom_key_tolerance = !gpu.params.locks.phantom_key_tolerance,
+                                LockTarget::PhantomKeySoftness   => gpu.params.locks.phantom_key_softness  = !gpu.params.locks.phantom_key_softness,
+                                LockTarget::PhantomKeyStrength   => gpu.params.locks.phantom_key_strength  = !gpu.params.locks.phantom_key_strength,
+                                LockTarget::PhantomOpacity       => gpu.params.locks.phantom_opacity       = !gpu.params.locks.phantom_opacity,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -5988,6 +6107,13 @@ impl ApplicationHandler for App {
                         ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
                         ParamChange::BlackholeAlphaRadius(v)   => gpu.params.blackhole_alpha_radius  = v,
                         ParamChange::BlackholeWanderAmount(v)  => gpu.params.blackhole_wander_amount = v,
+                        ParamChange::PhantomEnabled(v)       => gpu.params.phantom_enabled       = v,
+                        ParamChange::PhantomDelaySeconds(v)  => gpu.params.phantom_delay_seconds = v,
+                        ParamChange::PhantomKeyColor(v)      => gpu.params.phantom_key_color     = v,
+                        ParamChange::PhantomKeyTolerance(v)  => gpu.params.phantom_key_tolerance = v,
+                        ParamChange::PhantomKeySoftness(v)   => gpu.params.phantom_key_softness  = v,
+                        ParamChange::PhantomKeyStrength(v)   => gpu.params.phantom_key_strength  = v,
+                        ParamChange::PhantomOpacity(v)       => gpu.params.phantom_opacity       = v,
                     }
                 }
 
@@ -6152,6 +6278,13 @@ mod tests {
             blackhole_warp_curve:     0.96,
             blackhole_alpha_radius:   0.6,
             blackhole_wander_amount:  0.008,
+            phantom_enabled:       true,
+            phantom_delay_seconds: 1.5,
+            phantom_key_color:     [1.0, 0.0, 0.0],
+            phantom_key_tolerance: 0.20,
+            phantom_key_softness:  0.08,
+            phantom_key_strength:  0.9,
+            phantom_opacity:       0.7,
         }
     }
 
@@ -6214,6 +6347,13 @@ mod tests {
         assert_eq!(restored.blackhole_warp_curve,     original.blackhole_warp_curve,     "blackhole_warp_curve failed");
         assert_eq!(restored.blackhole_alpha_radius,   original.blackhole_alpha_radius,   "blackhole_alpha_radius failed");
         assert_eq!(restored.blackhole_wander_amount,  original.blackhole_wander_amount,  "blackhole_wander_amount failed");
+        assert_eq!(restored.phantom_enabled,       original.phantom_enabled,       "phantom_enabled failed");
+        assert_eq!(restored.phantom_delay_seconds, original.phantom_delay_seconds, "phantom_delay_seconds failed");
+        assert_eq!(restored.phantom_key_color,     original.phantom_key_color,     "phantom_key_color failed");
+        assert_eq!(restored.phantom_key_tolerance, original.phantom_key_tolerance, "phantom_key_tolerance failed");
+        assert_eq!(restored.phantom_key_softness,  original.phantom_key_softness,  "phantom_key_softness failed");
+        assert_eq!(restored.phantom_key_strength,  original.phantom_key_strength,  "phantom_key_strength failed");
+        assert_eq!(restored.phantom_opacity,       original.phantom_opacity,       "phantom_opacity failed");
     }
 
     #[test]

@@ -41,6 +41,13 @@ pub enum LockTarget {
     BlackholeWarpCurve,
     BlackholeAlphaRadius,
     BlackholeWanderAmount,
+    PhantomEnabled,
+    PhantomDelaySeconds,
+    PhantomKeyColor,
+    PhantomKeyTolerance,
+    PhantomKeySoftness,
+    PhantomKeyStrength,
+    PhantomOpacity,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +125,13 @@ pub enum ParamChange {
     BlackholeWarpCurve(f32),
     BlackholeAlphaRadius(f32),
     BlackholeWanderAmount(f32),
+    PhantomEnabled(bool),
+    PhantomDelaySeconds(f32),
+    PhantomKeyColor([f32; 3]),
+    PhantomKeyTolerance(f32),
+    PhantomKeySoftness(f32),
+    PhantomKeyStrength(f32),
+    PhantomOpacity(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -384,6 +398,8 @@ impl MenuBar {
                             Self::palette_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::blackhole_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::phantom_section(ui, current_params, &mut frame_changes);
                         });
                     });
             }
@@ -1051,6 +1067,111 @@ impl MenuBar {
                     if ui.add(egui::Slider::new(&mut v, 0.0..=0.02).text("Wander Amount").step_by(0.001)).changed() {
                         changes.push(ParamChange::BlackholeWanderAmount(v));
                     }
+                });
+            });
+        });
+    }
+
+    fn phantom_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Phantom Alpha", |ui| {
+            // Enabled (mutually exclusive with blackhole — greyed when blackhole is on)
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.phantom_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::PhantomEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.phantom_enabled && !params.blackhole_enabled, |ui| {
+                    let mut en = params.phantom_enabled;
+                    if ui.checkbox(&mut en, "Enabled  (G)").changed() {
+                        changes.push(ParamChange::PhantomEnabled(en));
+                    }
+                });
+            });
+            if params.blackhole_enabled {
+                ui.label(egui::RichText::new("(disabled while Blackhole is on)").small().italics());
+            }
+
+            ui.indent("phantom_controls", |ui| {
+                // Delay
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phantom_delay_seconds).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhantomDelaySeconds));
+                    }
+                    ui.add_enabled_ui(!params.locks.phantom_delay_seconds, |ui| {
+                        let mut v = params.phantom_delay_seconds;
+                        if ui.add(egui::Slider::new(&mut v, 0.1..=3.0).text("Delay (s)").step_by(0.1)).changed() {
+                            changes.push(ParamChange::PhantomDelaySeconds(v));
+                        }
+                    });
+                });
+
+                // Key color
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phantom_key_color).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhantomKeyColor));
+                    }
+                    ui.add_enabled_ui(!params.locks.phantom_key_color, |ui| {
+                        let mut c = params.phantom_key_color;
+                        if egui::color_picker::color_edit_button_rgb(ui, &mut c).changed() {
+                            changes.push(ParamChange::PhantomKeyColor(c));
+                        }
+                        ui.label("Key Color");
+                    });
+                });
+
+                // Key tolerance
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phantom_key_tolerance).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhantomKeyTolerance));
+                    }
+                    ui.add_enabled_ui(!params.locks.phantom_key_tolerance, |ui| {
+                        let mut v = params.phantom_key_tolerance;
+                        if ui.add(egui::Slider::new(&mut v, 0.0..=0.5).text("Key Tolerance").step_by(0.01)).changed() {
+                            changes.push(ParamChange::PhantomKeyTolerance(v));
+                        }
+                    });
+                });
+
+                // Key softness
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phantom_key_softness).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhantomKeySoftness));
+                    }
+                    ui.add_enabled_ui(!params.locks.phantom_key_softness, |ui| {
+                        let mut v = params.phantom_key_softness;
+                        if ui.add(egui::Slider::new(&mut v, 0.0..=0.2).text("Key Softness").step_by(0.005)).changed() {
+                            changes.push(ParamChange::PhantomKeySoftness(v));
+                        }
+                    });
+                });
+
+                // Key strength
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phantom_key_strength).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhantomKeyStrength));
+                    }
+                    ui.add_enabled_ui(!params.locks.phantom_key_strength, |ui| {
+                        let mut v = params.phantom_key_strength;
+                        if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Key Strength").step_by(0.05)).changed() {
+                            changes.push(ParamChange::PhantomKeyStrength(v));
+                        }
+                    });
+                });
+
+                // Opacity
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phantom_opacity).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhantomOpacity));
+                    }
+                    ui.add_enabled_ui(!params.locks.phantom_opacity, |ui| {
+                        let mut v = params.phantom_opacity;
+                        if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Opacity").step_by(0.05)).changed() {
+                            changes.push(ParamChange::PhantomOpacity(v));
+                        }
+                    });
                 });
             });
         });
