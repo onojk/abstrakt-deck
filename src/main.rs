@@ -1,4 +1,5 @@
 mod audio;
+mod color;
 mod help_overlay;
 mod menu_bar;
 mod midi;
