@@ -7,15 +7,166 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use realfft::RealFftPlanner;
 
+/// Which part of the spectrum triggered a beat onset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeatBand {
+    /// Sub-bass + bass (bands 0-1): kick drums, bass notes
+    Low,
+    /// Low-mid + mid + upper-mid (bands 2-4): snares, vocals
+    Mid,
+    /// Presence + brilliance + air (bands 5-7): hi-hats, cymbals
+    High,
+    /// Whole-spectrum onset — what the legacy detector used to emit
+    Broadband,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum AudioEvent {
-    Beat(f32),
+    Beat { strength: f32, band: BeatBand },
+}
+
+/// Attack/Hold/Release envelope for beat decay.
+///
+/// Replaces the legacy `beat_decay *= exp(-5*dt)` model. Each trigger:
+///   * **Attack** (~20ms): rises to the trigger strength
+///   * **Hold** (~50ms): stays at peak — gives visuals a flash to see
+///   * **Release** (~180ms): exponential decay to 0
+///
+/// At 120 BPM the envelope reaches 0 for ~250ms between beats instead of
+/// lingering near 0.08 — visuals see distinct pulses, not a constant glow.
+#[derive(Debug, Clone)]
+pub struct BeatEnvelope {
+    value:                 f32,
+    phase_seconds:         f32,
+    last_trigger_strength: f32,
+    pub attack_seconds:  f32,
+    pub hold_seconds:    f32,
+    pub release_seconds: f32,
+}
+
+impl BeatEnvelope {
+    pub fn new() -> Self {
+        Self {
+            value:                 0.0,
+            phase_seconds:         999.0,
+            last_trigger_strength: 0.0,
+            attack_seconds:  0.020,
+            hold_seconds:    0.050,
+            release_seconds: 0.180,
+        }
+    }
+
+    /// Trigger a new beat. Ignores weaker triggers during attack/hold of a stronger one.
+    pub fn trigger(&mut self, strength: f32) {
+        let s = strength.clamp(0.0, 1.0);
+        if self.phase_seconds < (self.attack_seconds + self.hold_seconds)
+            && s < self.last_trigger_strength
+        {
+            return;
+        }
+        self.last_trigger_strength = s;
+        self.phase_seconds = 0.0;
+    }
+
+    /// Advance by `dt` seconds and return the new value.
+    pub fn update(&mut self, dt: f32) -> f32 {
+        self.phase_seconds += dt;
+        let p = self.phase_seconds;
+        let s = self.last_trigger_strength;
+
+        self.value = if p < self.attack_seconds {
+            s * (p / self.attack_seconds.max(1e-6))
+        } else if p < self.attack_seconds + self.hold_seconds {
+            s
+        } else {
+            let rp = p - self.attack_seconds - self.hold_seconds;
+            let tau = self.release_seconds / 3.0;
+            s * (-rp / tau.max(1e-6)).exp()
+        };
+
+        if self.value < 0.001 { self.value = 0.0; }
+        self.value
+    }
+
+    #[allow(dead_code)]
+    pub fn value(&self) -> f32 { self.value }
+}
+
+impl Default for BeatEnvelope {
+    fn default() -> Self { Self::new() }
+}
+
+/// Tracks recent inter-beat intervals and produces a cooldown duration
+/// proportional to detected tempo. Uses median (not mean) to resist outliers.
+#[derive(Debug, Clone)]
+pub struct AdaptiveCooldown {
+    last_beat:  Option<Instant>,
+    history_ms: Vec<u64>,
+    capacity:   usize,
+    pub floor_ms: u64,
+    pub ceil_ms:  u64,
+    pub fraction: f32,
+}
+
+impl AdaptiveCooldown {
+    pub fn new() -> Self {
+        Self {
+            last_beat:  None,
+            history_ms: Vec::with_capacity(8),
+            capacity:   8,
+            floor_ms:   80,
+            ceil_ms:    220,
+            fraction:   0.40,
+        }
+    }
+
+    pub fn can_fire(&self) -> bool {
+        match self.last_beat {
+            None    => true,
+            Some(t) => t.elapsed().as_millis() as u64 >= self.current_cooldown_ms(),
+        }
+    }
+
+    pub fn record_fire(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last_beat {
+            let interval = prev.elapsed().as_millis() as u64;
+            if interval >= self.floor_ms && interval <= 2000 {
+                if self.history_ms.len() >= self.capacity {
+                    self.history_ms.remove(0);
+                }
+                self.history_ms.push(interval);
+            }
+        }
+        self.last_beat = Some(now);
+    }
+
+    fn current_cooldown_ms(&self) -> u64 {
+        if self.history_ms.is_empty() {
+            return 120;
+        }
+        let mut sorted = self.history_ms.clone();
+        sorted.sort_unstable();
+        let median = sorted[sorted.len() / 2];
+        let cooldown = (median as f32 * self.fraction) as u64;
+        cooldown.clamp(self.floor_ms, self.ceil_ms)
+    }
+}
+
+impl Default for AdaptiveCooldown {
+    fn default() -> Self { Self::new() }
 }
 
 #[derive(Default)]
 pub struct AudioState {
-    pub bands: [f32; 8],
-    pub beat_decay: f32,
+    pub bands:           [f32; 8],
+    pub beat_decay:      f32,
+    /// Per-band envelope values from the slice 7 detector.
+    /// Low/high exposed so visual params can route specific bands separately
+    /// (e.g. temperature bias: low→warm, high→cool).
+    pub beat_decay_low:  f32,
+    pub beat_decay_mid:  f32,
+    pub beat_decay_high: f32,
 }
 
 /// Mic noise filter: high-pass IIR at 80 Hz, RMS gate with hysteresis,
@@ -340,24 +491,31 @@ impl AudioCapture {
 }
 
 struct BeatAnalyzer {
-    sample_rate: u32,
-    channels: usize,
-    sample_buffer: Vec<f32>,
-    fft_size: usize,
-    planner: RealFftPlanner<f32>,
-    flux_history: Vec<f32>,
-    flux_history_size: usize,
-    prev_spectrum: Vec<f32>,
-    last_beat: Option<Instant>,
-    beat_cooldown_ms: u64,
-    rms_smoothed: f32,
-    beat_decay: f32,
+    sample_rate:        u32,
+    channels:           usize,
+    sample_buffer:      Vec<f32>,
+    fft_size:           usize,
+    planner:            RealFftPlanner<f32>,
+    prev_spectrum:      Vec<f32>,
+    flux_history_low:   VecDeque<f32>,
+    flux_history_mid:   VecDeque<f32>,
+    flux_history_high:  VecDeque<f32>,
+    flux_history_bb:    VecDeque<f32>,
+    flux_history_size:  usize,
+    broadband_cooldown: AdaptiveCooldown,
+    broadband_envelope: BeatEnvelope,
+    low_cooldown:       AdaptiveCooldown,
+    low_envelope:       BeatEnvelope,
+    mid_cooldown:       AdaptiveCooldown,
+    mid_envelope:       BeatEnvelope,
+    high_cooldown:      AdaptiveCooldown,
+    high_envelope:      BeatEnvelope,
     // Per-band AGC: tracks the running peak of each band energy.
     // Initialised to 0.0 so the first real signal immediately sets the scale.
-    band_peak: [f32; 8],
-    agc_log_timer: Instant,
-    agc_logged: bool,
-    noise_filter: NoiseFilter,
+    band_peak:          [f32; 8],
+    agc_log_timer:      Instant,
+    agc_logged:         bool,
+    noise_filter:       NoiseFilter,
 }
 
 impl BeatAnalyzer {
@@ -370,13 +528,20 @@ impl BeatAnalyzer {
             sample_buffer: Vec::with_capacity(fft_size * 2),
             fft_size,
             planner: RealFftPlanner::<f32>::new(),
-            flux_history: Vec::with_capacity(flux_history_size),
-            flux_history_size,
             prev_spectrum: vec![0.0; fft_size / 2 + 1],
-            last_beat: None,
-            beat_cooldown_ms: 120,
-            rms_smoothed: 0.0,
-            beat_decay: 0.0,
+            flux_history_low:  VecDeque::with_capacity(flux_history_size + 1),
+            flux_history_mid:  VecDeque::with_capacity(flux_history_size + 1),
+            flux_history_high: VecDeque::with_capacity(flux_history_size + 1),
+            flux_history_bb:   VecDeque::with_capacity(flux_history_size + 1),
+            flux_history_size,
+            broadband_cooldown: AdaptiveCooldown::new(),
+            broadband_envelope: BeatEnvelope::new(),
+            low_cooldown:       AdaptiveCooldown::new(),
+            low_envelope:       BeatEnvelope::new(),
+            mid_cooldown:       AdaptiveCooldown::new(),
+            mid_envelope:       BeatEnvelope::new(),
+            high_cooldown:      AdaptiveCooldown::new(),
+            high_envelope:      BeatEnvelope::new(),
             band_peak: [0.0; 8],
             agc_log_timer: Instant::now(),
             agc_logged: false,
@@ -423,10 +588,6 @@ impl BeatAnalyzer {
         event_tx: &Sender<AudioEvent>,
         state: &Arc<Mutex<AudioState>>,
     ) {
-        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
-        let rms = (sum_sq / chunk.len() as f32).sqrt();
-        self.rms_smoothed = self.rms_smoothed * 0.7 + rms * 0.3;
-
         let mut windowed: Vec<f32> = chunk
             .iter()
             .enumerate()
@@ -448,11 +609,26 @@ impl BeatAnalyzer {
 
         let magnitudes = spectral_magnitudes(&spectrum);
 
-        let flux: f32 = magnitudes
-            .iter()
-            .zip(self.prev_spectrum.iter())
-            .map(|(curr, prev)| (curr - prev).max(0.0))
-            .sum();
+        // Per-band spectral flux: split by frequency range.
+        let bin_hz  = self.sample_rate as f32 / self.fft_size as f32;
+        let lo_low  = (60.0     / bin_hz) as usize;
+        let hi_low  = (250.0    / bin_hz) as usize;
+        let hi_mid  = (2000.0   / bin_hz) as usize;
+        let hi_high = ((16000.0 / bin_hz) as usize).min(magnitudes.len());
+        let n       = magnitudes.len().min(self.prev_spectrum.len());
+
+        let flux_bb   = magnitudes[..n].iter().zip(&self.prev_spectrum[..n])
+            .map(|(c, p)| (c - p).max(0.0)).sum::<f32>();
+        let flux_low  = magnitudes[lo_low..hi_low.min(n)].iter()
+            .zip(&self.prev_spectrum[lo_low..hi_low.min(n)])
+            .map(|(c, p)| (c - p).max(0.0)).sum::<f32>();
+        let flux_mid  = magnitudes[hi_low..hi_mid.min(n)].iter()
+            .zip(&self.prev_spectrum[hi_low..hi_mid.min(n)])
+            .map(|(c, p)| (c - p).max(0.0)).sum::<f32>();
+        let flux_high = magnitudes[hi_mid..hi_high.min(n)].iter()
+            .zip(&self.prev_spectrum[hi_mid..hi_high.min(n)])
+            .map(|(c, p)| (c - p).max(0.0)).sum::<f32>();
+
         self.prev_spectrum = magnitudes.clone();
 
         let mut raw_bands = bands_from_magnitudes(&magnitudes, self.sample_rate, self.fft_size);
@@ -478,44 +654,63 @@ impl BeatAnalyzer {
             self.agc_logged = true;
         }
 
-        // Continuous exponential decay per chunk (dt = chunk duration in seconds)
+        // Advance all envelopes by this chunk's dt; write combined decay to AudioState.
         let dt = self.fft_size as f32 / self.sample_rate as f32;
-        self.beat_decay *= (-5.0 * dt).exp();
+        let v_bb   = self.broadband_envelope.update(dt);
+        let v_low  = self.low_envelope.update(dt);
+        let v_mid  = self.mid_envelope.update(dt);
+        let v_high = self.high_envelope.update(dt);
+        let combined_decay = v_bb.max(v_low).max(v_mid).max(v_high);
 
         {
             let mut s = state.lock();
-            s.bands = bands;
-            s.beat_decay = self.beat_decay;
+            s.bands           = bands;
+            s.beat_decay      = combined_decay;
+            s.beat_decay_low  = v_low;
+            s.beat_decay_mid  = v_mid;
+            s.beat_decay_high = v_high;
         }
 
-        self.flux_history.push(flux);
-        if self.flux_history.len() > self.flux_history_size {
-            self.flux_history.remove(0);
-        }
-        if self.flux_history.len() < self.flux_history_size {
-            return;
-        }
+        // Push flux values to per-band histories.
+        let sz = self.flux_history_size;
+        if self.flux_history_bb.len()   >= sz { self.flux_history_bb.pop_front(); }
+        if self.flux_history_low.len()  >= sz { self.flux_history_low.pop_front(); }
+        if self.flux_history_mid.len()  >= sz { self.flux_history_mid.pop_front(); }
+        if self.flux_history_high.len() >= sz { self.flux_history_high.pop_front(); }
+        self.flux_history_bb.push_back(flux_bb);
+        self.flux_history_low.push_back(flux_low);
+        self.flux_history_mid.push_back(flux_mid);
+        self.flux_history_high.push_back(flux_high);
 
-        let avg_flux: f32 =
-            self.flux_history.iter().sum::<f32>() / self.flux_history_size as f32;
-        let threshold = avg_flux * 1.5;
+        // Per-band onset detection.
+        Self::detect_and_fire(flux_bb,   &self.flux_history_bb,   sz, 1.5, 0.50, &mut self.broadband_cooldown, &mut self.broadband_envelope, BeatBand::Broadband, event_tx);
+        Self::detect_and_fire(flux_low,  &self.flux_history_low,  sz, 1.5, 0.30, &mut self.low_cooldown,       &mut self.low_envelope,       BeatBand::Low,       event_tx);
+        Self::detect_and_fire(flux_mid,  &self.flux_history_mid,  sz, 1.5, 0.30, &mut self.mid_cooldown,       &mut self.mid_envelope,       BeatBand::Mid,       event_tx);
+        Self::detect_and_fire(flux_high, &self.flux_history_high, sz, 1.5, 0.20, &mut self.high_cooldown,      &mut self.high_envelope,      BeatBand::High,      event_tx);
+    }
 
-        if let Some(last) = self.last_beat {
-            if last.elapsed().as_millis() < self.beat_cooldown_ms as u128 {
-                return;
-            }
-        }
-
-        if flux > threshold && flux > 0.5 {
+    fn detect_and_fire(
+        flux: f32,
+        history: &VecDeque<f32>,
+        history_size: usize,
+        threshold_mult: f32,
+        min_flux: f32,
+        cooldown: &mut AdaptiveCooldown,
+        envelope: &mut BeatEnvelope,
+        band: BeatBand,
+        event_tx: &Sender<AudioEvent>,
+    ) {
+        if history.len() < history_size { return; }
+        let avg = history.iter().sum::<f32>() / history_size as f32;
+        let threshold = avg * threshold_mult;
+        if flux > threshold && flux > min_flux && cooldown.can_fire() {
             let strength = ((flux / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
-            self.beat_decay = self.beat_decay.max(1.0);
-            self.last_beat = Some(Instant::now());
-            let _ = event_tx.try_send(AudioEvent::Beat(strength));
+            envelope.trigger(strength);
+            cooldown.record_fire();
+            let _ = event_tx.try_send(AudioEvent::Beat { strength, band });
             log::debug!(
-                "BEAT strength={:.2} flux={:.3} threshold={:.3}",
-                strength,
-                flux,
-                threshold
+                "BEAT {:?} strength={:.2} flux={:.3} thr={:.3}",
+                band, strength, flux, threshold
             );
         }
     }
@@ -548,13 +743,14 @@ pub fn compute_band_energies(mono: &[f32], sample_rate: u32) -> [f32; 8] {
     bands_from_magnitudes(&magnitudes, sample_rate, FFT_SIZE)
 }
 
-/// Per-export-frame analyzer: stateful spectral-flux beat detection + continuous beat decay.
+/// Per-export-frame analyzer: stateful spectral-flux beat detection + envelope-based beat decay.
 pub struct OfflineAnalyzer {
     planner: RealFftPlanner<f32>,
     prev_spectrum: Vec<f32>,
     flux_history: VecDeque<f32>,
     cooldown_frames: u32,
     pub beat_decay: f32,
+    envelope: BeatEnvelope,
 }
 
 impl OfflineAnalyzer {
@@ -568,6 +764,7 @@ impl OfflineAnalyzer {
             flux_history: VecDeque::with_capacity(Self::FLUX_HISTORY_SIZE + 1),
             cooldown_frames: 0,
             beat_decay: 0.0,
+            envelope: BeatEnvelope::new(),
         }
     }
 
@@ -575,7 +772,7 @@ impl OfflineAnalyzer {
     /// Returns (8-band energies, beat_decay).
     pub fn analyze_frame(&mut self, mono: &[f32], sample_rate: u32, dt: f32) -> ([f32; 8], f32) {
         if mono.is_empty() {
-            self.beat_decay *= (-5.0 * dt).exp();
+            self.beat_decay = self.envelope.update(dt);
             return ([0.0; 8], self.beat_decay);
         }
 
@@ -594,7 +791,7 @@ impl OfflineAnalyzer {
 
         let mut spectrum = r2c.make_output_vec();
         if r2c.process(&mut windowed, &mut spectrum).is_err() {
-            self.beat_decay *= (-5.0 * dt).exp();
+            self.beat_decay = self.envelope.update(dt);
             return ([0.0; 8], self.beat_decay);
         }
 
@@ -618,7 +815,8 @@ impl OfflineAnalyzer {
             let avg_flux =
                 self.flux_history.iter().sum::<f32>() / Self::FLUX_HISTORY_SIZE as f32;
             if flux > avg_flux * 1.5 && flux > 0.01 && self.cooldown_frames == 0 {
-                self.beat_decay = 1.0;
+                let strength = ((flux / (avg_flux * 1.5)).min(3.0) / 3.0).clamp(0.0, 1.0);
+                self.envelope.trigger(strength);
                 // 150ms cooldown — Android's 3 × 50ms windows mapped to per-frame count.
                 self.cooldown_frames = (0.15 / dt).round() as u32;
             }
@@ -628,7 +826,7 @@ impl OfflineAnalyzer {
             self.cooldown_frames -= 1;
         }
 
-        self.beat_decay *= (-5.0 * dt).exp();
+        self.beat_decay = self.envelope.update(dt);
         (bands, self.beat_decay)
     }
 }
@@ -664,17 +862,76 @@ mod tests {
 
     #[test]
     fn offline_analyzer_beat_decay_decays() {
+        // With envelope-based decay: empty frames with no triggered beat keep decay at 0.0.
         let mut analyzer = OfflineAnalyzer::new();
-        analyzer.beat_decay = 1.0;
         let dt = 1.0 / 24.0f32;
         let (_, decay) = analyzer.analyze_frame(&[], 44100, dt);
-        let expected = (-5.0_f32 * dt).exp();
         assert!(
-            (decay - expected).abs() < 1e-5,
-            "beat_decay should decay by exp(-5*dt), got {} expected {}",
-            decay,
-            expected
+            decay < 1e-6,
+            "beat_decay should stay near-zero with no triggered beat, got {}",
+            decay
         );
+    }
+
+    #[test]
+    fn beat_envelope_starts_at_zero() {
+        let env = BeatEnvelope::new();
+        assert!(env.value() < 1e-6, "fresh envelope should be zero, got {}", env.value());
+    }
+
+    #[test]
+    fn beat_envelope_attack_rises_to_peak() {
+        let mut env = BeatEnvelope::new();
+        env.trigger(1.0);
+        let half_attack = env.attack_seconds / 2.0;
+        let v_half = env.update(half_attack);
+        assert!(v_half > 0.1 && v_half < 0.9, "halfway through attack should be ~0.5, got {}", v_half);
+        let v_end = env.update(half_attack);
+        assert!(v_end > 0.9, "end of attack should be near 1.0, got {}", v_end);
+    }
+
+    #[test]
+    fn beat_envelope_holds_then_releases() {
+        let mut env = BeatEnvelope::new();
+        env.trigger(1.0);
+        let _ = env.update(env.attack_seconds + env.hold_seconds);
+        assert!(env.value() > 0.9, "at end of hold should be near 1.0, got {}", env.value());
+        let _ = env.update(env.release_seconds);
+        assert!(env.value() < 0.5, "well into release should be < 0.5, got {}", env.value());
+    }
+
+    #[test]
+    fn beat_envelope_retrigger_during_release_restarts() {
+        let mut env = BeatEnvelope::new();
+        env.trigger(1.0);
+        let _ = env.update(env.attack_seconds + env.hold_seconds + 0.05);
+        let v_release = env.value();
+        assert!(v_release < 0.9, "should be in release, got {}", v_release);
+        env.trigger(1.0);
+        let v_restart = env.update(0.001);
+        assert!(v_restart < 0.1, "retrigger should restart attack from ~0, got {}", v_restart);
+    }
+
+    #[test]
+    fn adaptive_cooldown_starts_permissive() {
+        let cooldown = AdaptiveCooldown::new();
+        assert!(cooldown.can_fire(), "fresh cooldown should allow first fire");
+    }
+
+    #[test]
+    fn adaptive_cooldown_blocks_immediate_refire() {
+        let mut cooldown = AdaptiveCooldown::new();
+        assert!(cooldown.can_fire());
+        cooldown.record_fire();
+        assert!(!cooldown.can_fire(), "should block immediate second fire");
+    }
+
+    #[test]
+    fn adaptive_cooldown_tracks_inter_beat_interval() {
+        let mut cooldown = AdaptiveCooldown::new();
+        cooldown.record_fire();
+        // After one fire with no previous, history stays empty — default 120ms cooldown applies.
+        assert!(!cooldown.can_fire(), "should be in cooldown after first fire");
     }
 
     #[test]

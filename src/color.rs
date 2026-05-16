@@ -223,6 +223,98 @@ pub fn random_color_tasteful<R: rand::Rng>(rng: &mut R) -> [f32; 3] {
     random_hsv(rng, [0.0, 360.0], [0.55, 0.95], [0.65, 1.0])
 }
 
+/// Hornung Part 2 saturation categories. Each constrains color generation
+/// to a band of saturation values appropriate to that artistic mode.
+///
+/// `Free` means no constraint — the saturation slider can be anywhere in
+/// [0, 1] and randomization picks across the full range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SaturationMode {
+    /// No constraint — saturation can be anywhere in [0, 1]
+    Free,
+    /// High saturation: vibrant, punchy, electric. Pop art / neon territory.
+    Pure,
+    /// Moderate saturation: sophisticated, restrained. Where most fine art lives.
+    Muted,
+    /// Very low saturation but still hue-identified. Atmospheric, fog-like.
+    ChromaticGray,
+}
+
+impl Default for SaturationMode {
+    fn default() -> Self { SaturationMode::Free }
+}
+
+impl SaturationMode {
+    pub fn next(self) -> Self {
+        match self {
+            SaturationMode::Free          => SaturationMode::Pure,
+            SaturationMode::Pure          => SaturationMode::Muted,
+            SaturationMode::Muted         => SaturationMode::ChromaticGray,
+            SaturationMode::ChromaticGray => SaturationMode::Free,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SaturationMode::Free          => "Free",
+            SaturationMode::Pure          => "Pure",
+            SaturationMode::Muted         => "Muted",
+            SaturationMode::ChromaticGray => "Chromatic Gray",
+        }
+    }
+
+    pub fn range(self) -> [f32; 2] {
+        match self {
+            SaturationMode::Free          => [0.00, 1.00],
+            SaturationMode::Pure          => [0.75, 1.00],
+            SaturationMode::Muted         => [0.30, 0.65],
+            SaturationMode::ChromaticGray => [0.05, 0.25],
+        }
+    }
+
+    pub fn default_value(self) -> f32 {
+        let r = self.range();
+        (r[0] + r[1]) * 0.5
+    }
+
+    pub fn clamp(self, sat: f32) -> f32 {
+        let r = self.range();
+        sat.clamp(r[0], r[1])
+    }
+}
+
+/// Pull a hue toward the warm pole (30° = orange) or cool pole (210° = cyan).
+///
+/// `bias` is in [-1, 1]:
+///   * -1.0 → maximum cool pull (hue rotates toward 210°)
+///   *  0.0 → no change
+///   * +1.0 → maximum warm pull (hue rotates toward 30°)
+///
+/// At full bias the hue moves up to 60° around the wheel toward the target
+/// pole — enough to shift temperature feel substantially without collapsing
+/// all hues onto the pole.
+pub fn apply_temperature_bias(hue_deg: f32, bias: f32) -> f32 {
+    let bias = bias.clamp(-1.0, 1.0);
+    if bias.abs() < 1e-4 {
+        return wrap_hue(hue_deg);
+    }
+
+    let pole = if bias > 0.0 { 30.0_f32 } else { 210.0_f32 };
+
+    let raw_delta = pole - wrap_hue(hue_deg);
+    let delta = if raw_delta > 180.0 {
+        raw_delta - 360.0
+    } else if raw_delta < -180.0 {
+        raw_delta + 360.0
+    } else {
+        raw_delta
+    };
+
+    let max_pull = 60.0_f32;
+    let pull = delta.signum() * delta.abs().min(max_pull) * bias.abs();
+    wrap_hue(hue_deg + pull)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +432,93 @@ mod tests {
             assert!(s >= 0.5,  "tasteful color should be at least 0.5 saturated, got {}", s);
             assert!(v >= 0.65, "tasteful color should be at least 0.65 value, got {}", v);
         }
+    }
+
+    #[test]
+    fn saturation_mode_ranges_are_disjoint() {
+        let pure  = SaturationMode::Pure.range();
+        let muted = SaturationMode::Muted.range();
+        let gray  = SaturationMode::ChromaticGray.range();
+        assert!(gray[1]  < muted[0], "Chromatic Gray ceiling {} should be below Muted floor {}", gray[1], muted[0]);
+        assert!(muted[1] < pure[0],  "Muted ceiling {} should be below Pure floor {}", muted[1], pure[0]);
+    }
+
+    #[test]
+    fn saturation_mode_clamp_constrains() {
+        assert_eq!(SaturationMode::Pure.clamp(0.1),  0.75);
+        assert_eq!(SaturationMode::Pure.clamp(1.0),  1.0);
+        assert_eq!(SaturationMode::Muted.clamp(0.9), 0.65);
+        assert_eq!(SaturationMode::Muted.clamp(0.0), 0.30);
+        assert_eq!(SaturationMode::ChromaticGray.clamp(0.5), 0.25);
+        assert_eq!(SaturationMode::Free.clamp(0.5),  0.5);
+        assert_eq!(SaturationMode::Free.clamp(-0.5), 0.0);
+        assert_eq!(SaturationMode::Free.clamp(2.0),  1.0);
+    }
+
+    #[test]
+    fn saturation_mode_default_is_in_range() {
+        for m in [
+            SaturationMode::Free,
+            SaturationMode::Pure,
+            SaturationMode::Muted,
+            SaturationMode::ChromaticGray,
+        ] {
+            let v = m.default_value();
+            let r = m.range();
+            assert!(v >= r[0] && v <= r[1],
+                "{:?} default {} should be in range [{}, {}]", m, v, r[0], r[1]);
+        }
+    }
+
+    #[test]
+    fn temperature_zero_is_identity() {
+        for h in [0.0, 90.0, 180.0, 270.0, 359.9] {
+            let result = apply_temperature_bias(h, 0.0);
+            assert!((wrap_hue(h) - result).abs() < 1e-3,
+                "hue {} with zero bias should be ~{}, got {}", h, h, result);
+        }
+    }
+
+    #[test]
+    fn temperature_warm_pulls_toward_orange() {
+        let result = apply_temperature_bias(240.0, 1.0);
+        assert!(result > 240.0 && result < 360.0,
+            "blue under full warm bias should move toward warm, got {}", result);
+    }
+
+    #[test]
+    fn temperature_cool_pulls_toward_cyan() {
+        let result = apply_temperature_bias(0.0, -1.0);
+        assert!(result > 270.0 && result < 360.0,
+            "red under full cool bias should rotate through magenta toward cyan, got {}", result);
+    }
+
+    #[test]
+    fn temperature_already_warm_stays_warm() {
+        let result = apply_temperature_bias(30.0, 1.0);
+        assert!((result - 30.0).abs() < 1.0,
+            "hue at warm pole should not move under warm bias, got {}", result);
+    }
+
+    #[test]
+    fn temperature_clamps_to_bounds() {
+        let r1 = apply_temperature_bias(180.0,  5.0);
+        let r2 = apply_temperature_bias(180.0,  1.0);
+        let r3 = apply_temperature_bias(180.0, -5.0);
+        let r4 = apply_temperature_bias(180.0, -1.0);
+        assert!((r1 - r2).abs() < 1e-3, "bias > 1 should clamp to 1");
+        assert!((r3 - r4).abs() < 1e-3, "bias < -1 should clamp to -1");
+    }
+
+    #[test]
+    fn saturation_mode_next_cycles_through_all() {
+        let mut m = SaturationMode::Free;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..4 {
+            seen.insert(format!("{:?}", m));
+            m = m.next();
+        }
+        assert_eq!(seen.len(), 4);
+        assert_eq!(m, SaturationMode::Free);
     }
 }

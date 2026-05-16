@@ -41,8 +41,11 @@ pub enum LockTarget {
     BlackholeWarpCurve,
     BlackholeAlphaRadius,
     BlackholeWanderAmount,
+    ColorTemperatureBias,
+    ColorTemperatureAudio,
     ColorHarmony,
     ColorAnchorHue,
+    ColorSaturationMode,
     ColorSaturation,
     ColorValue,
     ColorHarmonyStrength,
@@ -131,8 +134,11 @@ pub enum ParamChange {
     BlackholeWarpCurve(f32),
     BlackholeAlphaRadius(f32),
     BlackholeWanderAmount(f32),
+    ColorTemperatureBias(f32),
+    ColorTemperatureAudio(f32),
     ColorHarmony(crate::color::ColorHarmony),
     ColorAnchorHue(f32),
+    ColorSaturationMode(crate::color::SaturationMode),
     ColorSaturation(f32),
     ColorValue(f32),
     ColorHarmonyStrength(f32),
@@ -1275,6 +1281,31 @@ impl MenuBar {
                 });
             });
 
+            // Saturation mode dropdown
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_saturation_mode).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorSaturationMode));
+                }
+                ui.add_enabled_ui(!params.locks.color_saturation_mode, |ui| {
+                    ui.label("Sat mode");
+                    let current = params.color_saturation_mode;
+                    egui::ComboBox::from_id_salt("color_saturation_mode_combo")
+                        .selected_text(current.name())
+                        .show_ui(ui, |ui| {
+                            for m in [
+                                crate::color::SaturationMode::Free,
+                                crate::color::SaturationMode::Pure,
+                                crate::color::SaturationMode::Muted,
+                                crate::color::SaturationMode::ChromaticGray,
+                            ] {
+                                if ui.selectable_label(current == m, m.name()).clicked() {
+                                    changes.push(ParamChange::ColorSaturationMode(m));
+                                }
+                            }
+                        });
+                });
+            });
+
             // Saturation slider
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.color_saturation).clicked() {
@@ -1282,7 +1313,8 @@ impl MenuBar {
                 }
                 ui.add_enabled_ui(!params.locks.color_saturation, |ui| {
                     let mut v = params.color_saturation;
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)
+                    let range = params.color_saturation_mode.range();
+                    if ui.add(egui::Slider::new(&mut v, range[0]..=range[1])
                         .text("Saturation").step_by(0.01)).changed()
                     {
                         changes.push(ParamChange::ColorSaturation(v));
@@ -1325,6 +1357,52 @@ impl MenuBar {
                         "↑ inactive — enable \"Apply to painter\" above or set Palette Mode = Harmony"
                     ).small().weak()
                 );
+            }
+
+            // ── Temperature ──────────────────────────────────────────────
+            ui.separator();
+            ui.label(egui::RichText::new("Temperature").small().strong());
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_temperature_bias).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorTemperatureBias));
+                }
+                ui.add_enabled_ui(!params.locks.color_temperature_bias, |ui| {
+                    let mut v = params.color_temperature_bias;
+                    if ui.add(
+                        egui::Slider::new(&mut v, -1.0..=1.0)
+                            .text("Bias")
+                            .custom_formatter(|n, _| {
+                                if n.abs() < 0.05 { "neutral".to_string() }
+                                else if n > 0.0   { format!("warm {:+.2}", n) }
+                                else              { format!("cool {:+.2}", n) }
+                            })
+                    ).changed() {
+                        changes.push(ParamChange::ColorTemperatureBias(v));
+                    }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_temperature_audio).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorTemperatureAudio));
+                }
+                ui.add_enabled_ui(!params.locks.color_temperature_audio, |ui| {
+                    let mut v = params.color_temperature_audio;
+                    if ui.add(
+                        egui::Slider::new(&mut v, 0.0..=1.0)
+                            .text("Audio (kicks warm, hats cool)")
+                            .step_by(0.01)
+                    ).changed() {
+                        changes.push(ParamChange::ColorTemperatureAudio(v));
+                    }
+                });
+            });
+
+            if params.color_temperature_audio > 0.01 {
+                ui.label(egui::RichText::new(
+                    "↑ palette breathes with the rhythm section"
+                ).small().weak());
             }
 
             // Palette preview: 6 swatches

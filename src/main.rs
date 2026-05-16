@@ -340,6 +340,9 @@ pub struct ParamLocks {
     // Color Theory
     pub color_harmony:           bool,
     pub color_anchor_hue:        bool,
+    pub color_temperature_bias:  bool,
+    pub color_temperature_audio: bool,
+    pub color_saturation_mode:   bool,
     pub color_saturation:        bool,
     pub color_value:             bool,
     pub color_harmony_strength:  bool,
@@ -477,11 +480,14 @@ pub struct VisualParams {
     pub blackhole_wander_amount:  f32,
     // Color Theory harmony params
     pub color_harmony:            color::ColorHarmony,
-    pub color_anchor_hue:         f32,   // 0.0 .. 360.0
-    pub color_saturation:         f32,   // 0.0 .. 1.0
-    pub color_value:              f32,   // 0.0 .. 1.0
-    pub color_harmony_strength:   f32,   // 0.0 .. 1.0 blend into nearest harmony hue
-    pub applied_harmony_enabled:  bool,  // recolor Skin/Image/PrintHead via harmony
+    pub color_anchor_hue:         f32,              // 0.0 .. 360.0
+    pub color_temperature_bias:   f32,              // -1.0 (cool) .. +1.0 (warm)
+    pub color_temperature_audio:  f32,              //  0.0 (manual) .. 1.0 (full audio)
+    pub color_saturation_mode:    color::SaturationMode,
+    pub color_saturation:         f32,              // 0.0 .. 1.0
+    pub color_value:              f32,              // 0.0 .. 1.0
+    pub color_harmony_strength:   f32,              // 0.0 .. 1.0 blend into nearest harmony hue
+    pub applied_harmony_enabled:  bool,             // recolor Skin/Image/PrintHead via harmony
     // Phantom Alpha (mutually exclusive with blackhole in live path)
     pub phantom_enabled:       bool,
     pub phantom_delay_seconds: f32,
@@ -544,6 +550,9 @@ impl Default for VisualParams {
             blackhole_wander_amount: 0.005,
             color_harmony:           color::ColorHarmony::Analogous,
             color_anchor_hue:        210.0,
+            color_temperature_bias:  0.0,
+            color_temperature_audio: 0.0,
+            color_saturation_mode:   color::SaturationMode::Free,
             color_saturation:        0.75,
             color_value:             0.85,
             color_harmony_strength:  0.5,
@@ -678,6 +687,12 @@ struct Preset {
     color_harmony:    color::ColorHarmony,
     #[serde(default = "default_color_anchor_hue")]
     color_anchor_hue: f32,
+    #[serde(default = "default_color_temperature_bias")]
+    color_temperature_bias:  f32,
+    #[serde(default = "default_color_temperature_audio")]
+    color_temperature_audio: f32,
+    #[serde(default = "default_color_saturation_mode")]
+    color_saturation_mode: color::SaturationMode,
     #[serde(default = "default_color_saturation")]
     color_saturation: f32,
     #[serde(default = "default_color_value")]
@@ -706,9 +721,12 @@ fn default_phantom_key_tolerance()   -> f32  { 0.15 }
 fn default_phantom_key_softness()    -> f32  { 0.05 }
 fn default_phantom_key_strength()    -> f32  { 1.0 }
 fn default_phantom_opacity()         -> f32  { 0.85 }
-fn default_color_harmony()         -> color::ColorHarmony { color::ColorHarmony::Analogous }
-fn default_color_anchor_hue()      -> f32                 { 210.0 }
-fn default_color_saturation()      -> f32                 { 0.75 }
+fn default_color_harmony()           -> color::ColorHarmony    { color::ColorHarmony::Analogous }
+fn default_color_anchor_hue()        -> f32                     { 210.0 }
+fn default_color_temperature_bias()  -> f32                     { 0.0 }
+fn default_color_temperature_audio() -> f32                     { 0.0 }
+fn default_color_saturation_mode()   -> color::SaturationMode   { color::SaturationMode::Free }
+fn default_color_saturation()        -> f32                     { 0.75 }
 fn default_color_value()           -> f32                 { 0.85 }
 fn default_color_harmony_strength() -> f32                { 0.5 }
 
@@ -771,6 +789,9 @@ impl Preset {
             phantom_opacity:       params.phantom_opacity,
             color_harmony:           params.color_harmony,
             color_anchor_hue:        params.color_anchor_hue,
+            color_temperature_bias:  params.color_temperature_bias,
+            color_temperature_audio: params.color_temperature_audio,
+            color_saturation_mode:   params.color_saturation_mode,
             color_saturation:        params.color_saturation,
             color_value:             params.color_value,
             color_harmony_strength:  params.color_harmony_strength,
@@ -871,8 +892,11 @@ impl Preset {
         params.phantom_key_softness  = self.phantom_key_softness;
         params.phantom_key_strength  = self.phantom_key_strength;
         params.phantom_opacity       = self.phantom_opacity;
-        params.color_harmony           = self.color_harmony;
-        params.color_anchor_hue        = self.color_anchor_hue;
+        params.color_harmony            = self.color_harmony;
+        params.color_anchor_hue         = self.color_anchor_hue;
+        params.color_temperature_bias   = self.color_temperature_bias;
+        params.color_temperature_audio  = self.color_temperature_audio;
+        params.color_saturation_mode    = self.color_saturation_mode;
         params.color_saturation        = self.color_saturation;
         params.color_value             = self.color_value;
         params.color_harmony_strength  = self.color_harmony_strength;
@@ -1741,8 +1765,9 @@ struct GpuState {
     pub audio_player: Option<AudioPlayer>,
 
     // File-beat detection state (for shake when playing from file)
-    file_rms_baseline: f32,
-    last_file_beat:    Instant,
+    file_rms_baseline:  f32,
+    last_file_beat:     Instant,
+    file_beat_envelope: audio::BeatEnvelope,
 
     // Autonomous mode state
     last_random_change:    Instant,
@@ -1752,9 +1777,11 @@ struct GpuState {
     bass_mid_baseline:     f32,
 
     // 8-band EMA for shader uniforms; separate from bass_zoom_smoothed (used for zoom)
-    bands_smoothed:      [f32; 8],
-    shader_beat_decay:   f32,
-    last_audio_update:   Instant,
+    bands_smoothed:          [f32; 8],
+    shader_beat_decay:       f32,
+    shader_beat_decay_low:   f32,
+    shader_beat_decay_high:  f32,
+    last_audio_update:       Instant,
 
     pub params: VisualParams,
 }
@@ -3270,15 +3297,18 @@ impl GpuState {
             crop_y_offset: 0.5,
             loaded_audio: None,
             audio_player: None,
-            file_rms_baseline: 0.0,
-            last_file_beat: Instant::now(),
+            file_rms_baseline:  0.0,
+            last_file_beat:     Instant::now(),
+            file_beat_envelope: audio::BeatEnvelope::new(),
             last_random_change:    Instant::now(),
             last_reactive_trigger: Instant::now(),
             last_party_trigger:    Instant::now(),
             bass_mid_smoothed:  0.0,
             bass_mid_baseline:  0.0,
-            bands_smoothed:     [0.0; 8],
-            shader_beat_decay:  0.0,
+            bands_smoothed:         [0.0; 8],
+            shader_beat_decay:      0.0,
+            shader_beat_decay_low:  0.0,
+            shader_beat_decay_high: 0.0,
             last_audio_update:  Instant::now(),
             params: VisualParams::default(),
         }
@@ -3811,6 +3841,19 @@ impl GpuState {
             }
         }
 
+        // Compute effective anchor hue (base anchor + temperature bias + audio routing).
+        // Low-band envelope warms the anchor; high-band cools it. Single computation,
+        // two consumers: applied-harmony painters and palette-harmony pass.
+        let effective_temperature = (
+            self.params.color_temperature_bias
+            + (self.shader_beat_decay_low - self.shader_beat_decay_high)
+              * self.params.color_temperature_audio
+        ).clamp(-1.0, 1.0);
+        let effective_anchor_hue = color::apply_temperature_bias(
+            self.params.color_anchor_hue,
+            effective_temperature,
+        );
+
         // Write applied-harmony uniforms (consumed by Skin/Image/PrintHead painters).
         {
             let offsets_slice = self.params.color_harmony.hue_offsets();
@@ -3821,7 +3864,7 @@ impl GpuState {
             self.queue.write_buffer(&self.applied_harmony_buffer, 0,
                 bytemuck::cast_slice(&[AppliedHarmonyUniforms {
                     enabled:      if self.params.applied_harmony_enabled { 1 } else { 0 },
-                    anchor_hue:   self.params.color_anchor_hue,
+                    anchor_hue:   effective_anchor_hue,
                     saturation:   self.params.color_saturation,
                     value:        self.params.color_value,
                     strength:     self.params.color_harmony_strength,
@@ -3834,7 +3877,7 @@ impl GpuState {
         // Pass 1c: palette clamp (optional, skipped when Off)
         if self.params.palette_mode != PaletteMode::Off {
             let h_offsets = self.params.color_harmony.hue_offsets();
-            let h_anchor  = self.params.color_anchor_hue;
+            let h_anchor  = effective_anchor_hue;
             let mut ho = [0.0f32; 8];
             for (i, &off) in h_offsets.iter().enumerate().take(8) {
                 ho[i] = color::wrap_hue(h_anchor + off);
@@ -4894,6 +4937,14 @@ impl GpuState {
             }
         }
 
+        // Export path effective anchor (audio bands are 0 in offline mode —
+        // manual bias still applies; audio component requires a follow-up slice).
+        let export_temperature = self.params.color_temperature_bias.clamp(-1.0, 1.0);
+        let export_anchor_hue = color::apply_temperature_bias(
+            self.params.color_anchor_hue,
+            export_temperature,
+        );
+
         // Write applied-harmony uniforms for export path.
         {
             let offsets_slice = self.params.color_harmony.hue_offsets();
@@ -4904,7 +4955,7 @@ impl GpuState {
             self.queue.write_buffer(&self.applied_harmony_buffer, 0,
                 bytemuck::cast_slice(&[AppliedHarmonyUniforms {
                     enabled:      if self.params.applied_harmony_enabled { 1 } else { 0 },
-                    anchor_hue:   self.params.color_anchor_hue,
+                    anchor_hue:   export_anchor_hue,
                     saturation:   self.params.color_saturation,
                     value:        self.params.color_value,
                     strength:     self.params.color_harmony_strength,
@@ -4917,7 +4968,7 @@ impl GpuState {
         // Pass 1c: palette clamp for export path
         if self.params.palette_mode != PaletteMode::Off {
             let h_offsets = self.params.color_harmony.hue_offsets();
-            let h_anchor  = self.params.color_anchor_hue;
+            let h_anchor  = export_anchor_hue;
             let mut ho = [0.0f32; 8];
             for (i, &off) in h_offsets.iter().enumerate().take(8) {
                 ho[i] = color::wrap_hue(h_anchor + off);
@@ -5388,8 +5439,38 @@ impl GpuState {
         if !self.params.locks.color_anchor_hue {
             self.params.color_anchor_hue = rng.gen_range(0.0_f32..360.0);
         }
+        if !self.params.locks.color_temperature_bias {
+            let roll: f32 = rng.gen();
+            self.params.color_temperature_bias = if roll < 0.50 {
+                rng.gen_range(-0.2_f32..=0.2)
+            } else if roll < 0.75 {
+                rng.gen_range(0.3_f32..=0.7)
+            } else {
+                rng.gen_range(-0.7_f32..=-0.3)
+            };
+        }
+        if !self.params.locks.color_temperature_audio {
+            self.params.color_temperature_audio = if rng.gen_bool(0.30) {
+                rng.gen_range(0.2_f32..=0.8)
+            } else {
+                0.0
+            };
+        }
+        if !self.params.locks.color_saturation_mode {
+            let roll: f32 = rng.gen();
+            self.params.color_saturation_mode = if roll < 0.40 {
+                color::SaturationMode::Free
+            } else if roll < 0.70 {
+                color::SaturationMode::Muted
+            } else if roll < 0.88 {
+                color::SaturationMode::Pure
+            } else {
+                color::SaturationMode::ChromaticGray
+            };
+        }
         if !self.params.locks.color_saturation {
-            self.params.color_saturation = rng.gen_range(0.55_f32..=0.90);
+            let r = self.params.color_saturation_mode.range();
+            self.params.color_saturation = rng.gen_range(r[0]..=r[1]);
         }
         if !self.params.locks.color_value {
             self.params.color_value = rng.gen_range(0.65_f32..=1.0);
@@ -5987,9 +6068,15 @@ impl ApplicationHandler for App {
                     while let Ok(event) = audio.event_rx.try_recv() {
                         if live_mode {
                             match event {
-                                AudioEvent::Beat(strength) => {
+                                AudioEvent::Beat { strength, band } => {
+                                    let scale = match band {
+                                        audio::BeatBand::Low       => 1.00,
+                                        audio::BeatBand::Mid       => 0.70,
+                                        audio::BeatBand::High      => 0.35,
+                                        audio::BeatBand::Broadband => 0.80,
+                                    };
                                     if gpu.params.audio_shake_enabled {
-                                        gpu.kick_shake(strength);
+                                        gpu.kick_shake((strength * scale).clamp(0.0, 1.0));
                                     }
                                 }
                             }
@@ -6022,7 +6109,9 @@ impl ApplicationHandler for App {
 
                 let raw_bands: [f32; 8] = match mode {
                     AudioSourceMode::Silent => {
-                        gpu.shader_beat_decay = 0.0;
+                        gpu.shader_beat_decay      = 0.0;
+                        gpu.shader_beat_decay_low  = 0.0;
+                        gpu.shader_beat_decay_high = 0.0;
                         [0.0; 8]
                     }
                     AudioSourceMode::File => {
@@ -6034,25 +6123,34 @@ impl ApplicationHandler for App {
                                         let strength = ((rms / threshold).min(3.0) / 3.0).clamp(0.0, 1.0);
                                         gpu.kick_shake(strength);
                                         gpu.last_file_beat = Instant::now();
-                                        gpu.shader_beat_decay = gpu.shader_beat_decay.max(strength);
+                                        gpu.file_beat_envelope.trigger(strength);
                                     }
                                 }
                                 gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
-                                gpu.shader_beat_decay *= (-5.0 * frame_dt).exp();
+                                gpu.shader_beat_decay      = gpu.file_beat_envelope.update(frame_dt);
+                                gpu.shader_beat_decay_low  = 0.0;
+                                gpu.shader_beat_decay_high = 0.0;
                                 bands
                             }
                             None => {
-                                // File mode but not playing — decay and zero out.
-                                gpu.shader_beat_decay *= (-5.0 * frame_dt).exp();
+                                // File mode but not playing — let envelope decay naturally.
+                                gpu.shader_beat_decay      = gpu.file_beat_envelope.update(frame_dt);
+                                gpu.shader_beat_decay_low  = 0.0;
+                                gpu.shader_beat_decay_high = 0.0;
                                 [0.0; 8]
                             }
                         }
                     }
                     AudioSourceMode::Mic | AudioSourceMode::Loopback => {
-                        let (bands, bd) = self.audio.as_ref()
-                            .map(|a| { let s = a.state.lock(); (s.bands, s.beat_decay) })
-                            .unwrap_or(([0.0; 8], 0.0));
-                        gpu.shader_beat_decay = bd;
+                        let (bands, bd, bd_low, bd_high) = self.audio.as_ref()
+                            .map(|a| {
+                                let s = a.state.lock();
+                                (s.bands, s.beat_decay, s.beat_decay_low, s.beat_decay_high)
+                            })
+                            .unwrap_or(([0.0; 8], 0.0, 0.0, 0.0));
+                        gpu.shader_beat_decay      = bd;
+                        gpu.shader_beat_decay_low  = bd_low;
+                        gpu.shader_beat_decay_high = bd_high;
                         bands
                     }
                 };
@@ -6308,8 +6406,11 @@ impl ApplicationHandler for App {
                                 LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
                                 LockTarget::BlackholeAlphaRadius   => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
                                 LockTarget::BlackholeWanderAmount  => gpu.params.locks.blackhole_wander_amount = !gpu.params.locks.blackhole_wander_amount,
+                                LockTarget::ColorTemperatureBias  => gpu.params.locks.color_temperature_bias  = !gpu.params.locks.color_temperature_bias,
+                                LockTarget::ColorTemperatureAudio => gpu.params.locks.color_temperature_audio = !gpu.params.locks.color_temperature_audio,
                                 LockTarget::ColorHarmony          => gpu.params.locks.color_harmony           = !gpu.params.locks.color_harmony,
                                 LockTarget::ColorAnchorHue        => gpu.params.locks.color_anchor_hue        = !gpu.params.locks.color_anchor_hue,
+                                LockTarget::ColorSaturationMode   => gpu.params.locks.color_saturation_mode   = !gpu.params.locks.color_saturation_mode,
                                 LockTarget::ColorSaturation       => gpu.params.locks.color_saturation        = !gpu.params.locks.color_saturation,
                                 LockTarget::ColorValue            => gpu.params.locks.color_value             = !gpu.params.locks.color_value,
                                 LockTarget::ColorHarmonyStrength  => gpu.params.locks.color_harmony_strength  = !gpu.params.locks.color_harmony_strength,
@@ -6356,8 +6457,14 @@ impl ApplicationHandler for App {
                         ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
                         ParamChange::BlackholeAlphaRadius(v)   => gpu.params.blackhole_alpha_radius  = v,
                         ParamChange::BlackholeWanderAmount(v)  => gpu.params.blackhole_wander_amount = v,
+                        ParamChange::ColorTemperatureBias(v)  => gpu.params.color_temperature_bias  = v,
+                        ParamChange::ColorTemperatureAudio(v) => gpu.params.color_temperature_audio = v,
                         ParamChange::ColorHarmony(v)          => gpu.params.color_harmony           = v,
                         ParamChange::ColorAnchorHue(v)        => gpu.params.color_anchor_hue        = v,
+                        ParamChange::ColorSaturationMode(v)   => {
+                            gpu.params.color_saturation_mode = v;
+                            gpu.params.color_saturation = v.clamp(gpu.params.color_saturation);
+                        }
                         ParamChange::ColorSaturation(v)       => gpu.params.color_saturation        = v,
                         ParamChange::ColorValue(v)            => gpu.params.color_value             = v,
                         ParamChange::ColorHarmonyStrength(v)  => gpu.params.color_harmony_strength  = v,
@@ -6545,6 +6652,9 @@ mod tests {
             phantom_opacity:       0.7,
             color_harmony:           color::ColorHarmony::Triadic,
             color_anchor_hue:        45.0,
+            color_temperature_bias:  0.4,
+            color_temperature_audio: 0.6,
+            color_saturation_mode:   color::SaturationMode::Pure,
             color_saturation:        0.8,
             color_value:             0.9,
             color_harmony_strength:  0.6,
@@ -6620,6 +6730,9 @@ mod tests {
         assert_eq!(restored.phantom_opacity,       original.phantom_opacity,       "phantom_opacity failed");
         assert_eq!(restored.color_harmony,           original.color_harmony,           "color_harmony failed");
         assert_eq!(restored.color_anchor_hue,        original.color_anchor_hue,        "color_anchor_hue failed");
+        assert_eq!(restored.color_temperature_bias,  original.color_temperature_bias,  "color_temperature_bias failed");
+        assert_eq!(restored.color_temperature_audio, original.color_temperature_audio, "color_temperature_audio failed");
+        assert_eq!(restored.color_saturation_mode,   original.color_saturation_mode,   "color_saturation_mode failed");
         assert_eq!(restored.color_saturation,        original.color_saturation,        "color_saturation failed");
         assert_eq!(restored.color_value,             original.color_value,             "color_value failed");
         assert_eq!(restored.color_harmony_strength,  original.color_harmony_strength,  "color_harmony_strength failed");
