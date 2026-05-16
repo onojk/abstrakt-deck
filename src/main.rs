@@ -79,6 +79,23 @@ struct PaletteUniforms {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AppliedHarmonyUniforms {
+    // vec4 0
+    enabled:      u32,    // offset  0
+    anchor_hue:   f32,    // offset  4
+    saturation:   f32,    // offset  8
+    value:        f32,    // offset 12
+    // vec4 1
+    strength:     f32,    // offset 16
+    offset_count: u32,    // offset 20
+    _pad0:        f32,    // offset 24
+    _pad1:        f32,    // offset 28
+    // vec4 2-3: hue offsets packed as [f32;8] Rust / array<vec4<f32>,2> WGSL
+    offsets:      [f32; 8], // offset 32 — total 64 bytes
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobalUniforms {
     time_seconds: f32,
     resolution_x: f32,
@@ -321,11 +338,12 @@ pub struct ParamLocks {
     pub palette_tint:     bool,
     pub palette_mono_hue: bool,
     // Color Theory
-    pub color_harmony:          bool,
-    pub color_anchor_hue:       bool,
-    pub color_saturation:       bool,
-    pub color_value:            bool,
-    pub color_harmony_strength: bool,
+    pub color_harmony:           bool,
+    pub color_anchor_hue:        bool,
+    pub color_saturation:        bool,
+    pub color_value:             bool,
+    pub color_harmony_strength:  bool,
+    pub applied_harmony_enabled: bool,
     // Blackhole
     pub blackhole_enabled:        bool,
     pub blackhole_warp_strength:  bool,
@@ -458,11 +476,12 @@ pub struct VisualParams {
     pub blackhole_alpha_radius:   f32,
     pub blackhole_wander_amount:  f32,
     // Color Theory harmony params
-    pub color_harmony:          color::ColorHarmony,
-    pub color_anchor_hue:       f32,   // 0.0 .. 360.0
-    pub color_saturation:       f32,   // 0.0 .. 1.0
-    pub color_value:            f32,   // 0.0 .. 1.0
-    pub color_harmony_strength: f32,   // 0.0 .. 1.0 blend into nearest harmony hue
+    pub color_harmony:            color::ColorHarmony,
+    pub color_anchor_hue:         f32,   // 0.0 .. 360.0
+    pub color_saturation:         f32,   // 0.0 .. 1.0
+    pub color_value:              f32,   // 0.0 .. 1.0
+    pub color_harmony_strength:   f32,   // 0.0 .. 1.0 blend into nearest harmony hue
+    pub applied_harmony_enabled:  bool,  // recolor Skin/Image/PrintHead via harmony
     // Phantom Alpha (mutually exclusive with blackhole in live path)
     pub phantom_enabled:       bool,
     pub phantom_delay_seconds: f32,
@@ -523,11 +542,12 @@ impl Default for VisualParams {
             blackhole_warp_curve:    0.97,
             blackhole_alpha_radius:  0.5,
             blackhole_wander_amount: 0.005,
-            color_harmony:          color::ColorHarmony::Analogous,
-            color_anchor_hue:       210.0,
-            color_saturation:       0.75,
-            color_value:            0.85,
-            color_harmony_strength: 0.5,
+            color_harmony:           color::ColorHarmony::Analogous,
+            color_anchor_hue:        210.0,
+            color_saturation:        0.75,
+            color_value:             0.85,
+            color_harmony_strength:  0.5,
+            applied_harmony_enabled: false,
             phantom_enabled:       false,
             phantom_delay_seconds: 1.0,
             phantom_key_color:     [0.0, 0.0, 1.0],
@@ -664,6 +684,8 @@ struct Preset {
     color_value:      f32,
     #[serde(default = "default_color_harmony_strength")]
     color_harmony_strength: f32,
+    #[serde(default)]
+    applied_harmony_enabled: bool,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -747,11 +769,12 @@ impl Preset {
             phantom_key_softness:  params.phantom_key_softness,
             phantom_key_strength:  params.phantom_key_strength,
             phantom_opacity:       params.phantom_opacity,
-            color_harmony:          params.color_harmony,
-            color_anchor_hue:       params.color_anchor_hue,
-            color_saturation:       params.color_saturation,
-            color_value:            params.color_value,
-            color_harmony_strength: params.color_harmony_strength,
+            color_harmony:           params.color_harmony,
+            color_anchor_hue:        params.color_anchor_hue,
+            color_saturation:        params.color_saturation,
+            color_value:             params.color_value,
+            color_harmony_strength:  params.color_harmony_strength,
+            applied_harmony_enabled: params.applied_harmony_enabled,
         }
     }
 
@@ -848,11 +871,12 @@ impl Preset {
         params.phantom_key_softness  = self.phantom_key_softness;
         params.phantom_key_strength  = self.phantom_key_strength;
         params.phantom_opacity       = self.phantom_opacity;
-        params.color_harmony          = self.color_harmony;
-        params.color_anchor_hue       = self.color_anchor_hue;
-        params.color_saturation       = self.color_saturation;
-        params.color_value            = self.color_value;
-        params.color_harmony_strength = self.color_harmony_strength;
+        params.color_harmony           = self.color_harmony;
+        params.color_anchor_hue        = self.color_anchor_hue;
+        params.color_saturation        = self.color_saturation;
+        params.color_value             = self.color_value;
+        params.color_harmony_strength  = self.color_harmony_strength;
+        params.applied_harmony_enabled = self.applied_harmony_enabled;
     }
 }
 
@@ -1678,6 +1702,12 @@ struct GpuState {
     palette_scratch_texture:  wgpu::Texture,
     palette_scratch_view:     wgpu::TextureView,
 
+    // Applied harmony: recolor Skin/Image/PrintHead painter output per-pixel
+    applied_harmony_buffer:     wgpu::Buffer,
+    #[allow(dead_code)]
+    applied_harmony_bgl:        wgpu::BindGroupLayout,
+    applied_harmony_bind_group: wgpu::BindGroup,
+
     // Export ribbon FBOs (persistent across export frames, None when not exporting)
     export_ribbon: Option<ExportRibbonState>,
     // Export feedback FBOs for blackhole pass (None when not exporting or blackhole disabled)
@@ -2404,6 +2434,38 @@ impl GpuState {
             painter_pipelines.insert(*kind, pipeline);
         }
 
+        // ── Applied harmony shared uniform (used by Skin/Image/PrintHead pipelines) ──
+        let applied_harmony_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Applied harmony uniforms"),
+            contents: bytemuck::cast_slice(&[AppliedHarmonyUniforms {
+                enabled: 0, anchor_hue: 210.0, saturation: 0.75, value: 0.85,
+                strength: 0.5, offset_count: 3, _pad0: 0.0, _pad1: 0.0,
+                offsets: [0.0, -30.0, 30.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let applied_harmony_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Applied harmony BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let applied_harmony_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Applied harmony BG"),
+            layout: &applied_harmony_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: applied_harmony_buffer.as_entire_binding(),
+            }],
+        });
+
         // ── Skin painter resources ────────────────────────────────────────────
         let skin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Skin BGL"),
@@ -2478,7 +2540,7 @@ impl GpuState {
                 label: Some("Skin painter pipeline"),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: None,
-                    bind_group_layouts: &[&skin_bgl],
+                    bind_group_layouts: &[&skin_bgl, &applied_harmony_bgl],
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
@@ -2539,6 +2601,12 @@ impl GpuState {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None, bind_group_layouts: &[&painter_audio_bgl], push_constant_ranges: &[],
             });
+        let print_head_painter_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("PrintHead pipeline layout"),
+                bind_group_layouts: &[&painter_audio_bgl, &applied_harmony_bgl],
+                push_constant_ranges: &[],
+            });
         let ap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("AudioPaint shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/painter_audio_paint.wgsl").into()),
@@ -2575,7 +2643,7 @@ impl GpuState {
         let painter_print_head_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("PrintHead pipeline"),
-                layout: Some(&audio_painter_layout),
+                layout: Some(&print_head_painter_layout),
                 vertex: wgpu::VertexState {
                     module: &ph_shader, entry_point: Some("vs_main"),
                     buffers: &[], compilation_options: Default::default(),
@@ -2659,7 +2727,7 @@ impl GpuState {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Image painter pipeline"),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None, bind_group_layouts: &[&skin_bgl], push_constant_ranges: &[],
+                    label: None, bind_group_layouts: &[&skin_bgl, &applied_harmony_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
                     module: &img_shader, entry_point: Some("vs_main"),
@@ -3183,6 +3251,7 @@ impl GpuState {
             blackhole_was_enabled:  false,
             palette_uniforms_buffer, palette_bgl, palette_bind_group, palette_pipeline,
             palette_scratch_texture, palette_scratch_view,
+            applied_harmony_buffer, applied_harmony_bgl, applied_harmony_bind_group,
             export_ribbon: None,
             export_feedback: None,
             phantom,
@@ -3659,15 +3728,18 @@ impl GpuState {
             if self.params.painter_kind == PainterKind::Skin {
                 pass.set_pipeline(&self.painter_skin_pipeline);
                 pass.set_bind_group(0, &self.skin_bind_group, &[]);
+                pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
             } else if self.params.painter_kind == PainterKind::AudioPaint {
                 pass.set_pipeline(&self.painter_audio_paint_pipeline);
                 pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
             } else if self.params.painter_kind == PainterKind::PrintHead {
                 pass.set_pipeline(&self.painter_print_head_pipeline);
                 pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+                pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
             } else if self.params.painter_kind == PainterKind::Image {
                 pass.set_pipeline(&self.painter_image_pipeline);
                 pass.set_bind_group(0, &self.painter_image_bind_group, &[]);
+                pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
             } else {
                 let painter_pipeline = &self.painter_pipelines[&self.params.painter_kind];
                 pass.set_pipeline(painter_pipeline);
@@ -3737,6 +3809,26 @@ impl GpuState {
                 pass.set_bind_group(0, composite_bg, &[]);
                 pass.draw(0..3, 0..1);
             }
+        }
+
+        // Write applied-harmony uniforms (consumed by Skin/Image/PrintHead painters).
+        {
+            let offsets_slice = self.params.color_harmony.hue_offsets();
+            let mut offsets = [0.0f32; 8];
+            for (i, &o) in offsets_slice.iter().enumerate().take(8) {
+                offsets[i] = o;
+            }
+            self.queue.write_buffer(&self.applied_harmony_buffer, 0,
+                bytemuck::cast_slice(&[AppliedHarmonyUniforms {
+                    enabled:      if self.params.applied_harmony_enabled { 1 } else { 0 },
+                    anchor_hue:   self.params.color_anchor_hue,
+                    saturation:   self.params.color_saturation,
+                    value:        self.params.color_value,
+                    strength:     self.params.color_harmony_strength,
+                    offset_count: offsets_slice.len() as u32,
+                    _pad0: 0.0, _pad1: 0.0,
+                    offsets,
+                }]));
         }
 
         // Pass 1c: palette clamp (optional, skipped when Off)
@@ -4708,15 +4800,18 @@ impl GpuState {
             if self.params.painter_kind == PainterKind::Skin {
                 pass.set_pipeline(&self.painter_skin_pipeline);
                 pass.set_bind_group(0, &self.skin_bind_group, &[]);
+                pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
             } else if self.params.painter_kind == PainterKind::AudioPaint {
                 pass.set_pipeline(&self.painter_audio_paint_pipeline);
                 pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
             } else if self.params.painter_kind == PainterKind::PrintHead {
                 pass.set_pipeline(&self.painter_print_head_pipeline);
                 pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+                pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
             } else if self.params.painter_kind == PainterKind::Image {
                 pass.set_pipeline(&self.painter_image_pipeline);
                 pass.set_bind_group(0, &self.painter_image_bind_group, &[]);
+                pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
             } else {
                 let p = &self.painter_pipelines[&self.params.painter_kind];
                 pass.set_pipeline(p);
@@ -4797,6 +4892,26 @@ impl GpuState {
                     pass.draw(0..3, 0..1);
                 }
             }
+        }
+
+        // Write applied-harmony uniforms for export path.
+        {
+            let offsets_slice = self.params.color_harmony.hue_offsets();
+            let mut offsets = [0.0f32; 8];
+            for (i, &o) in offsets_slice.iter().enumerate().take(8) {
+                offsets[i] = o;
+            }
+            self.queue.write_buffer(&self.applied_harmony_buffer, 0,
+                bytemuck::cast_slice(&[AppliedHarmonyUniforms {
+                    enabled:      if self.params.applied_harmony_enabled { 1 } else { 0 },
+                    anchor_hue:   self.params.color_anchor_hue,
+                    saturation:   self.params.color_saturation,
+                    value:        self.params.color_value,
+                    strength:     self.params.color_harmony_strength,
+                    offset_count: offsets_slice.len() as u32,
+                    _pad0: 0.0, _pad1: 0.0,
+                    offsets,
+                }]));
         }
 
         // Pass 1c: palette clamp for export path
@@ -5282,6 +5397,9 @@ impl GpuState {
         if !self.params.locks.color_harmony_strength {
             self.params.color_harmony_strength = rng.gen_range(0.3_f32..=0.85);
         }
+        if !self.params.locks.applied_harmony_enabled {
+            self.params.applied_harmony_enabled = rng.gen_bool(0.25);
+        }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -5691,6 +5809,15 @@ impl ApplicationHandler for App {
                             log::info!("color harmony: {}", gpu.params.color_harmony.name());
                         } else {
                             log::info!("color harmony: LOCKED (skipping cycle)");
+                        }
+                    }
+                    KeyCode::KeyJ => {
+                        if !gpu.params.locks.applied_harmony_enabled {
+                            gpu.params.applied_harmony_enabled = !gpu.params.applied_harmony_enabled;
+                            log::info!("applied harmony: {}",
+                                if gpu.params.applied_harmony_enabled { "ON" } else { "OFF" });
+                        } else {
+                            log::info!("applied harmony: LOCKED");
                         }
                     }
                     KeyCode::KeyB => {
@@ -6181,11 +6308,12 @@ impl ApplicationHandler for App {
                                 LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
                                 LockTarget::BlackholeAlphaRadius   => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
                                 LockTarget::BlackholeWanderAmount  => gpu.params.locks.blackhole_wander_amount = !gpu.params.locks.blackhole_wander_amount,
-                                LockTarget::ColorHarmony         => gpu.params.locks.color_harmony          = !gpu.params.locks.color_harmony,
-                                LockTarget::ColorAnchorHue       => gpu.params.locks.color_anchor_hue       = !gpu.params.locks.color_anchor_hue,
-                                LockTarget::ColorSaturation      => gpu.params.locks.color_saturation       = !gpu.params.locks.color_saturation,
-                                LockTarget::ColorValue           => gpu.params.locks.color_value            = !gpu.params.locks.color_value,
-                                LockTarget::ColorHarmonyStrength => gpu.params.locks.color_harmony_strength = !gpu.params.locks.color_harmony_strength,
+                                LockTarget::ColorHarmony          => gpu.params.locks.color_harmony           = !gpu.params.locks.color_harmony,
+                                LockTarget::ColorAnchorHue        => gpu.params.locks.color_anchor_hue        = !gpu.params.locks.color_anchor_hue,
+                                LockTarget::ColorSaturation       => gpu.params.locks.color_saturation        = !gpu.params.locks.color_saturation,
+                                LockTarget::ColorValue            => gpu.params.locks.color_value             = !gpu.params.locks.color_value,
+                                LockTarget::ColorHarmonyStrength  => gpu.params.locks.color_harmony_strength  = !gpu.params.locks.color_harmony_strength,
+                                LockTarget::AppliedHarmonyEnabled => gpu.params.locks.applied_harmony_enabled = !gpu.params.locks.applied_harmony_enabled,
                                 LockTarget::PhantomEnabled       => gpu.params.locks.phantom_enabled       = !gpu.params.locks.phantom_enabled,
                                 LockTarget::PhantomDelaySeconds  => gpu.params.locks.phantom_delay_seconds = !gpu.params.locks.phantom_delay_seconds,
                                 LockTarget::PhantomKeyColor      => gpu.params.locks.phantom_key_color     = !gpu.params.locks.phantom_key_color,
@@ -6228,11 +6356,12 @@ impl ApplicationHandler for App {
                         ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
                         ParamChange::BlackholeAlphaRadius(v)   => gpu.params.blackhole_alpha_radius  = v,
                         ParamChange::BlackholeWanderAmount(v)  => gpu.params.blackhole_wander_amount = v,
-                        ParamChange::ColorHarmony(v)         => gpu.params.color_harmony          = v,
-                        ParamChange::ColorAnchorHue(v)       => gpu.params.color_anchor_hue       = v,
-                        ParamChange::ColorSaturation(v)      => gpu.params.color_saturation       = v,
-                        ParamChange::ColorValue(v)           => gpu.params.color_value            = v,
-                        ParamChange::ColorHarmonyStrength(v) => gpu.params.color_harmony_strength = v,
+                        ParamChange::ColorHarmony(v)          => gpu.params.color_harmony           = v,
+                        ParamChange::ColorAnchorHue(v)        => gpu.params.color_anchor_hue        = v,
+                        ParamChange::ColorSaturation(v)       => gpu.params.color_saturation        = v,
+                        ParamChange::ColorValue(v)            => gpu.params.color_value             = v,
+                        ParamChange::ColorHarmonyStrength(v)  => gpu.params.color_harmony_strength  = v,
+                        ParamChange::AppliedHarmonyEnabled(v) => gpu.params.applied_harmony_enabled = v,
                         ParamChange::PhantomEnabled(v)       => gpu.params.phantom_enabled       = v,
                         ParamChange::PhantomDelaySeconds(v)  => gpu.params.phantom_delay_seconds = v,
                         ParamChange::PhantomKeyColor(v)      => gpu.params.phantom_key_color     = v,
@@ -6296,6 +6425,7 @@ fn main() {
     println!("  R      cycle frame color hue (+30°)");
     println!("  G      toggle Phantom Alpha overlay");
     println!("  H      cycle color harmony (Mono/Analogous/Comp/Split/Triad/Tetra)");
+    println!("  J      toggle applied harmony (recolor Skin/Image/PrintHead via Color Theory)");
     println!("  space  toggle MIDI shake");
     println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop)");
     println!("  / '   bass-zoom intensity (0 to 1)");
@@ -6413,11 +6543,12 @@ mod tests {
             phantom_key_softness:  0.08,
             phantom_key_strength:  0.9,
             phantom_opacity:       0.7,
-            color_harmony:          color::ColorHarmony::Triadic,
-            color_anchor_hue:       45.0,
-            color_saturation:       0.8,
-            color_value:            0.9,
-            color_harmony_strength: 0.6,
+            color_harmony:           color::ColorHarmony::Triadic,
+            color_anchor_hue:        45.0,
+            color_saturation:        0.8,
+            color_value:             0.9,
+            color_harmony_strength:  0.6,
+            applied_harmony_enabled: true,
         }
     }
 
@@ -6487,11 +6618,12 @@ mod tests {
         assert_eq!(restored.phantom_key_softness,  original.phantom_key_softness,  "phantom_key_softness failed");
         assert_eq!(restored.phantom_key_strength,  original.phantom_key_strength,  "phantom_key_strength failed");
         assert_eq!(restored.phantom_opacity,       original.phantom_opacity,       "phantom_opacity failed");
-        assert_eq!(restored.color_harmony,          original.color_harmony,          "color_harmony failed");
-        assert_eq!(restored.color_anchor_hue,       original.color_anchor_hue,       "color_anchor_hue failed");
-        assert_eq!(restored.color_saturation,       original.color_saturation,       "color_saturation failed");
-        assert_eq!(restored.color_value,            original.color_value,            "color_value failed");
-        assert_eq!(restored.color_harmony_strength, original.color_harmony_strength, "color_harmony_strength failed");
+        assert_eq!(restored.color_harmony,           original.color_harmony,           "color_harmony failed");
+        assert_eq!(restored.color_anchor_hue,        original.color_anchor_hue,        "color_anchor_hue failed");
+        assert_eq!(restored.color_saturation,        original.color_saturation,        "color_saturation failed");
+        assert_eq!(restored.color_value,             original.color_value,             "color_value failed");
+        assert_eq!(restored.color_harmony_strength,  original.color_harmony_strength,  "color_harmony_strength failed");
+        assert_eq!(restored.applied_harmony_enabled, original.applied_harmony_enabled, "applied_harmony_enabled failed");
     }
 
     #[test]

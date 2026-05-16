@@ -46,6 +46,7 @@ pub enum LockTarget {
     ColorSaturation,
     ColorValue,
     ColorHarmonyStrength,
+    AppliedHarmonyEnabled,
     PhantomEnabled,
     PhantomDelaySeconds,
     PhantomKeyColor,
@@ -135,6 +136,7 @@ pub enum ParamChange {
     ColorSaturation(f32),
     ColorValue(f32),
     ColorHarmonyStrength(f32),
+    AppliedHarmonyEnabled(bool),
     PhantomEnabled(bool),
     PhantomDelaySeconds(f32),
     PhantomKeyColor([f32; 3]),
@@ -1196,6 +1198,21 @@ impl MenuBar {
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Color Theory  (H)", |ui| {
+
+            // Applied harmony toggle (J hotkey)
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.applied_harmony_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::AppliedHarmonyEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.applied_harmony_enabled, |ui| {
+                    let mut enabled = params.applied_harmony_enabled;
+                    if ui.checkbox(&mut enabled, "Apply to painter  (J)").changed() {
+                        changes.push(ParamChange::AppliedHarmonyEnabled(enabled));
+                    }
+                });
+            });
+
+            ui.separator();
 
             // Harmony dropdown
             ui.horizontal(|ui| {
