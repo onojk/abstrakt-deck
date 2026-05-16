@@ -18,6 +18,162 @@ pub struct AudioState {
     pub beat_decay: f32,
 }
 
+/// Mic noise filter: high-pass IIR at 80 Hz, RMS gate with hysteresis,
+/// and per-band noise floor subtraction applied after FFT.
+///
+/// Designed to be cheap (one IIR coefficient, one RMS, 8 floors) and to
+/// adapt over seconds, not milliseconds — so it tracks slow drift in
+/// ambient noise without chasing musical content.
+pub struct NoiseFilter {
+    enabled: bool,
+
+    // High-pass IIR state (one-pole, ~80 Hz at 48 kHz)
+    hp_alpha: f32,
+    hp_prev_in: f32,
+    hp_prev_out: f32,
+
+    // RMS gate state
+    rms_smoothed: f32,
+    gate_open: bool,
+    gate_open_thresh: f32,
+    gate_close_thresh: f32,
+    gate_closed_gain: f32,
+
+    // Per-band noise floor estimate (slow-moving minimum)
+    band_floor: [f32; 8],
+    floor_attack: f32,    // how fast floor rises (0..1, per FFT chunk)
+    floor_release: f32,   // how fast floor falls when band is quiet
+    floor_margin: f32,    // subtract floor * margin from each band
+}
+
+impl NoiseFilter {
+    pub fn new(sample_rate: u32, enabled: bool) -> Self {
+        // One-pole HPF: y[n] = a * (y[n-1] + x[n] - x[n-1])
+        // a = exp(-2*pi*fc / fs); fc = 80 Hz
+        let fc = 80.0_f32;
+        let hp_alpha = (-2.0 * std::f32::consts::PI * fc / sample_rate as f32).exp();
+
+        Self {
+            enabled,
+            hp_alpha,
+            hp_prev_in: 0.0,
+            hp_prev_out: 0.0,
+
+            rms_smoothed: 0.0,
+            gate_open: false,
+            gate_open_thresh: 0.020,   // open when RMS > 0.020
+            gate_close_thresh: 0.010,  // close when RMS < 0.010
+            gate_closed_gain: 0.05,    // 5% bleed-through when closed
+
+            band_floor: [0.0; 8],
+            floor_attack: 0.002,       // rises slowly toward live energy
+            floor_release: 0.0005,     // falls even slower
+            floor_margin: 1.8,         // subtract 1.8x the estimated floor
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            // Reset state so re-enabling doesn't carry stale floor estimates.
+            self.hp_prev_in = 0.0;
+            self.hp_prev_out = 0.0;
+            self.rms_smoothed = 0.0;
+            self.gate_open = false;
+            self.band_floor = [0.0; 8];
+        }
+    }
+
+    /// Apply HPF + RMS gate in-place on a mono sample buffer.
+    /// Returns the post-gate RMS for diagnostics.
+    pub fn process_samples(&mut self, samples: &mut [f32]) -> f32 {
+        if !self.enabled || samples.is_empty() {
+            return 0.0;
+        }
+
+        // 1) High-pass filter (one-pole IIR, removes sub-80Hz rumble/hum).
+        for s in samples.iter_mut() {
+            let x = *s;
+            let y = self.hp_alpha * (self.hp_prev_out + x - self.hp_prev_in);
+            self.hp_prev_in = x;
+            self.hp_prev_out = y;
+            *s = y;
+        }
+
+        // 2) Compute RMS of the post-HPF buffer.
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        let rms = (sum_sq / samples.len() as f32).sqrt();
+        // Fast attack, slow release — track signal level closely going up,
+        // bleed off slowly so a brief silence between notes doesn't close the gate.
+        let a = if rms > self.rms_smoothed { 0.5 } else { 0.05 };
+        self.rms_smoothed = self.rms_smoothed * (1.0 - a) + rms * a;
+
+        // 3) Hysteresis gate.
+        if self.gate_open {
+            if self.rms_smoothed < self.gate_close_thresh {
+                self.gate_open = false;
+            }
+        } else if self.rms_smoothed > self.gate_open_thresh {
+            self.gate_open = true;
+        }
+
+        // 4) Apply gate (multiplicative).
+        if !self.gate_open {
+            let g = self.gate_closed_gain;
+            for s in samples.iter_mut() {
+                *s *= g;
+            }
+        }
+
+        self.rms_smoothed
+    }
+
+    /// Spectral subtraction on 8-band energies. Call AFTER your FFT/band split
+    /// and BEFORE the per-band AGC, so the AGC normalises the cleaned signal.
+    ///
+    /// `gate_open` should be the most recent gate state — when the gate is
+    /// closed, we update the floor estimate aggressively (treat as noise).
+    /// When open, we update the floor only when a band is near or below it.
+    pub fn process_bands(&mut self, bands: &mut [f32; 8]) {
+        if !self.enabled {
+            return;
+        }
+
+        for i in 0..8 {
+            let live = bands[i];
+            // Update floor estimate
+            let target = if !self.gate_open || live < self.band_floor[i] * 1.5 {
+                // Treat as noise — pull floor toward live energy.
+                live
+            } else {
+                // Treat as signal — let floor decay slowly.
+                self.band_floor[i] * 0.999
+            };
+            let rate = if target > self.band_floor[i] {
+                self.floor_attack
+            } else {
+                self.floor_release
+            };
+            self.band_floor[i] = self.band_floor[i] * (1.0 - rate) + target * rate;
+
+            // Spectral subtraction.
+            let cleaned = (live - self.band_floor[i] * self.floor_margin).max(0.0);
+            bands[i] = cleaned;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn band_floor(&self) -> [f32; 8] {
+        self.band_floor
+    }
+
+    #[allow(dead_code)]
+    pub fn gate_open(&self) -> bool {
+        self.gate_open
+    }
+}
+
 pub struct AudioCapture {
     pub event_rx: Receiver<AudioEvent>,
     #[allow(dead_code)]
@@ -114,7 +270,15 @@ impl AudioCapture {
         let (event_tx, event_rx) = bounded::<AudioEvent>(64);
         let state = Arc::new(Mutex::new(AudioState::default()));
 
-        let mut analyzer = BeatAnalyzer::new(sample_rate, channels);
+        // Enable noise filter only when capturing from a microphone
+        // (loopback / monitor sources don't need it).
+        let noise_filter_enabled = !prefer_monitor;
+        let mut analyzer = BeatAnalyzer::new(sample_rate, channels, noise_filter_enabled);
+        log::info!(
+            "Noise filter: {} (source: {})",
+            if noise_filter_enabled { "ENABLED" } else { "disabled" },
+            if prefer_monitor { "monitor/loopback" } else { "microphone" },
+        );
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -193,10 +357,11 @@ struct BeatAnalyzer {
     band_peak: [f32; 8],
     agc_log_timer: Instant,
     agc_logged: bool,
+    noise_filter: NoiseFilter,
 }
 
 impl BeatAnalyzer {
-    fn new(sample_rate: u32, channels: usize) -> Self {
+    fn new(sample_rate: u32, channels: usize, noise_filter_enabled: bool) -> Self {
         let fft_size = 2048;
         let flux_history_size = 43;
         Self {
@@ -215,6 +380,7 @@ impl BeatAnalyzer {
             band_peak: [0.0; 8],
             agc_log_timer: Instant::now(),
             agc_logged: false,
+            noise_filter: NoiseFilter::new(sample_rate, noise_filter_enabled),
         }
     }
 
@@ -225,6 +391,7 @@ impl BeatAnalyzer {
         state: &Arc<Mutex<AudioState>>,
     ) {
         let chunk_count = samples.len() / self.channels;
+        let start = self.sample_buffer.len();
         for i in 0..chunk_count {
             let mut mono = 0.0f32;
             for c in 0..self.channels {
@@ -233,6 +400,11 @@ impl BeatAnalyzer {
             mono /= self.channels as f32;
             self.sample_buffer.push(mono);
         }
+
+        // Apply HPF + RMS gate to the newly-pushed samples in place.
+        // (No-op when noise filter is disabled.)
+        let new_slice = &mut self.sample_buffer[start..];
+        self.noise_filter.process_samples(new_slice);
 
         while self.sample_buffer.len() >= self.fft_size {
             let chunk: Vec<f32> = self.sample_buffer.drain(..self.fft_size).collect();
@@ -283,7 +455,11 @@ impl BeatAnalyzer {
             .sum();
         self.prev_spectrum = magnitudes.clone();
 
-        let raw_bands = bands_from_magnitudes(&magnitudes, self.sample_rate, self.fft_size);
+        let mut raw_bands = bands_from_magnitudes(&magnitudes, self.sample_rate, self.fft_size);
+
+        // Per-band noise floor subtraction (no-op when filter disabled).
+        // Done BEFORE AGC so AGC tracks the cleaned signal's peak.
+        self.noise_filter.process_bands(&mut raw_bands);
 
         // Per-band AGC: track running peak, normalise output to [0, 1].
         // band_peak starts at 0.0 so the first real signal immediately sets the scale.
@@ -498,6 +674,73 @@ mod tests {
             "beat_decay should decay by exp(-5*dt), got {} expected {}",
             decay,
             expected
+        );
+    }
+
+    #[test]
+    fn noise_filter_disabled_is_passthrough() {
+        let mut nf = NoiseFilter::new(48000, false);
+        let mut buf = vec![0.5_f32; 256];
+        let original = buf.clone();
+        nf.process_samples(&mut buf);
+        assert_eq!(buf, original, "disabled filter must not modify samples");
+
+        let mut bands = [0.3_f32; 8];
+        nf.process_bands(&mut bands);
+        for b in bands.iter() {
+            assert!((b - 0.3).abs() < 1e-6, "disabled filter must not modify bands");
+        }
+    }
+
+    #[test]
+    fn noise_filter_gate_closes_on_silence() {
+        let mut nf = NoiseFilter::new(48000, true);
+        // Feed many chunks of near-silence.
+        for _ in 0..20 {
+            let mut buf = vec![0.0001_f32; 512];
+            nf.process_samples(&mut buf);
+        }
+        assert!(!nf.gate_open(), "gate should be closed after sustained silence");
+    }
+
+    #[test]
+    fn noise_filter_gate_opens_on_signal() {
+        let mut nf = NoiseFilter::new(48000, true);
+        // Feed chunks of a loud-ish 200 Hz tone (above the 80 Hz HPF cutoff).
+        for chunk_idx in 0..20 {
+            let buf: Vec<f32> = (0..512)
+                .map(|i| {
+                    let t = (chunk_idx * 512 + i) as f32 / 48000.0;
+                    0.3 * (2.0 * std::f32::consts::PI * 200.0 * t).sin()
+                })
+                .collect();
+            let mut buf = buf;
+            nf.process_samples(&mut buf);
+        }
+        assert!(nf.gate_open(), "gate should be open after sustained 200 Hz tone");
+    }
+
+    #[test]
+    fn noise_filter_subtracts_steady_floor() {
+        let mut nf = NoiseFilter::new(48000, true);
+        // Let the floor adapt to a steady "noise" level of 0.1 in band 0.
+        for _ in 0..5000 {
+            let mut bands = [0.0_f32; 8];
+            bands[0] = 0.1;
+            nf.process_bands(&mut bands);
+        }
+        // Now hit it with a louder signal — output should be reduced by ~floor*margin.
+        let mut bands = [0.0_f32; 8];
+        bands[0] = 0.5;
+        nf.process_bands(&mut bands);
+        assert!(
+            bands[0] < 0.5,
+            "band 0 should be attenuated after floor adaptation, got {}",
+            bands[0]
+        );
+        assert!(
+            bands[0] > 0.0,
+            "band 0 should still be positive (signal well above floor)"
         );
     }
 }
