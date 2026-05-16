@@ -315,6 +315,11 @@ pub struct ParamLocks {
     pub palette_mode:     bool,
     pub palette_tint:     bool,
     pub palette_mono_hue: bool,
+    // Color Theory
+    pub color_harmony:    bool,
+    pub color_anchor_hue: bool,
+    pub color_saturation: bool,
+    pub color_value:      bool,
     // Blackhole
     pub blackhole_enabled:        bool,
     pub blackhole_warp_strength:  bool,
@@ -443,6 +448,11 @@ pub struct VisualParams {
     pub blackhole_warp_curve:     f32,
     pub blackhole_alpha_radius:   f32,
     pub blackhole_wander_amount:  f32,
+    // Color Theory harmony params (drive palette generation; slice 4 wires into render)
+    pub color_harmony:    color::ColorHarmony,
+    pub color_anchor_hue: f32,   // 0.0 .. 360.0
+    pub color_saturation: f32,   // 0.0 .. 1.0
+    pub color_value:      f32,   // 0.0 .. 1.0
     // Phantom Alpha (mutually exclusive with blackhole in live path)
     pub phantom_enabled:       bool,
     pub phantom_delay_seconds: f32,
@@ -503,6 +513,10 @@ impl Default for VisualParams {
             blackhole_warp_curve:    0.97,
             blackhole_alpha_radius:  0.5,
             blackhole_wander_amount: 0.005,
+            color_harmony:    color::ColorHarmony::Analogous,
+            color_anchor_hue: 210.0,
+            color_saturation: 0.75,
+            color_value:      0.85,
             phantom_enabled:       false,
             phantom_delay_seconds: 1.0,
             phantom_key_color:     [0.0, 0.0, 1.0],
@@ -629,6 +643,14 @@ struct Preset {
     phantom_key_strength: f32,
     #[serde(default = "default_phantom_opacity")]
     phantom_opacity: f32,
+    #[serde(default = "default_color_harmony")]
+    color_harmony:    color::ColorHarmony,
+    #[serde(default = "default_color_anchor_hue")]
+    color_anchor_hue: f32,
+    #[serde(default = "default_color_saturation")]
+    color_saturation: f32,
+    #[serde(default = "default_color_value")]
+    color_value:      f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -649,6 +671,10 @@ fn default_phantom_key_tolerance()   -> f32  { 0.15 }
 fn default_phantom_key_softness()    -> f32  { 0.05 }
 fn default_phantom_key_strength()    -> f32  { 1.0 }
 fn default_phantom_opacity()         -> f32  { 0.85 }
+fn default_color_harmony()    -> color::ColorHarmony { color::ColorHarmony::Analogous }
+fn default_color_anchor_hue() -> f32                 { 210.0 }
+fn default_color_saturation() -> f32                 { 0.75 }
+fn default_color_value()      -> f32                 { 0.85 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -707,6 +733,10 @@ impl Preset {
             phantom_key_softness:  params.phantom_key_softness,
             phantom_key_strength:  params.phantom_key_strength,
             phantom_opacity:       params.phantom_opacity,
+            color_harmony:    params.color_harmony,
+            color_anchor_hue: params.color_anchor_hue,
+            color_saturation: params.color_saturation,
+            color_value:      params.color_value,
         }
     }
 
@@ -802,6 +832,10 @@ impl Preset {
         params.phantom_key_softness  = self.phantom_key_softness;
         params.phantom_key_strength  = self.phantom_key_strength;
         params.phantom_opacity       = self.phantom_opacity;
+        params.color_harmony    = self.color_harmony;
+        params.color_anchor_hue = self.color_anchor_hue;
+        params.color_saturation = self.color_saturation;
+        params.color_value      = self.color_value;
     }
 }
 
@@ -5175,6 +5209,31 @@ impl GpuState {
             let (r, g, b) = hsv_to_rgb(h, 1.0, 1.0);
             self.params.phantom_key_color = [r, g, b];
         }
+        if !self.params.locks.color_harmony {
+            let roll: f32 = rng.gen();
+            self.params.color_harmony = if roll < 0.10 {
+                color::ColorHarmony::Monochromatic
+            } else if roll < 0.40 {
+                color::ColorHarmony::Analogous
+            } else if roll < 0.55 {
+                color::ColorHarmony::Complementary
+            } else if roll < 0.75 {
+                color::ColorHarmony::SplitComplementary
+            } else if roll < 0.90 {
+                color::ColorHarmony::Triadic
+            } else {
+                color::ColorHarmony::Tetradic
+            };
+        }
+        if !self.params.locks.color_anchor_hue {
+            self.params.color_anchor_hue = rng.gen_range(0.0_f32..360.0);
+        }
+        if !self.params.locks.color_saturation {
+            self.params.color_saturation = rng.gen_range(0.55_f32..=0.90);
+        }
+        if !self.params.locks.color_value {
+            self.params.color_value = rng.gen_range(0.65_f32..=1.0);
+        }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -6066,6 +6125,10 @@ impl ApplicationHandler for App {
                                 LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
                                 LockTarget::BlackholeAlphaRadius   => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
                                 LockTarget::BlackholeWanderAmount  => gpu.params.locks.blackhole_wander_amount = !gpu.params.locks.blackhole_wander_amount,
+                                LockTarget::ColorHarmony    => gpu.params.locks.color_harmony    = !gpu.params.locks.color_harmony,
+                                LockTarget::ColorAnchorHue  => gpu.params.locks.color_anchor_hue = !gpu.params.locks.color_anchor_hue,
+                                LockTarget::ColorSaturation => gpu.params.locks.color_saturation = !gpu.params.locks.color_saturation,
+                                LockTarget::ColorValue      => gpu.params.locks.color_value      = !gpu.params.locks.color_value,
                                 LockTarget::PhantomEnabled       => gpu.params.locks.phantom_enabled       = !gpu.params.locks.phantom_enabled,
                                 LockTarget::PhantomDelaySeconds  => gpu.params.locks.phantom_delay_seconds = !gpu.params.locks.phantom_delay_seconds,
                                 LockTarget::PhantomKeyColor      => gpu.params.locks.phantom_key_color     = !gpu.params.locks.phantom_key_color,
@@ -6108,6 +6171,10 @@ impl ApplicationHandler for App {
                         ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
                         ParamChange::BlackholeAlphaRadius(v)   => gpu.params.blackhole_alpha_radius  = v,
                         ParamChange::BlackholeWanderAmount(v)  => gpu.params.blackhole_wander_amount = v,
+                        ParamChange::ColorHarmony(v)    => gpu.params.color_harmony    = v,
+                        ParamChange::ColorAnchorHue(v)  => gpu.params.color_anchor_hue = v,
+                        ParamChange::ColorSaturation(v) => gpu.params.color_saturation = v,
+                        ParamChange::ColorValue(v)      => gpu.params.color_value      = v,
                         ParamChange::PhantomEnabled(v)       => gpu.params.phantom_enabled       = v,
                         ParamChange::PhantomDelaySeconds(v)  => gpu.params.phantom_delay_seconds = v,
                         ParamChange::PhantomKeyColor(v)      => gpu.params.phantom_key_color     = v,
@@ -6286,6 +6353,10 @@ mod tests {
             phantom_key_softness:  0.08,
             phantom_key_strength:  0.9,
             phantom_opacity:       0.7,
+            color_harmony:    color::ColorHarmony::Triadic,
+            color_anchor_hue: 45.0,
+            color_saturation: 0.8,
+            color_value:      0.9,
         }
     }
 
@@ -6355,6 +6426,10 @@ mod tests {
         assert_eq!(restored.phantom_key_softness,  original.phantom_key_softness,  "phantom_key_softness failed");
         assert_eq!(restored.phantom_key_strength,  original.phantom_key_strength,  "phantom_key_strength failed");
         assert_eq!(restored.phantom_opacity,       original.phantom_opacity,       "phantom_opacity failed");
+        assert_eq!(restored.color_harmony,    original.color_harmony,    "color_harmony failed");
+        assert_eq!(restored.color_anchor_hue, original.color_anchor_hue, "color_anchor_hue failed");
+        assert_eq!(restored.color_saturation, original.color_saturation, "color_saturation failed");
+        assert_eq!(restored.color_value,      original.color_value,      "color_value failed");
     }
 
     #[test]
