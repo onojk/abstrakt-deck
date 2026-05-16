@@ -1220,6 +1220,7 @@ impl MenuBar {
                     changes.push(ParamChange::ToggleLock(LockTarget::ColorHarmony));
                 }
                 ui.add_enabled_ui(!params.locks.color_harmony, |ui| {
+                    ui.label("Harmony");
                     let current = params.color_harmony;
                     egui::ComboBox::from_id_salt("color_harmony_combo")
                         .selected_text(current.name())
@@ -1237,7 +1238,6 @@ impl MenuBar {
                                 }
                             }
                         });
-                    ui.label("Harmony");
                 });
             });
 
@@ -1319,8 +1319,12 @@ impl MenuBar {
                     }
                 });
             });
-            if params.palette_mode != crate::PaletteMode::Harmony {
-                ui.label("⚠ Set Palette Mode → Harmony to activate");
+            if params.palette_mode != crate::PaletteMode::Harmony && !params.applied_harmony_enabled {
+                ui.label(
+                    egui::RichText::new(
+                        "↑ inactive — enable \"Apply to painter\" above or set Palette Mode = Harmony"
+                    ).small().weak()
+                );
             }
 
             // Palette preview: 6 swatches
