@@ -45,6 +45,7 @@ pub enum LockTarget {
     ColorAnchorHue,
     ColorSaturation,
     ColorValue,
+    ColorHarmonyStrength,
     PhantomEnabled,
     PhantomDelaySeconds,
     PhantomKeyColor,
@@ -133,6 +134,7 @@ pub enum ParamChange {
     ColorAnchorHue(f32),
     ColorSaturation(f32),
     ColorValue(f32),
+    ColorHarmonyStrength(f32),
     PhantomEnabled(bool),
     PhantomDelaySeconds(f32),
     PhantomKeyColor([f32; 3]),
@@ -971,6 +973,7 @@ impl MenuBar {
                                 crate::PaletteMode::Earth,
                                 crate::PaletteMode::Neon,
                                 crate::PaletteMode::Monochrome,
+                                crate::PaletteMode::Harmony,
                             ] {
                                 if ui.selectable_value(&mut current, mode, mode.as_str()).clicked() {
                                     changes.push(ParamChange::SetPaletteMode(mode));
@@ -1284,6 +1287,24 @@ impl MenuBar {
                     }
                 });
             });
+
+            // Harmony strength slider (active when Palette Mode = Harmony)
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_harmony_strength).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorHarmonyStrength));
+                }
+                ui.add_enabled_ui(!params.locks.color_harmony_strength, |ui| {
+                    let mut v = params.color_harmony_strength;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)
+                        .text("Strength").step_by(0.01)).changed()
+                    {
+                        changes.push(ParamChange::ColorHarmonyStrength(v));
+                    }
+                });
+            });
+            if params.palette_mode != crate::PaletteMode::Harmony {
+                ui.label("⚠ Set Palette Mode → Harmony to activate");
+            }
 
             // Palette preview: 6 swatches
             ui.horizontal(|ui| {

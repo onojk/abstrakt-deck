@@ -66,10 +66,15 @@ pub struct ChromaUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PaletteUniforms {
-    mode:     u32,
-    tint:     f32,
-    mono_hue: f32,
-    _pad:     f32,
+    mode:                u32,      // offset  0
+    tint:                f32,      // offset  4
+    mono_hue:            f32,      // offset  8
+    harmony_num_offsets: u32,      // offset 12
+    harmony_anchor_hue:  f32,      // offset 16
+    harmony_saturation:  f32,      // offset 20
+    harmony_value:       f32,      // offset 24
+    harmony_strength:    f32,      // offset 28
+    harmony_offsets:     [f32; 8], // offset 32 — total 64 bytes
 }
 
 #[repr(C)]
@@ -316,10 +321,11 @@ pub struct ParamLocks {
     pub palette_tint:     bool,
     pub palette_mono_hue: bool,
     // Color Theory
-    pub color_harmony:    bool,
-    pub color_anchor_hue: bool,
-    pub color_saturation: bool,
-    pub color_value:      bool,
+    pub color_harmony:          bool,
+    pub color_anchor_hue:       bool,
+    pub color_saturation:       bool,
+    pub color_value:            bool,
+    pub color_harmony_strength: bool,
     // Blackhole
     pub blackhole_enabled:        bool,
     pub blackhole_warp_strength:  bool,
@@ -345,6 +351,7 @@ pub enum PaletteMode {
     Earth,
     Neon,
     Monochrome,
+    Harmony,
 }
 
 impl PaletteMode {
@@ -356,6 +363,7 @@ impl PaletteMode {
             PaletteMode::Earth      => 3,
             PaletteMode::Neon       => 4,
             PaletteMode::Monochrome => 5,
+            PaletteMode::Harmony    => 6,
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -366,6 +374,7 @@ impl PaletteMode {
             PaletteMode::Earth      => "Earth",
             PaletteMode::Neon       => "Neon",
             PaletteMode::Monochrome => "Monochrome",
+            PaletteMode::Harmony    => "Harmony",
         }
     }
 }
@@ -448,11 +457,12 @@ pub struct VisualParams {
     pub blackhole_warp_curve:     f32,
     pub blackhole_alpha_radius:   f32,
     pub blackhole_wander_amount:  f32,
-    // Color Theory harmony params (drive palette generation; slice 4 wires into render)
-    pub color_harmony:    color::ColorHarmony,
-    pub color_anchor_hue: f32,   // 0.0 .. 360.0
-    pub color_saturation: f32,   // 0.0 .. 1.0
-    pub color_value:      f32,   // 0.0 .. 1.0
+    // Color Theory harmony params
+    pub color_harmony:          color::ColorHarmony,
+    pub color_anchor_hue:       f32,   // 0.0 .. 360.0
+    pub color_saturation:       f32,   // 0.0 .. 1.0
+    pub color_value:            f32,   // 0.0 .. 1.0
+    pub color_harmony_strength: f32,   // 0.0 .. 1.0 blend into nearest harmony hue
     // Phantom Alpha (mutually exclusive with blackhole in live path)
     pub phantom_enabled:       bool,
     pub phantom_delay_seconds: f32,
@@ -513,10 +523,11 @@ impl Default for VisualParams {
             blackhole_warp_curve:    0.97,
             blackhole_alpha_radius:  0.5,
             blackhole_wander_amount: 0.005,
-            color_harmony:    color::ColorHarmony::Analogous,
-            color_anchor_hue: 210.0,
-            color_saturation: 0.75,
-            color_value:      0.85,
+            color_harmony:          color::ColorHarmony::Analogous,
+            color_anchor_hue:       210.0,
+            color_saturation:       0.75,
+            color_value:            0.85,
+            color_harmony_strength: 0.5,
             phantom_enabled:       false,
             phantom_delay_seconds: 1.0,
             phantom_key_color:     [0.0, 0.0, 1.0],
@@ -651,6 +662,8 @@ struct Preset {
     color_saturation: f32,
     #[serde(default = "default_color_value")]
     color_value:      f32,
+    #[serde(default = "default_color_harmony_strength")]
+    color_harmony_strength: f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -671,10 +684,11 @@ fn default_phantom_key_tolerance()   -> f32  { 0.15 }
 fn default_phantom_key_softness()    -> f32  { 0.05 }
 fn default_phantom_key_strength()    -> f32  { 1.0 }
 fn default_phantom_opacity()         -> f32  { 0.85 }
-fn default_color_harmony()    -> color::ColorHarmony { color::ColorHarmony::Analogous }
-fn default_color_anchor_hue() -> f32                 { 210.0 }
-fn default_color_saturation() -> f32                 { 0.75 }
-fn default_color_value()      -> f32                 { 0.85 }
+fn default_color_harmony()         -> color::ColorHarmony { color::ColorHarmony::Analogous }
+fn default_color_anchor_hue()      -> f32                 { 210.0 }
+fn default_color_saturation()      -> f32                 { 0.75 }
+fn default_color_value()           -> f32                 { 0.85 }
+fn default_color_harmony_strength() -> f32                { 0.5 }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -733,10 +747,11 @@ impl Preset {
             phantom_key_softness:  params.phantom_key_softness,
             phantom_key_strength:  params.phantom_key_strength,
             phantom_opacity:       params.phantom_opacity,
-            color_harmony:    params.color_harmony,
-            color_anchor_hue: params.color_anchor_hue,
-            color_saturation: params.color_saturation,
-            color_value:      params.color_value,
+            color_harmony:          params.color_harmony,
+            color_anchor_hue:       params.color_anchor_hue,
+            color_saturation:       params.color_saturation,
+            color_value:            params.color_value,
+            color_harmony_strength: params.color_harmony_strength,
         }
     }
 
@@ -816,6 +831,7 @@ impl Preset {
             "Earth"      => PaletteMode::Earth,
             "Neon"       => PaletteMode::Neon,
             "Monochrome" => PaletteMode::Monochrome,
+            "Harmony"    => PaletteMode::Harmony,
             _            => PaletteMode::Off,
         };
         params.palette_tint     = self.palette_tint;
@@ -832,10 +848,11 @@ impl Preset {
         params.phantom_key_softness  = self.phantom_key_softness;
         params.phantom_key_strength  = self.phantom_key_strength;
         params.phantom_opacity       = self.phantom_opacity;
-        params.color_harmony    = self.color_harmony;
-        params.color_anchor_hue = self.color_anchor_hue;
-        params.color_saturation = self.color_saturation;
-        params.color_value      = self.color_value;
+        params.color_harmony          = self.color_harmony;
+        params.color_anchor_hue       = self.color_anchor_hue;
+        params.color_saturation       = self.color_saturation;
+        params.color_value            = self.color_value;
+        params.color_harmony_strength = self.color_harmony_strength;
     }
 }
 
@@ -3073,7 +3090,12 @@ impl GpuState {
         let palette_scratch_view = palette_scratch_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let palette_uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Palette uniforms"),
-            contents: bytemuck::cast_slice(&[PaletteUniforms { mode: 0, tint: 1.0, mono_hue: 200.0, _pad: 0.0 }]),
+            contents: bytemuck::cast_slice(&[PaletteUniforms {
+                mode: 0, tint: 1.0, mono_hue: 200.0,
+                harmony_num_offsets: 0, harmony_anchor_hue: 0.0,
+                harmony_saturation: 0.75, harmony_value: 0.85, harmony_strength: 0.5,
+                harmony_offsets: [0.0; 8],
+            }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let palette_bgl = Self::make_uts_bgl(&device, "Palette BGL");
@@ -3719,12 +3741,23 @@ impl GpuState {
 
         // Pass 1c: palette clamp (optional, skipped when Off)
         if self.params.palette_mode != PaletteMode::Off {
+            let h_offsets = self.params.color_harmony.hue_offsets();
+            let h_anchor  = self.params.color_anchor_hue;
+            let mut ho = [0.0f32; 8];
+            for (i, &off) in h_offsets.iter().enumerate().take(8) {
+                ho[i] = color::wrap_hue(h_anchor + off);
+            }
             self.queue.write_buffer(&self.palette_uniforms_buffer, 0,
                 bytemuck::cast_slice(&[PaletteUniforms {
-                    mode:     self.params.palette_mode.to_u32(),
-                    tint:     self.params.palette_tint,
-                    mono_hue: self.params.palette_mono_hue,
-                    _pad:     0.0,
+                    mode:                self.params.palette_mode.to_u32(),
+                    tint:                self.params.palette_tint,
+                    mono_hue:            self.params.palette_mono_hue,
+                    harmony_num_offsets: h_offsets.len().min(8) as u32,
+                    harmony_anchor_hue:  h_anchor,
+                    harmony_saturation:  self.params.color_saturation,
+                    harmony_value:       self.params.color_value,
+                    harmony_strength:    self.params.color_harmony_strength,
+                    harmony_offsets:     ho,
                 }]));
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4768,12 +4801,23 @@ impl GpuState {
 
         // Pass 1c: palette clamp for export path
         if self.params.palette_mode != PaletteMode::Off {
+            let h_offsets = self.params.color_harmony.hue_offsets();
+            let h_anchor  = self.params.color_anchor_hue;
+            let mut ho = [0.0f32; 8];
+            for (i, &off) in h_offsets.iter().enumerate().take(8) {
+                ho[i] = color::wrap_hue(h_anchor + off);
+            }
             self.queue.write_buffer(&self.palette_uniforms_buffer, 0,
                 bytemuck::cast_slice(&[PaletteUniforms {
-                    mode:     self.params.palette_mode.to_u32(),
-                    tint:     self.params.palette_tint,
-                    mono_hue: self.params.palette_mono_hue,
-                    _pad:     0.0,
+                    mode:                self.params.palette_mode.to_u32(),
+                    tint:                self.params.palette_tint,
+                    mono_hue:            self.params.palette_mono_hue,
+                    harmony_num_offsets: h_offsets.len().min(8) as u32,
+                    harmony_anchor_hue:  h_anchor,
+                    harmony_saturation:  self.params.color_saturation,
+                    harmony_value:       self.params.color_value,
+                    harmony_strength:    self.params.color_harmony_strength,
+                    harmony_offsets:     ho,
                 }]));
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -5175,13 +5219,14 @@ impl GpuState {
         if !self.params.locks.distortion_plus_pitch   { self.params.distortion_plus_pitch   = rng.gen_range(-45.0_f32..=45.0); }
         if !self.params.locks.distortion_plus_roll    { self.params.distortion_plus_roll    = rng.gen_range(-180.0_f32..=180.0); }
         if !self.params.locks.palette_mode {
-            self.params.palette_mode = match rng.gen_range(0u8..6) {
+            self.params.palette_mode = match rng.gen_range(0u8..7) {
                 0 => PaletteMode::Off,
                 1 => PaletteMode::Warm,
                 2 => PaletteMode::Cool,
                 3 => PaletteMode::Earth,
                 4 => PaletteMode::Neon,
-                _ => PaletteMode::Monochrome,
+                5 => PaletteMode::Monochrome,
+                _ => PaletteMode::Harmony,
             };
         }
         if !self.params.locks.palette_tint     { self.params.palette_tint     = rng.gen_range(0.0_f32..=1.0); }
@@ -5233,6 +5278,9 @@ impl GpuState {
         }
         if !self.params.locks.color_value {
             self.params.color_value = rng.gen_range(0.65_f32..=1.0);
+        }
+        if !self.params.locks.color_harmony_strength {
+            self.params.color_harmony_strength = rng.gen_range(0.3_f32..=0.85);
         }
     }
 
@@ -6133,10 +6181,11 @@ impl ApplicationHandler for App {
                                 LockTarget::BlackholeWarpCurve     => gpu.params.locks.blackhole_warp_curve    = !gpu.params.locks.blackhole_warp_curve,
                                 LockTarget::BlackholeAlphaRadius   => gpu.params.locks.blackhole_alpha_radius  = !gpu.params.locks.blackhole_alpha_radius,
                                 LockTarget::BlackholeWanderAmount  => gpu.params.locks.blackhole_wander_amount = !gpu.params.locks.blackhole_wander_amount,
-                                LockTarget::ColorHarmony    => gpu.params.locks.color_harmony    = !gpu.params.locks.color_harmony,
-                                LockTarget::ColorAnchorHue  => gpu.params.locks.color_anchor_hue = !gpu.params.locks.color_anchor_hue,
-                                LockTarget::ColorSaturation => gpu.params.locks.color_saturation = !gpu.params.locks.color_saturation,
-                                LockTarget::ColorValue      => gpu.params.locks.color_value      = !gpu.params.locks.color_value,
+                                LockTarget::ColorHarmony         => gpu.params.locks.color_harmony          = !gpu.params.locks.color_harmony,
+                                LockTarget::ColorAnchorHue       => gpu.params.locks.color_anchor_hue       = !gpu.params.locks.color_anchor_hue,
+                                LockTarget::ColorSaturation      => gpu.params.locks.color_saturation       = !gpu.params.locks.color_saturation,
+                                LockTarget::ColorValue           => gpu.params.locks.color_value            = !gpu.params.locks.color_value,
+                                LockTarget::ColorHarmonyStrength => gpu.params.locks.color_harmony_strength = !gpu.params.locks.color_harmony_strength,
                                 LockTarget::PhantomEnabled       => gpu.params.locks.phantom_enabled       = !gpu.params.locks.phantom_enabled,
                                 LockTarget::PhantomDelaySeconds  => gpu.params.locks.phantom_delay_seconds = !gpu.params.locks.phantom_delay_seconds,
                                 LockTarget::PhantomKeyColor      => gpu.params.locks.phantom_key_color     = !gpu.params.locks.phantom_key_color,
@@ -6179,10 +6228,11 @@ impl ApplicationHandler for App {
                         ParamChange::BlackholeWarpCurve(v)     => gpu.params.blackhole_warp_curve    = v,
                         ParamChange::BlackholeAlphaRadius(v)   => gpu.params.blackhole_alpha_radius  = v,
                         ParamChange::BlackholeWanderAmount(v)  => gpu.params.blackhole_wander_amount = v,
-                        ParamChange::ColorHarmony(v)    => gpu.params.color_harmony    = v,
-                        ParamChange::ColorAnchorHue(v)  => gpu.params.color_anchor_hue = v,
-                        ParamChange::ColorSaturation(v) => gpu.params.color_saturation = v,
-                        ParamChange::ColorValue(v)      => gpu.params.color_value      = v,
+                        ParamChange::ColorHarmony(v)         => gpu.params.color_harmony          = v,
+                        ParamChange::ColorAnchorHue(v)       => gpu.params.color_anchor_hue       = v,
+                        ParamChange::ColorSaturation(v)      => gpu.params.color_saturation       = v,
+                        ParamChange::ColorValue(v)           => gpu.params.color_value            = v,
+                        ParamChange::ColorHarmonyStrength(v) => gpu.params.color_harmony_strength = v,
                         ParamChange::PhantomEnabled(v)       => gpu.params.phantom_enabled       = v,
                         ParamChange::PhantomDelaySeconds(v)  => gpu.params.phantom_delay_seconds = v,
                         ParamChange::PhantomKeyColor(v)      => gpu.params.phantom_key_color     = v,
@@ -6363,10 +6413,11 @@ mod tests {
             phantom_key_softness:  0.08,
             phantom_key_strength:  0.9,
             phantom_opacity:       0.7,
-            color_harmony:    color::ColorHarmony::Triadic,
-            color_anchor_hue: 45.0,
-            color_saturation: 0.8,
-            color_value:      0.9,
+            color_harmony:          color::ColorHarmony::Triadic,
+            color_anchor_hue:       45.0,
+            color_saturation:       0.8,
+            color_value:            0.9,
+            color_harmony_strength: 0.6,
         }
     }
 
@@ -6436,10 +6487,11 @@ mod tests {
         assert_eq!(restored.phantom_key_softness,  original.phantom_key_softness,  "phantom_key_softness failed");
         assert_eq!(restored.phantom_key_strength,  original.phantom_key_strength,  "phantom_key_strength failed");
         assert_eq!(restored.phantom_opacity,       original.phantom_opacity,       "phantom_opacity failed");
-        assert_eq!(restored.color_harmony,    original.color_harmony,    "color_harmony failed");
-        assert_eq!(restored.color_anchor_hue, original.color_anchor_hue, "color_anchor_hue failed");
-        assert_eq!(restored.color_saturation, original.color_saturation, "color_saturation failed");
-        assert_eq!(restored.color_value,      original.color_value,      "color_value failed");
+        assert_eq!(restored.color_harmony,          original.color_harmony,          "color_harmony failed");
+        assert_eq!(restored.color_anchor_hue,       original.color_anchor_hue,       "color_anchor_hue failed");
+        assert_eq!(restored.color_saturation,       original.color_saturation,       "color_saturation failed");
+        assert_eq!(restored.color_value,            original.color_value,            "color_value failed");
+        assert_eq!(restored.color_harmony_strength, original.color_harmony_strength, "color_harmony_strength failed");
     }
 
     #[test]

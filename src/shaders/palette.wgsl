@@ -6,10 +6,15 @@
 // the kaleido/shape bind group layouts that reference painter_view.
 
 struct PaletteUniforms {
-    mode:     u32,   // 0=Off 1=Warm 2=Cool 3=Earth 4=Neon 5=Mono
-    tint:     f32,   // 0.0 = original unchanged, 1.0 = fully clamped
-    mono_hue: f32,   // degrees [0, 360], only used in Mono mode
-    _pad:     f32,
+    mode:                u32,              // 0=Off 1=Warm 2=Cool 3=Earth 4=Neon 5=Mono 6=Harmony
+    tint:                f32,              // 0.0 = original unchanged, 1.0 = fully clamped
+    mono_hue:            f32,              // degrees [0, 360], only used in Mono mode
+    harmony_num_offsets: u32,              // how many harmony_offsets[] entries are active
+    harmony_anchor_hue:  f32,             // base hue in degrees
+    harmony_saturation:  f32,             // target saturation for Harmony mode
+    harmony_value:       f32,             // target value for Harmony mode
+    harmony_strength:    f32,             // 0..1 blend strength for sat/val snap
+    harmony_offsets:     array<vec4<f32>, 2>,  // 8 hues packed; index with harmony_offset_val()
 };
 
 @group(0) @binding(0) var<uniform> u: PaletteUniforms;
@@ -83,6 +88,40 @@ fn clamp_warm(h: f32) -> f32 {
     return 330.0;
 }
 
+// Extract one hue from the packed array<vec4<f32>, 2> (holds up to 8 values).
+fn harmony_offset_val(i: u32) -> f32 {
+    let vec_idx = i / 4u;
+    let lane    = i % 4u;
+    let v = u.harmony_offsets[vec_idx];
+    if      lane == 0u { return v.x; }
+    else if lane == 1u { return v.y; }
+    else if lane == 2u { return v.z; }
+    else               { return v.w; }
+}
+
+// Shortest angular distance between two hues in [0, 360).
+fn hue_delta(a: f32, b: f32) -> f32 {
+    var d = (b - a) % 360.0;
+    if d > 180.0  { d = d - 360.0; }
+    if d < -180.0 { d = d + 360.0; }
+    return abs(d);
+}
+
+// Find the harmony hue (from harmony_offsets[0..harmony_num_offsets]) nearest to input_hue.
+fn nearest_harmony_hue(input_hue: f32) -> f32 {
+    var best_hue  = harmony_offset_val(0u);
+    var best_dist = hue_delta(input_hue, best_hue);
+    for (var i = 1u; i < u.harmony_num_offsets; i = i + 1u) {
+        let candidate = harmony_offset_val(i);
+        let dist      = hue_delta(input_hue, candidate);
+        if dist < best_dist {
+            best_dist = dist;
+            best_hue  = candidate;
+        }
+    }
+    return best_hue;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sample = textureSample(tex, samp, in.uv);
@@ -106,6 +145,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else if u.mode == 4u {
         cs = 1.0;
         cv = 1.0;
+    } else if u.mode == 6u {
+        ch = nearest_harmony_hue(ch);
+        cs = mix(cs, u.harmony_saturation, u.harmony_strength);
+        cv = mix(cv, u.harmony_value,      u.harmony_strength);
     } else {
         ch = u.mono_hue;
     }
