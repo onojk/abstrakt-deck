@@ -185,6 +185,7 @@ pub enum ParamChange {
     BezoldStrength(f32),
     BezoldRadius(f32),
     ApplyBundle(crate::bundles::BundleId),
+    ApplyRandomBundle,
 }
 
 #[derive(Clone, Copy)]
@@ -556,6 +557,16 @@ impl MenuBar {
                     // End last row if odd count
                     if crate::bundles::ALL.len() % 2 == 1 { ui.end_row(); }
                 });
+
+                ui.separator();
+                if ui.button("🎲 Surprise me").clicked() {
+                    changes.push(ParamChange::ApplyRandomBundle);
+                }
+                ui.label(
+                    egui::RichText::new("Picks any style other than Defaults. Respects locks.")
+                        .small()
+                        .weak()
+                );
         });
     }
 

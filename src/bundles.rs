@@ -9,7 +9,7 @@ use crate::{
     color::{ColorHarmony, SaturationMode, ValueKey},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BundleId {
     #[default]
     Defaults,
@@ -66,6 +66,16 @@ impl BundleId {
             BundleId::Void     => "Dark abyss — near-black monochromatic, distortion plus, blackhole",
             BundleId::Carnival => "Festival burst — tetradic yellow, phase-cycling hue, ribbons",
         }
+    }
+
+    /// Pick a random non-Defaults bundle. Used by the "Surprise me" button.
+    pub fn random_non_default<R: rand::Rng>(rng: &mut R) -> BundleId {
+        let non_default: Vec<BundleId> = ALL
+            .iter()
+            .copied()
+            .filter(|b| *b != BundleId::Defaults)
+            .collect();
+        non_default[rng.gen_range(0..non_default.len())]
     }
 
     /// Write bundle params into `p`, skipping fields whose lock is set.
@@ -415,5 +425,30 @@ mod tests {
         assert_eq!(p.color_anchor_hue, 210.0);
         // but other unlocked params should have changed
         assert!(p.blackhole_enabled);
+    }
+
+    #[test]
+    fn random_non_default_never_returns_defaults() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+        for _ in 0..100 {
+            let pick = BundleId::random_non_default(&mut rng);
+            assert_ne!(pick, BundleId::Defaults, "random_non_default returned Defaults");
+        }
+    }
+
+    #[test]
+    fn random_non_default_covers_multiple_bundles() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            seen.insert(BundleId::random_non_default(&mut rng));
+        }
+        assert!(
+            seen.len() >= 5,
+            "expected diversity over 100 draws, got only {} distinct bundles",
+            seen.len()
+        );
     }
 }

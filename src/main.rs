@@ -7013,6 +7013,14 @@ impl ApplicationHandler for App {
                             bundle.apply(&mut gpu.params, &locks);
                             gpu.last_bundle_applied = Some(bundle);
                         }
+                        ParamChange::ApplyRandomBundle => {
+                            let mut rng = rand::thread_rng();
+                            let bundle = bundles::BundleId::random_non_default(&mut rng);
+                            let locks = gpu.params.locks;
+                            bundle.apply(&mut gpu.params, &locks);
+                            gpu.last_bundle_applied = Some(bundle);
+                            log::info!("Random bundle: {}", bundle.name());
+                        }
                     }
                 }
 
