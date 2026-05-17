@@ -182,6 +182,7 @@ pub enum ParamChange {
     BezoldEnabled(bool),
     BezoldStrength(f32),
     BezoldRadius(f32),
+    ApplyBundle(crate::bundles::BundleId),
 }
 
 #[derive(Clone, Copy)]
@@ -322,6 +323,7 @@ impl MenuBar {
         shader_bpm: Option<f32>,
         shader_beat_phase: f32,
         shader_bpm_confidence: f32,
+        last_bundle: Option<crate::bundles::BundleId>,
     ) {
         let raw_input = self.state.take_egui_input(window);
 
@@ -412,6 +414,8 @@ impl MenuBar {
                         ui.heading("Visualizer");
                         ui.separator();
                         egui::ScrollArea::vertical().show(ui, |ui| {
+                            Self::bundles_section(ui, last_bundle, &mut frame_changes);
+                            ui.separator();
                             Self::geometry_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::frame_section(ui, current_params, &mut frame_changes);
@@ -515,6 +519,42 @@ impl MenuBar {
             button
         };
         ui.add(button)
+    }
+
+    fn bundles_section(
+        ui: &mut egui::Ui,
+        last_bundle: Option<crate::bundles::BundleId>,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Style Bundles", |ui| {
+            ui.label(egui::RichText::new("One-click visual styles. Respects locked params.").small().weak());
+            ui.add_space(4.0);
+            egui::Grid::new("bundles_grid")
+                .num_columns(2)
+                .spacing([4.0, 4.0])
+                .show(ui, |ui| {
+                    for (i, &bundle) in crate::bundles::ALL.iter().enumerate() {
+                        let is_active = last_bundle == Some(bundle);
+                        let label = bundle.name();
+                        let button = if is_active {
+                            egui::Button::new(
+                                egui::RichText::new(label).strong()
+                            ).fill(egui::Color32::from_rgb(60, 100, 60))
+                        } else {
+                            egui::Button::new(label)
+                        };
+                        let resp = ui.add_sized([120.0, 22.0], button)
+                            .on_hover_text(bundle.description());
+                        if resp.clicked() {
+                            changes.push(ParamChange::ApplyBundle(bundle));
+                        }
+                        // Two columns per row
+                        if i % 2 == 1 { ui.end_row(); }
+                    }
+                    // End last row if odd count
+                    if crate::bundles::ALL.len() % 2 == 1 { ui.end_row(); }
+                });
+        });
     }
 
     fn geometry_section(

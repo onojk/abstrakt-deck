@@ -1,5 +1,6 @@
 mod audio;
 mod bezold;
+mod bundles;
 mod color;
 mod help_overlay;
 mod menu_bar;
@@ -1925,6 +1926,7 @@ struct GpuState {
     last_audio_update:            Instant,
 
     pub params: VisualParams,
+    last_bundle_applied: Option<bundles::BundleId>,
 }
 
 impl GpuState {
@@ -3489,6 +3491,7 @@ impl GpuState {
             shader_bpm_confidence:       0.0,
             last_audio_update:  Instant::now(),
             params: VisualParams::default(),
+            last_bundle_applied: None,
         }
     }
 
@@ -3756,6 +3759,7 @@ impl GpuState {
                         &self.device, &self.queue, &mut enc, window,
                         &swap_view, self.size.width, self.size.height, &self.params,
                         self.shader_bpm, self.shader_beat_phase, self.shader_bpm_confidence,
+                        self.last_bundle_applied,
                     );
                 }
                 self.queue.submit(std::iter::once(enc.finish()));
@@ -4488,6 +4492,7 @@ impl GpuState {
                 self.shader_bpm,
                 self.shader_beat_phase,
                 self.shader_bpm_confidence,
+                self.last_bundle_applied,
             );
         }
 
@@ -5617,6 +5622,7 @@ impl GpuState {
                         &self.device, &self.queue, &mut blit_enc, window,
                         &swap_view, self.size.width, self.size.height, &self.params,
                         self.shader_bpm, self.shader_beat_phase, self.shader_bpm_confidence,
+                        self.last_bundle_applied,
                     );
                 }
                 self.queue.submit(std::iter::once(blit_enc.finish()));
@@ -6976,6 +6982,11 @@ impl ApplicationHandler for App {
                         ParamChange::BezoldEnabled(v)        => gpu.params.bezold_enabled        = v,
                         ParamChange::BezoldStrength(v)       => gpu.params.bezold_strength       = v,
                         ParamChange::BezoldRadius(v)         => gpu.params.bezold_radius         = v,
+                        ParamChange::ApplyBundle(bundle)     => {
+                            let locks = gpu.params.locks;
+                            bundle.apply(&mut gpu.params, &locks);
+                            gpu.last_bundle_applied = Some(bundle);
+                        }
                     }
                 }
 
