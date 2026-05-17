@@ -513,7 +513,7 @@ pub struct VisualParams {
     pub color_harmony:            color::ColorHarmony,
     pub color_anchor_hue:         f32,              // 0.0 .. 360.0
     pub color_temperature_bias:   f32,              // -1.0 (cool) .. +1.0 (warm)
-    pub color_temperature_audio:  f32,              //  0.0 (manual) .. 1.0 (full audio)
+    pub color_temperature_audio:  f32,              // -1.0..=1.0; negative inverts kick/hat roles
     pub color_saturation_mode:    color::SaturationMode,
     pub color_saturation:         f32,              // 0.0 .. 1.0
     pub color_value_key:          color::ValueKey,
@@ -5848,7 +5848,8 @@ impl GpuState {
         }
         if !self.params.locks.color_temperature_audio {
             self.params.color_temperature_audio = if rng.gen_bool(0.30) {
-                rng.gen_range(0.2_f32..=0.8)
+                let magnitude = rng.gen_range(0.2_f32..=0.8);
+                if rng.gen_bool(0.25) { -magnitude } else { magnitude }
             } else {
                 0.0
             };

@@ -1802,16 +1802,25 @@ impl MenuBar {
                 ui.add_enabled_ui(!params.locks.color_temperature_audio, |ui| {
                     let mut v = params.color_temperature_audio;
                     if ui.add(
-                        egui::Slider::new(&mut v, 0.0..=1.0)
-                            .text("Audio (kicks warm, hats cool)")
+                        egui::Slider::new(&mut v, -1.0..=1.0)
+                            .text("Audio drive")
                             .step_by(0.01)
+                            .custom_formatter(|n, _| {
+                                if n.abs() < 0.05 {
+                                    "off".to_string()
+                                } else if n > 0.0 {
+                                    format!("kicks\u{2192}warm {:+.2}", n)
+                                } else {
+                                    format!("kicks\u{2192}cool {:+.2}", n)
+                                }
+                            })
                     ).changed() {
                         changes.push(ParamChange::ColorTemperatureAudio(v));
                     }
                 });
             });
 
-            if params.color_temperature_audio > 0.01 {
+            if params.color_temperature_audio.abs() > 0.05 {
                 ui.label(egui::RichText::new(
                     "↑ palette breathes with the rhythm section"
                 ).small().weak());
