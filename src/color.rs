@@ -283,6 +283,66 @@ impl SaturationMode {
     }
 }
 
+/// Hornung Part 4/7 value-key composition. Each key constrains color
+/// generation to a brightness band that produces a distinct tonal mood.
+///
+/// `Free` means no constraint — value can be anywhere in [0, 1] and
+/// randomization picks across the full range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValueKey {
+    /// No constraint — value can be anywhere in [0, 1]
+    Free,
+    /// Light, airy, ethereal: most colors in the upper brightness range.
+    High,
+    /// Balanced midtones: where most photographs and "normal" scenes live.
+    Mid,
+    /// Moody, cinematic, dark with selective highlights.
+    Low,
+}
+
+impl Default for ValueKey {
+    fn default() -> Self { ValueKey::Free }
+}
+
+impl ValueKey {
+    pub fn next(self) -> Self {
+        match self {
+            ValueKey::Free => ValueKey::High,
+            ValueKey::High => ValueKey::Mid,
+            ValueKey::Mid  => ValueKey::Low,
+            ValueKey::Low  => ValueKey::Free,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ValueKey::Free => "Free",
+            ValueKey::High => "High key",
+            ValueKey::Mid  => "Mid key",
+            ValueKey::Low  => "Low key",
+        }
+    }
+
+    pub fn range(self) -> [f32; 2] {
+        match self {
+            ValueKey::Free => [0.00, 1.00],
+            ValueKey::High => [0.75, 1.00],
+            ValueKey::Mid  => [0.40, 0.75],
+            ValueKey::Low  => [0.15, 0.40],
+        }
+    }
+
+    pub fn default_value(self) -> f32 {
+        let r = self.range();
+        (r[0] + r[1]) * 0.5
+    }
+
+    pub fn clamp(self, value: f32) -> f32 {
+        let r = self.range();
+        value.clamp(r[0], r[1])
+    }
+}
+
 /// Pull a hue toward the warm pole (30° = orange) or cool pole (210° = cyan).
 ///
 /// `bias` is in [-1, 1]:
@@ -468,6 +528,50 @@ mod tests {
             assert!(v >= r[0] && v <= r[1],
                 "{:?} default {} should be in range [{}, {}]", m, v, r[0], r[1]);
         }
+    }
+
+    #[test]
+    fn value_key_ranges_are_disjoint() {
+        let low  = ValueKey::Low.range();
+        let mid  = ValueKey::Mid.range();
+        let high = ValueKey::High.range();
+        assert!(low[1]  <= mid[0],  "Low ceiling {} should be ≤ Mid floor {}",  low[1],  mid[0]);
+        assert!(mid[1]  <= high[0], "Mid ceiling {} should be ≤ High floor {}", mid[1],  high[0]);
+    }
+
+    #[test]
+    fn value_key_clamp_constrains() {
+        assert_eq!(ValueKey::High.clamp(0.1),  0.75);
+        assert_eq!(ValueKey::High.clamp(1.0),  1.0);
+        assert_eq!(ValueKey::Mid.clamp(0.9),   0.75);
+        assert_eq!(ValueKey::Mid.clamp(0.0),   0.40);
+        assert_eq!(ValueKey::Low.clamp(0.9),   0.40);
+        assert_eq!(ValueKey::Low.clamp(0.0),   0.15);
+        assert_eq!(ValueKey::Free.clamp(0.5),   0.5);
+        assert_eq!(ValueKey::Free.clamp(-0.5),  0.0);
+        assert_eq!(ValueKey::Free.clamp(2.0),   1.0);
+    }
+
+    #[test]
+    fn value_key_default_is_in_range() {
+        for k in [ValueKey::Free, ValueKey::High, ValueKey::Mid, ValueKey::Low] {
+            let v = k.default_value();
+            let r = k.range();
+            assert!(v >= r[0] && v <= r[1],
+                "{:?} default {} should be in range [{}, {}]", k, v, r[0], r[1]);
+        }
+    }
+
+    #[test]
+    fn value_key_next_cycles_through_all() {
+        let mut k = ValueKey::Free;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..4 {
+            seen.insert(format!("{:?}", k));
+            k = k.next();
+        }
+        assert_eq!(seen.len(), 4);
+        assert_eq!(k, ValueKey::Free);
     }
 
     #[test]

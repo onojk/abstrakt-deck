@@ -31,6 +31,15 @@ pub enum LockTarget {
     BeatReactivity,
     MidiShakeEnabled,
     AudioShakeEnabled,
+    AudioRouteShape,
+    AudioRouteKaleido,
+    AudioRouteShake,
+    PhaseLockEnabled,
+    PhaseLockKaleido,
+    PhaseLockShape,
+    PhaseLockScale,
+    PhaseLockScaleDepth,
+    PhaseLockBeats,
     RibbonsEnabled,
     RibbonsIntensity,
     PaletteMode,
@@ -47,8 +56,12 @@ pub enum LockTarget {
     ColorAnchorHue,
     ColorSaturationMode,
     ColorSaturation,
+    ColorValueKey,
     ColorValue,
     ColorHarmonyStrength,
+    ColorPhaseCycleEnabled,
+    ColorPhaseCycleDegrees,
+    ColorPhaseCycleLocked,
     AppliedHarmonyEnabled,
     PhantomEnabled,
     PhantomDelaySeconds,
@@ -100,6 +113,15 @@ pub enum ParamChange {
     DistortionPlusRoll(f32),
     MidiShakeEnabled(bool),
     AudioShakeEnabled(bool),
+    AudioRouteShape(crate::audio::BeatRoute),
+    AudioRouteKaleido(crate::audio::BeatRoute),
+    AudioRouteShake(crate::audio::BeatRoute),
+    PhaseLockEnabled(bool),
+    PhaseLockKaleido(bool),
+    PhaseLockShape(bool),
+    PhaseLockScale(bool),
+    PhaseLockScaleDepth(f32),
+    PhaseLockBeats(u32),
     RibbonsEnabled(bool),
     RibbonsIntensity(f32),
     BassZoomStrength(f32),
@@ -140,8 +162,12 @@ pub enum ParamChange {
     ColorAnchorHue(f32),
     ColorSaturationMode(crate::color::SaturationMode),
     ColorSaturation(f32),
+    ColorValueKey(crate::color::ValueKey),
     ColorValue(f32),
     ColorHarmonyStrength(f32),
+    ColorPhaseCycleEnabled(bool),
+    ColorPhaseCycleDegrees(f32),
+    ColorPhaseCycleLocked(bool),
     AppliedHarmonyEnabled(bool),
     PhantomEnabled(bool),
     PhantomDelaySeconds(f32),
@@ -287,6 +313,9 @@ impl MenuBar {
         width: u32,
         height: u32,
         current_params: &crate::VisualParams,
+        shader_bpm: Option<f32>,
+        shader_beat_phase: f32,
+        shader_bpm_confidence: f32,
     ) {
         let raw_input = self.state.take_egui_input(window);
 
@@ -385,7 +414,8 @@ impl MenuBar {
                             ui.separator();
                             Self::distortion_plus_section(ui, current_params, &mut frame_changes);
                             ui.separator();
-                            Self::audio_section(ui, current_params, &mut frame_changes);
+                            Self::audio_section(ui, current_params, &mut frame_changes,
+                                shader_bpm, shader_beat_phase, shader_bpm_confidence);
                             ui.separator();
                             Self::skin_section_static(
                                 ui,
@@ -864,6 +894,9 @@ impl MenuBar {
         ui: &mut egui::Ui,
         params: &crate::VisualParams,
         changes: &mut Vec<ParamChange>,
+        shader_bpm: Option<f32>,
+        shader_beat_phase: f32,
+        shader_bpm_confidence: f32,
     ) {
         ui.collapsing("Audio", |ui| {
             // Source mode selector
@@ -919,6 +952,219 @@ impl MenuBar {
                         changes.push(ParamChange::BeatReactivity(react));
                     }
                 });
+            });
+
+            ui.collapsing("Audio Routing", |ui| {
+                ui.label(
+                    egui::RichText::new("Pick which drum band drives each visual.")
+                        .small().weak()
+                );
+                let route_options = [
+                    crate::audio::BeatRoute::Combined,
+                    crate::audio::BeatRoute::Low,
+                    crate::audio::BeatRoute::Mid,
+                    crate::audio::BeatRoute::High,
+                    crate::audio::BeatRoute::Broadband,
+                    crate::audio::BeatRoute::Off,
+                ];
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.audio_route_shape).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::AudioRouteShape));
+                    }
+                    ui.add_enabled_ui(!params.locks.audio_route_shape, |ui| {
+                        ui.label("Shape");
+                        let current = params.audio_route_shape;
+                        egui::ComboBox::from_id_salt("audio_route_shape_combo")
+                            .selected_text(current.name())
+                            .show_ui(ui, |ui| {
+                                for r in route_options {
+                                    if ui.selectable_label(current == r, r.name()).clicked() {
+                                        changes.push(ParamChange::AudioRouteShape(r));
+                                    }
+                                }
+                            });
+                    });
+                });
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.audio_route_kaleido).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::AudioRouteKaleido));
+                    }
+                    ui.add_enabled_ui(!params.locks.audio_route_kaleido, |ui| {
+                        ui.label("Kaleido");
+                        let current = params.audio_route_kaleido;
+                        egui::ComboBox::from_id_salt("audio_route_kaleido_combo")
+                            .selected_text(current.name())
+                            .show_ui(ui, |ui| {
+                                for r in route_options {
+                                    if ui.selectable_label(current == r, r.name()).clicked() {
+                                        changes.push(ParamChange::AudioRouteKaleido(r));
+                                    }
+                                }
+                            });
+                    });
+                });
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.audio_route_shake).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::AudioRouteShake));
+                    }
+                    ui.add_enabled_ui(!params.locks.audio_route_shake, |ui| {
+                        ui.label("Shake");
+                        let current = params.audio_route_shake;
+                        egui::ComboBox::from_id_salt("audio_route_shake_combo")
+                            .selected_text(current.name())
+                            .show_ui(ui, |ui| {
+                                for r in route_options {
+                                    if ui.selectable_label(current == r, r.name()).clicked() {
+                                        changes.push(ParamChange::AudioRouteShake(r));
+                                    }
+                                }
+                            });
+                    });
+                });
+            });
+
+            ui.collapsing("Tempo Detection", |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "BPM autocorrelation + phase-locked loop. Live Mic/Loopback only."
+                    ).small().weak()
+                );
+                ui.horizontal(|ui| {
+                    ui.label("BPM:");
+                    match shader_bpm {
+                        Some(bpm) => { ui.label(egui::RichText::new(format!("{:.1}", bpm)).strong()); }
+                        None      => { ui.label(egui::RichText::new("—").weak()); }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Phase:");
+                    if shader_bpm.is_some() {
+                        ui.label(format!("{:.2}", shader_beat_phase));
+                    } else {
+                        ui.label(egui::RichText::new("—").weak());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Confidence:");
+                    let normalized = (shader_bpm_confidence / 3.0).clamp(0.0, 1.0);
+                    ui.add(
+                        egui::ProgressBar::new(normalized)
+                            .desired_width(120.0)
+                            .text(format!("{:.2}", shader_bpm_confidence))
+                    );
+                });
+                if shader_bpm.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label("Beat:");
+                        let brightness = (1.0_f32 - (shader_beat_phase * 2.0 - 1.0).abs()).clamp(0.0, 1.0);
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(20.0, 20.0),
+                            egui::Sense::hover(),
+                        );
+                        let intensity = (brightness * 255.0) as u8;
+                        ui.painter().circle_filled(
+                            rect.center(),
+                            8.0,
+                            egui::Color32::from_rgb(intensity, intensity, intensity),
+                        );
+                    });
+                }
+            });
+
+            ui.collapsing("Phase Lock", |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Sync visuals to detected beat. Requires Tempo lock."
+                    ).small().weak()
+                );
+
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.phase_lock_enabled).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::PhaseLockEnabled));
+                    }
+                    ui.add_enabled_ui(!params.locks.phase_lock_enabled, |ui| {
+                        let mut v = params.phase_lock_enabled;
+                        if ui.checkbox(&mut v, "Enable  (K)").changed() {
+                            changes.push(ParamChange::PhaseLockEnabled(v));
+                        }
+                    });
+                });
+
+                ui.add_enabled_ui(params.phase_lock_enabled, |ui| {
+                    ui.indent("phase_lock_indent", |ui| {
+                        ui.horizontal(|ui| {
+                            if Self::lock_button(ui, params.locks.phase_lock_kaleido).clicked() {
+                                changes.push(ParamChange::ToggleLock(LockTarget::PhaseLockKaleido));
+                            }
+                            ui.add_enabled_ui(!params.locks.phase_lock_kaleido, |ui| {
+                                let mut v = params.phase_lock_kaleido;
+                                if ui.checkbox(&mut v, "Kaleido/Ribbon").changed() {
+                                    changes.push(ParamChange::PhaseLockKaleido(v));
+                                }
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            if Self::lock_button(ui, params.locks.phase_lock_shape).clicked() {
+                                changes.push(ParamChange::ToggleLock(LockTarget::PhaseLockShape));
+                            }
+                            ui.add_enabled_ui(!params.locks.phase_lock_shape, |ui| {
+                                let mut v = params.phase_lock_shape;
+                                if ui.checkbox(&mut v, "Shape rotation").changed() {
+                                    changes.push(ParamChange::PhaseLockShape(v));
+                                }
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            if Self::lock_button(ui, params.locks.phase_lock_scale).clicked() {
+                                changes.push(ParamChange::ToggleLock(LockTarget::PhaseLockScale));
+                            }
+                            ui.add_enabled_ui(!params.locks.phase_lock_scale, |ui| {
+                                let mut v = params.phase_lock_scale;
+                                if ui.checkbox(&mut v, "Scale pulse").changed() {
+                                    changes.push(ParamChange::PhaseLockScale(v));
+                                }
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            if Self::lock_button(ui, params.locks.phase_lock_scale_depth).clicked() {
+                                changes.push(ParamChange::ToggleLock(LockTarget::PhaseLockScaleDepth));
+                            }
+                            ui.add_enabled_ui(!params.locks.phase_lock_scale_depth, |ui| {
+                                let mut v = params.phase_lock_scale_depth;
+                                if ui.add(egui::Slider::new(&mut v, 0.0..=0.30).text("Pulse depth")).changed() {
+                                    changes.push(ParamChange::PhaseLockScaleDepth(v));
+                                }
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            if Self::lock_button(ui, params.locks.phase_lock_beats).clicked() {
+                                changes.push(ParamChange::ToggleLock(LockTarget::PhaseLockBeats));
+                            }
+                            ui.add_enabled_ui(!params.locks.phase_lock_beats, |ui| {
+                                ui.label("Beats/cycle");
+                                let current = params.phase_lock_beats;
+                                for &v in &[1u32, 2, 4] {
+                                    if ui.selectable_label(current == v, format!("{}", v)).clicked() {
+                                        changes.push(ParamChange::PhaseLockBeats(v));
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+
+                if params.phase_lock_enabled {
+                    if shader_bpm.is_some() {
+                        ui.label(egui::RichText::new(
+                            format!("● {:.1} BPM  conf {:.2}",
+                                shader_bpm.unwrap(), shader_bpm_confidence)
+                        ).small());
+                    } else {
+                        ui.label(egui::RichText::new(
+                            "○ waiting for tempo lock..."
+                        ).small().weak());
+                    }
+                }
             });
         });
     }
@@ -1322,6 +1568,31 @@ impl MenuBar {
                 });
             });
 
+            // Value key dropdown
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_value_key).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorValueKey));
+                }
+                ui.add_enabled_ui(!params.locks.color_value_key, |ui| {
+                    ui.label("Val key");
+                    let current = params.color_value_key;
+                    egui::ComboBox::from_id_salt("color_value_key_combo")
+                        .selected_text(current.name())
+                        .show_ui(ui, |ui| {
+                            for m in [
+                                crate::color::ValueKey::Free,
+                                crate::color::ValueKey::High,
+                                crate::color::ValueKey::Mid,
+                                crate::color::ValueKey::Low,
+                            ] {
+                                if ui.selectable_label(current == m, m.name()).clicked() {
+                                    changes.push(ParamChange::ColorValueKey(m));
+                                }
+                            }
+                        });
+                });
+            });
+
             // Value (brightness) slider
             ui.horizontal(|ui| {
                 if Self::lock_button(ui, params.locks.color_value).clicked() {
@@ -1329,7 +1600,8 @@ impl MenuBar {
                 }
                 ui.add_enabled_ui(!params.locks.color_value, |ui| {
                     let mut v = params.color_value;
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)
+                    let range = params.color_value_key.range();
+                    if ui.add(egui::Slider::new(&mut v, range[0]..=range[1])
                         .text("Value").step_by(0.01)).changed()
                     {
                         changes.push(ParamChange::ColorValue(v));
@@ -1404,6 +1676,50 @@ impl MenuBar {
                     "↑ palette breathes with the rhythm section"
                 ).small().weak());
             }
+
+            // ── Phase Cycle ───────────────────────────────────────────────
+            ui.separator();
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.color_phase_cycle_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ColorPhaseCycleEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.color_phase_cycle_enabled, |ui| {
+                    let mut v = params.color_phase_cycle_enabled;
+                    if ui.checkbox(&mut v, "Phase Cycle").changed() {
+                        changes.push(ParamChange::ColorPhaseCycleEnabled(v));
+                    }
+                });
+            });
+
+            ui.add_enabled_ui(params.color_phase_cycle_enabled, |ui| {
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.color_phase_cycle_degrees).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::ColorPhaseCycleDegrees));
+                    }
+                    ui.add_enabled_ui(!params.locks.color_phase_cycle_degrees, |ui| {
+                        let mut v = params.color_phase_cycle_degrees;
+                        if ui.add(
+                            egui::Slider::new(&mut v, 0.0..=720.0)
+                                .text("Rotation (°/cycle)")
+                                .step_by(1.0)
+                        ).changed() {
+                            changes.push(ParamChange::ColorPhaseCycleDegrees(v));
+                        }
+                    });
+                });
+
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.color_phase_cycle_locked).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::ColorPhaseCycleLocked));
+                    }
+                    ui.add_enabled_ui(!params.locks.color_phase_cycle_locked, |ui| {
+                        let mut v = params.color_phase_cycle_locked;
+                        if ui.checkbox(&mut v, "Require BPM lock").changed() {
+                            changes.push(ParamChange::ColorPhaseCycleLocked(v));
+                        }
+                    });
+                });
+            });
 
             // Palette preview: 6 swatches
             ui.horizontal(|ui| {

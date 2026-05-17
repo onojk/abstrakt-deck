@@ -329,7 +329,17 @@ pub struct ParamLocks {
     pub bass_zoom_strength: bool,
     pub beat_reactivity: bool,
     pub midi_shake_enabled: bool,
-    pub audio_shake_enabled: bool,
+    pub audio_shake_enabled:  bool,
+    pub audio_route_shape:    bool,
+    pub audio_route_kaleido:  bool,
+    pub audio_route_shake:    bool,
+    // Phase Lock
+    pub phase_lock_enabled:     bool,
+    pub phase_lock_kaleido:     bool,
+    pub phase_lock_shape:       bool,
+    pub phase_lock_scale:       bool,
+    pub phase_lock_scale_depth: bool,
+    pub phase_lock_beats:       bool,
     // Ribbons
     pub ribbons_enabled:   bool,
     pub ribbons_intensity: bool,
@@ -338,14 +348,18 @@ pub struct ParamLocks {
     pub palette_tint:     bool,
     pub palette_mono_hue: bool,
     // Color Theory
-    pub color_harmony:           bool,
-    pub color_anchor_hue:        bool,
-    pub color_temperature_bias:  bool,
-    pub color_temperature_audio: bool,
-    pub color_saturation_mode:   bool,
-    pub color_saturation:        bool,
-    pub color_value:             bool,
-    pub color_harmony_strength:  bool,
+    pub color_harmony:              bool,
+    pub color_anchor_hue:           bool,
+    pub color_temperature_bias:     bool,
+    pub color_temperature_audio:    bool,
+    pub color_saturation_mode:      bool,
+    pub color_saturation:           bool,
+    pub color_value_key:            bool,
+    pub color_value:                bool,
+    pub color_harmony_strength:     bool,
+    pub color_phase_cycle_enabled:  bool,
+    pub color_phase_cycle_degrees:  bool,
+    pub color_phase_cycle_locked:   bool,
     pub applied_harmony_enabled: bool,
     // Blackhole
     pub blackhole_enabled:        bool,
@@ -442,6 +456,15 @@ pub struct VisualParams {
     pub distortion_plus_roll:    f32,
     pub midi_shake_enabled:  bool,
     pub audio_shake_enabled: bool,
+    pub audio_route_shape:   audio::BeatRoute,
+    pub audio_route_kaleido: audio::BeatRoute,
+    pub audio_route_shake:   audio::BeatRoute,
+    pub phase_lock_enabled:      bool,
+    pub phase_lock_kaleido:      bool,
+    pub phase_lock_shape:        bool,
+    pub phase_lock_scale:        bool,
+    pub phase_lock_scale_depth:  f32,
+    pub phase_lock_beats:        u32,
     pub ribbons_enabled:   bool,
     pub ribbons_intensity: f32,
     pub bass_zoom_strength: f32,
@@ -485,8 +508,12 @@ pub struct VisualParams {
     pub color_temperature_audio:  f32,              //  0.0 (manual) .. 1.0 (full audio)
     pub color_saturation_mode:    color::SaturationMode,
     pub color_saturation:         f32,              // 0.0 .. 1.0
+    pub color_value_key:          color::ValueKey,
     pub color_value:              f32,              // 0.0 .. 1.0
     pub color_harmony_strength:   f32,              // 0.0 .. 1.0 blend into nearest harmony hue
+    pub color_phase_cycle_enabled: bool,
+    pub color_phase_cycle_degrees: f32,             // 0.0 .. 720.0 — rotation per cycle
+    pub color_phase_cycle_locked:  bool,            // require BPM lock or fall back to 120 BPM?
     pub applied_harmony_enabled:  bool,             // recolor Skin/Image/PrintHead via harmony
     // Phantom Alpha (mutually exclusive with blackhole in live path)
     pub phantom_enabled:       bool,
@@ -521,6 +548,15 @@ impl Default for VisualParams {
             distortion_plus_roll:    0.0,
             midi_shake_enabled:  true,
             audio_shake_enabled: false,
+            audio_route_shape:   audio::BeatRoute::Combined,
+            audio_route_kaleido: audio::BeatRoute::Combined,
+            audio_route_shake:   audio::BeatRoute::Combined,
+            phase_lock_enabled:     false,
+            phase_lock_kaleido:     true,
+            phase_lock_shape:       true,
+            phase_lock_scale:       true,
+            phase_lock_scale_depth: 0.10,
+            phase_lock_beats:       1,
             ribbons_enabled:   false,
             ribbons_intensity: 0.5,
             bass_zoom_strength: 0.3,
@@ -554,8 +590,12 @@ impl Default for VisualParams {
             color_temperature_audio: 0.0,
             color_saturation_mode:   color::SaturationMode::Free,
             color_saturation:        0.75,
+            color_value_key:         color::ValueKey::Free,
             color_value:             0.85,
             color_harmony_strength:  0.5,
+            color_phase_cycle_enabled: false,
+            color_phase_cycle_degrees: 360.0,
+            color_phase_cycle_locked:  true,
             applied_harmony_enabled: false,
             phantom_enabled:       false,
             phantom_delay_seconds: 1.0,
@@ -617,6 +657,24 @@ struct Preset {
     midi_shake_enabled:  bool,
     #[serde(default)]
     audio_shake_enabled: bool,
+    #[serde(default = "default_audio_route_shape")]
+    audio_route_shape:   audio::BeatRoute,
+    #[serde(default = "default_audio_route_kaleido")]
+    audio_route_kaleido: audio::BeatRoute,
+    #[serde(default = "default_audio_route_shake")]
+    audio_route_shake:   audio::BeatRoute,
+    #[serde(default = "default_phase_lock_enabled")]
+    phase_lock_enabled:     bool,
+    #[serde(default = "default_phase_lock_kaleido")]
+    phase_lock_kaleido:     bool,
+    #[serde(default = "default_phase_lock_shape")]
+    phase_lock_shape:       bool,
+    #[serde(default = "default_phase_lock_scale")]
+    phase_lock_scale:       bool,
+    #[serde(default = "default_phase_lock_scale_depth")]
+    phase_lock_scale_depth: f32,
+    #[serde(default = "default_phase_lock_beats")]
+    phase_lock_beats:       u32,
     #[serde(default)]
     ribbons_enabled: bool,
     #[serde(default = "default_half_f32")]
@@ -695,10 +753,18 @@ struct Preset {
     color_saturation_mode: color::SaturationMode,
     #[serde(default = "default_color_saturation")]
     color_saturation: f32,
+    #[serde(default = "default_color_value_key")]
+    color_value_key: color::ValueKey,
     #[serde(default = "default_color_value")]
     color_value:      f32,
     #[serde(default = "default_color_harmony_strength")]
     color_harmony_strength: f32,
+    #[serde(default = "default_color_phase_cycle_enabled")]
+    color_phase_cycle_enabled: bool,
+    #[serde(default = "default_color_phase_cycle_degrees")]
+    color_phase_cycle_degrees: f32,
+    #[serde(default = "default_color_phase_cycle_locked")]
+    color_phase_cycle_locked:  bool,
     #[serde(default)]
     applied_harmony_enabled: bool,
 }
@@ -727,8 +793,21 @@ fn default_color_temperature_bias()  -> f32                     { 0.0 }
 fn default_color_temperature_audio() -> f32                     { 0.0 }
 fn default_color_saturation_mode()   -> color::SaturationMode   { color::SaturationMode::Free }
 fn default_color_saturation()        -> f32                     { 0.75 }
+fn default_color_value_key()         -> color::ValueKey          { color::ValueKey::Free }
 fn default_color_value()           -> f32                 { 0.85 }
 fn default_color_harmony_strength() -> f32                { 0.5 }
+fn default_audio_route_shape()   -> audio::BeatRoute { audio::BeatRoute::Combined }
+fn default_audio_route_kaleido() -> audio::BeatRoute { audio::BeatRoute::Combined }
+fn default_audio_route_shake()   -> audio::BeatRoute { audio::BeatRoute::Combined }
+fn default_phase_lock_enabled()     -> bool { false }
+fn default_phase_lock_kaleido()     -> bool { true  }
+fn default_phase_lock_shape()       -> bool { true  }
+fn default_phase_lock_scale()       -> bool { true  }
+fn default_phase_lock_scale_depth() -> f32  { 0.10  }
+fn default_phase_lock_beats()       -> u32  { 1     }
+fn default_color_phase_cycle_enabled() -> bool { false }
+fn default_color_phase_cycle_degrees() -> f32  { 360.0 }
+fn default_color_phase_cycle_locked()  -> bool { true  }
 
 impl Preset {
     pub fn from_params(params: &VisualParams) -> Self {
@@ -753,6 +832,15 @@ impl Preset {
             distortion_plus_roll:    params.distortion_plus_roll,
             midi_shake_enabled:  params.midi_shake_enabled,
             audio_shake_enabled: params.audio_shake_enabled,
+            audio_route_shape:   params.audio_route_shape,
+            audio_route_kaleido: params.audio_route_kaleido,
+            audio_route_shake:   params.audio_route_shake,
+            phase_lock_enabled:     params.phase_lock_enabled,
+            phase_lock_kaleido:     params.phase_lock_kaleido,
+            phase_lock_shape:       params.phase_lock_shape,
+            phase_lock_scale:       params.phase_lock_scale,
+            phase_lock_scale_depth: params.phase_lock_scale_depth,
+            phase_lock_beats:       params.phase_lock_beats,
             ribbons_enabled:   params.ribbons_enabled,
             ribbons_intensity: params.ribbons_intensity,
             bass_zoom_strength: params.bass_zoom_strength,
@@ -793,8 +881,12 @@ impl Preset {
             color_temperature_audio: params.color_temperature_audio,
             color_saturation_mode:   params.color_saturation_mode,
             color_saturation:        params.color_saturation,
+            color_value_key:         params.color_value_key,
             color_value:             params.color_value,
             color_harmony_strength:  params.color_harmony_strength,
+            color_phase_cycle_enabled: params.color_phase_cycle_enabled,
+            color_phase_cycle_degrees: params.color_phase_cycle_degrees,
+            color_phase_cycle_locked:  params.color_phase_cycle_locked,
             applied_harmony_enabled: params.applied_harmony_enabled,
         }
     }
@@ -837,6 +929,15 @@ impl Preset {
         params.distortion_plus_roll    = self.distortion_plus_roll;
         params.midi_shake_enabled  = self.midi_shake_enabled;
         params.audio_shake_enabled = self.audio_shake_enabled;
+        params.audio_route_shape   = self.audio_route_shape;
+        params.audio_route_kaleido = self.audio_route_kaleido;
+        params.audio_route_shake   = self.audio_route_shake;
+        params.phase_lock_enabled     = self.phase_lock_enabled;
+        params.phase_lock_kaleido     = self.phase_lock_kaleido;
+        params.phase_lock_shape       = self.phase_lock_shape;
+        params.phase_lock_scale       = self.phase_lock_scale;
+        params.phase_lock_scale_depth = self.phase_lock_scale_depth;
+        params.phase_lock_beats       = self.phase_lock_beats;
         params.ribbons_enabled   = self.ribbons_enabled;
         params.ribbons_intensity = self.ribbons_intensity;
         params.bass_zoom_strength = self.bass_zoom_strength;
@@ -897,9 +998,13 @@ impl Preset {
         params.color_temperature_bias   = self.color_temperature_bias;
         params.color_temperature_audio  = self.color_temperature_audio;
         params.color_saturation_mode    = self.color_saturation_mode;
-        params.color_saturation        = self.color_saturation;
-        params.color_value             = self.color_value;
-        params.color_harmony_strength  = self.color_harmony_strength;
+        params.color_saturation         = self.color_saturation;
+        params.color_value_key          = self.color_value_key;
+        params.color_value              = self.color_value;
+        params.color_harmony_strength     = self.color_harmony_strength;
+        params.color_phase_cycle_enabled  = self.color_phase_cycle_enabled;
+        params.color_phase_cycle_degrees  = self.color_phase_cycle_degrees;
+        params.color_phase_cycle_locked   = self.color_phase_cycle_locked;
         params.applied_harmony_enabled = self.applied_harmony_enabled;
     }
 }
@@ -1778,15 +1883,48 @@ struct GpuState {
 
     // 8-band EMA for shader uniforms; separate from bass_zoom_smoothed (used for zoom)
     bands_smoothed:          [f32; 8],
-    shader_beat_decay:       f32,
-    shader_beat_decay_low:   f32,
-    shader_beat_decay_high:  f32,
-    last_audio_update:       Instant,
+    shader_beat_decay:            f32,
+    shader_beat_decay_low:        f32,
+    shader_beat_decay_mid:        f32,
+    shader_beat_decay_high:       f32,
+    shader_beat_decay_broadband:  f32,
+    shader_bpm:                   Option<f32>,
+    shader_beat_phase:            f32,
+    shader_bpm_confidence:        f32,
+    last_audio_update:            Instant,
 
     pub params: VisualParams,
 }
 
 impl GpuState {
+    fn phase_lock_signal(&self) -> Option<(f32, f32)> {
+        if !self.params.phase_lock_enabled { return None; }
+        let bpm = self.shader_bpm?;
+        if bpm <= 0.0 { return None; }
+        let fade = ((self.shader_bpm_confidence - 1.0) / 1.5).clamp(0.0, 1.0);
+        if fade <= 0.0 { return None; }
+        let beats = self.params.phase_lock_beats.max(1) as f32;
+        let cycle_phase = if beats <= 1.0 {
+            self.shader_beat_phase
+        } else {
+            let cycle_seconds = 60.0 / bpm * beats;
+            let t = self.start_time.elapsed().as_secs_f32();
+            (t / cycle_seconds).fract()
+        };
+        Some((cycle_phase, fade))
+    }
+
+    fn resolve_route(&self, route: audio::BeatRoute) -> f32 {
+        match route {
+            audio::BeatRoute::Combined  => self.shader_beat_decay,
+            audio::BeatRoute::Low       => self.shader_beat_decay_low,
+            audio::BeatRoute::Mid       => self.shader_beat_decay_mid,
+            audio::BeatRoute::High      => self.shader_beat_decay_high,
+            audio::BeatRoute::Broadband => self.shader_beat_decay_broadband,
+            audio::BeatRoute::Off       => 0.0,
+        }
+    }
+
     fn create_shape_fbo(
         device: &wgpu::Device,
         width: u32,
@@ -3306,9 +3444,14 @@ impl GpuState {
             bass_mid_smoothed:  0.0,
             bass_mid_baseline:  0.0,
             bands_smoothed:         [0.0; 8],
-            shader_beat_decay:      0.0,
-            shader_beat_decay_low:  0.0,
-            shader_beat_decay_high: 0.0,
+            shader_beat_decay:           0.0,
+            shader_beat_decay_low:       0.0,
+            shader_beat_decay_mid:       0.0,
+            shader_beat_decay_high:      0.0,
+            shader_beat_decay_broadband: 0.0,
+            shader_bpm:                  None,
+            shader_beat_phase:           0.0,
+            shader_bpm_confidence:       0.0,
             last_audio_update:  Instant::now(),
             params: VisualParams::default(),
         }
@@ -3576,6 +3719,7 @@ impl GpuState {
                     menu_bar.render(
                         &self.device, &self.queue, &mut enc, window,
                         &swap_view, self.size.width, self.size.height, &self.params,
+                        self.shader_bpm, self.shader_beat_phase, self.shader_bpm_confidence,
                     );
                 }
                 self.queue.submit(std::iter::once(enc.finish()));
@@ -3710,14 +3854,31 @@ impl GpuState {
         self.shake_velocity += force * dt;
         self.shake_offset += self.shake_velocity * dt;
 
+        let phase_signal = self.phase_lock_signal();
+
         let shape = self.params.current_shape;
-        let angle = elapsed
+        let base_angle = elapsed
             * (std::f32::consts::TAU / shape.rotation_period_seconds())
             * self.params.rotation_speed_scale;
+        let angle = match (phase_signal, self.params.phase_lock_shape) {
+            (Some((cycle_phase, fade)), true) => {
+                let locked_angle = cycle_phase * std::f32::consts::TAU * self.params.rotation_speed_scale;
+                base_angle * (1.0 - fade) + locked_angle * fade
+            }
+            _ => base_angle,
+        };
+        let scale_pulse: f32 = match (phase_signal, self.params.phase_lock_scale) {
+            (Some((cycle_phase, fade)), true) => {
+                let depth = self.params.phase_lock_scale_depth;
+                let bump = 1.0 - (cycle_phase * 2.0 - 1.0).abs();
+                1.0 + depth * bump * fade
+            }
+            _ => 1.0,
+        };
         let axis = glam::Vec3::from_array(shape.rotation_axis()).normalize();
         let model = glam::Mat4::from_translation(self.shake_offset)
             * glam::Mat4::from_axis_angle(axis, angle)
-            * glam::Mat4::from_scale(glam::Vec3::splat(shape.model_scale()));
+            * glam::Mat4::from_scale(glam::Vec3::splat(shape.model_scale() * scale_pulse));
         self.queue.write_buffer(
             &self.transform_buffer, 0,
             bytemuck::cast_slice(&[Transform { mvp: (proj * cam * model).to_cols_array_2d() }]),
@@ -3737,7 +3898,7 @@ impl GpuState {
                 time_seconds: shader_time,
                 bass:         self.bands_smoothed[0],
                 mid:          self.bands_smoothed[3],
-                beat_decay:   (self.shader_beat_decay * beat_r).min(1.0),
+                beat_decay:   (self.resolve_route(self.params.audio_route_shape) * beat_r).min(1.0),
                 bands:        self.bands_smoothed,
             }]));
 
@@ -3786,13 +3947,22 @@ impl GpuState {
             // Android has per-ribbon collapse with distinct triggers
             // (see audit Section 1h "Beat-driven collapse animation");
             // a future slice can split these out for per-ring variety.
+            let ribbon_time: f32 = match (phase_signal, self.params.phase_lock_kaleido) {
+                (Some((cycle_phase, fade)), true) => {
+                    let bpm = self.shader_bpm.unwrap_or(120.0);
+                    let cycle_secs = 60.0 / bpm * self.params.phase_lock_beats.max(1) as f32;
+                    let locked_time = cycle_phase * cycle_secs;
+                    shader_time * (1.0 - fade) + locked_time * fade
+                }
+                _ => shader_time,
+            };
             self.queue.write_buffer(&self.ribbon_uniforms_buffer, 0,
                 bytemuck::cast_slice(&[RibbonUniforms {
                     resolution:   [PAINTER_TEXTURE_WIDTH as f32, PAINTER_TEXTURE_HEIGHT as f32],
-                    time_seconds: shader_time,
+                    time_seconds: ribbon_time,
                     intensity:    self.params.ribbons_intensity,
                     color:        RIBBON_COLOR,
-                    collapse:     [(self.shader_beat_decay * beat_r).min(1.0); 4],
+                    collapse:     [(self.resolve_route(self.params.audio_route_kaleido) * beat_r).min(1.0); 4],
                     bands:        [[b[0], b[1], b[2], b[3]], [b[4], b[5], b[6], b[7]]],
                 }]));
             let ping = self.ribbon_ping;
@@ -3849,10 +4019,28 @@ impl GpuState {
             + (self.shader_beat_decay_low - self.shader_beat_decay_high)
               * self.params.color_temperature_audio
         ).clamp(-1.0, 1.0);
-        let effective_anchor_hue = color::apply_temperature_bias(
+        let temp_biased_hue = color::apply_temperature_bias(
             self.params.color_anchor_hue,
             effective_temperature,
         );
+        let phase_hue_offset = if self.params.color_phase_cycle_enabled {
+            let (cycle_phase, fade) = if self.params.color_phase_cycle_locked {
+                self.phase_lock_signal().unwrap_or_else(|| {
+                    // Fall back to 120 BPM wall clock
+                    let cycle_secs = 60.0 / 120.0 * self.params.phase_lock_beats.max(1) as f32;
+                    let t = self.start_time.elapsed().as_secs_f32();
+                    ((t / cycle_secs).fract(), 1.0)
+                })
+            } else {
+                let cycle_secs = 60.0 / 120.0 * self.params.phase_lock_beats.max(1) as f32;
+                let t = self.start_time.elapsed().as_secs_f32();
+                ((t / cycle_secs).fract(), 1.0)
+            };
+            cycle_phase * self.params.color_phase_cycle_degrees * fade
+        } else {
+            0.0
+        };
+        let effective_anchor_hue = ((temp_biased_hue + phase_hue_offset) % 360.0 + 360.0) % 360.0;
 
         // Write applied-harmony uniforms (consumed by Skin/Image/PrintHead painters).
         {
@@ -4180,6 +4368,9 @@ impl GpuState {
                 self.size.width,
                 self.size.height,
                 &self.params,
+                self.shader_bpm,
+                self.shader_beat_phase,
+                self.shader_bpm_confidence,
             );
         }
 
@@ -4940,10 +5131,19 @@ impl GpuState {
         // Export path effective anchor (audio bands are 0 in offline mode —
         // manual bias still applies; audio component requires a follow-up slice).
         let export_temperature = self.params.color_temperature_bias.clamp(-1.0, 1.0);
-        let export_anchor_hue = color::apply_temperature_bias(
+        let export_temp_biased = color::apply_temperature_bias(
             self.params.color_anchor_hue,
             export_temperature,
         );
+        let export_phase_offset = if self.params.color_phase_cycle_enabled {
+            let cycle_secs = 60.0 / 120.0 * self.params.phase_lock_beats.max(1) as f32;
+            let t = self.start_time.elapsed().as_secs_f32();
+            let cycle_phase = (t / cycle_secs).fract();
+            cycle_phase * self.params.color_phase_cycle_degrees
+        } else {
+            0.0
+        };
+        let export_anchor_hue = ((export_temp_biased + export_phase_offset) % 360.0 + 360.0) % 360.0;
 
         // Write applied-harmony uniforms for export path.
         {
@@ -5297,6 +5497,7 @@ impl GpuState {
                     menu_bar.render(
                         &self.device, &self.queue, &mut blit_enc, window,
                         &swap_view, self.size.width, self.size.height, &self.params,
+                        self.shader_bpm, self.shader_beat_phase, self.shader_bpm_confidence,
                     );
                 }
                 self.queue.submit(std::iter::once(blit_enc.finish()));
@@ -5377,6 +5578,53 @@ impl GpuState {
         if !self.params.locks.distortion_enabled   { self.params.distortion_enabled   = rng.gen_bool(0.5); }
         if !self.params.locks.midi_shake_enabled   { self.params.midi_shake_enabled   = rng.gen_bool(0.5); }
         if !self.params.locks.audio_shake_enabled  { self.params.audio_shake_enabled  = rng.gen_bool(0.5); }
+        if !self.params.locks.phase_lock_enabled { self.params.phase_lock_enabled = rng.gen_bool(0.20); }
+        if !self.params.locks.phase_lock_kaleido { self.params.phase_lock_kaleido = rng.gen_bool(0.75); }
+        if !self.params.locks.phase_lock_shape   { self.params.phase_lock_shape   = rng.gen_bool(0.75); }
+        if !self.params.locks.phase_lock_scale   { self.params.phase_lock_scale   = rng.gen_bool(0.65); }
+        if !self.params.locks.phase_lock_scale_depth { self.params.phase_lock_scale_depth = rng.gen_range(0.04_f32..=0.20); }
+        if !self.params.locks.phase_lock_beats {
+            let roll: f32 = rng.gen();
+            self.params.phase_lock_beats = if roll < 0.55 { 1 } else if roll < 0.85 { 2 } else { 4 };
+        }
+        if !self.params.locks.audio_route_shape {
+            let roll: f32 = rng.gen();
+            self.params.audio_route_shape = if roll < 0.55 {
+                audio::BeatRoute::Combined
+            } else if roll < 0.75 {
+                audio::BeatRoute::Low
+            } else if roll < 0.85 {
+                audio::BeatRoute::Mid
+            } else if roll < 0.95 {
+                audio::BeatRoute::High
+            } else {
+                audio::BeatRoute::Broadband
+            };
+        }
+        if !self.params.locks.audio_route_kaleido {
+            let roll: f32 = rng.gen();
+            self.params.audio_route_kaleido = if roll < 0.55 {
+                audio::BeatRoute::Combined
+            } else if roll < 0.65 {
+                audio::BeatRoute::Low
+            } else if roll < 0.80 {
+                audio::BeatRoute::Mid
+            } else if roll < 0.95 {
+                audio::BeatRoute::High
+            } else {
+                audio::BeatRoute::Broadband
+            };
+        }
+        if !self.params.locks.audio_route_shake {
+            let roll: f32 = rng.gen();
+            self.params.audio_route_shake = if roll < 0.70 {
+                audio::BeatRoute::Combined
+            } else if roll < 0.92 {
+                audio::BeatRoute::Low
+            } else {
+                audio::BeatRoute::Mid
+            };
+        }
         if !self.params.locks.ribbons_enabled      { self.params.ribbons_enabled      = rng.gen_bool(0.5); }
         if !self.params.locks.ribbons_intensity    { self.params.ribbons_intensity    = rng.gen_range(0.2_f32..=1.0); }
         // DP angles reroll independently of enabled (per spec).
@@ -5472,11 +5720,30 @@ impl GpuState {
             let r = self.params.color_saturation_mode.range();
             self.params.color_saturation = rng.gen_range(r[0]..=r[1]);
         }
+        if !self.params.locks.color_value_key {
+            let roll: f32 = rng.gen();
+            self.params.color_value_key = if roll < 0.40 {
+                color::ValueKey::Free
+            } else if roll < 0.70 {
+                color::ValueKey::Mid
+            } else if roll < 0.88 {
+                color::ValueKey::High
+            } else {
+                color::ValueKey::Low
+            };
+        }
         if !self.params.locks.color_value {
-            self.params.color_value = rng.gen_range(0.65_f32..=1.0);
+            let r = self.params.color_value_key.range();
+            self.params.color_value = rng.gen_range(r[0]..=r[1]);
         }
         if !self.params.locks.color_harmony_strength {
             self.params.color_harmony_strength = rng.gen_range(0.3_f32..=0.85);
+        }
+        if !self.params.locks.color_phase_cycle_enabled {
+            self.params.color_phase_cycle_enabled = rng.gen_bool(0.25);
+        }
+        if !self.params.locks.color_phase_cycle_degrees && self.params.color_phase_cycle_enabled {
+            self.params.color_phase_cycle_degrees = rng.gen_range(90.0_f32..=360.0);
         }
         if !self.params.locks.applied_harmony_enabled {
             self.params.applied_harmony_enabled = rng.gen_bool(0.25);
@@ -5983,6 +6250,12 @@ impl ApplicationHandler for App {
                         gpu.params.distortion_frequency = (gpu.params.distortion_frequency + 0.5).min(8.0);
                         log::info!("distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                     }
+                    KeyCode::KeyK => {
+                        if !gpu.params.locks.phase_lock_enabled {
+                            gpu.params.phase_lock_enabled = !gpu.params.phase_lock_enabled;
+                            log::info!("phase lock: {}", if gpu.params.phase_lock_enabled { "ON" } else { "OFF" });
+                        }
+                    }
                     KeyCode::KeyP => {
                         gpu.params.painter_kind = gpu.params.painter_kind.next();
                         log::info!("painter: {}", gpu.params.painter_kind.name());
@@ -6069,14 +6342,22 @@ impl ApplicationHandler for App {
                         if live_mode {
                             match event {
                                 AudioEvent::Beat { strength, band } => {
-                                    let scale = match band {
-                                        audio::BeatBand::Low       => 1.00,
-                                        audio::BeatBand::Mid       => 0.70,
-                                        audio::BeatBand::High      => 0.35,
-                                        audio::BeatBand::Broadband => 0.80,
-                                    };
                                     if gpu.params.audio_shake_enabled {
-                                        gpu.kick_shake((strength * scale).clamp(0.0, 1.0));
+                                        let fire_scale: f32 = match (gpu.params.audio_route_shake, band) {
+                                            (audio::BeatRoute::Off, _) => 0.0,
+                                            (audio::BeatRoute::Combined, audio::BeatBand::Low)       => 1.00,
+                                            (audio::BeatRoute::Combined, audio::BeatBand::Mid)       => 0.70,
+                                            (audio::BeatRoute::Combined, audio::BeatBand::High)      => 0.35,
+                                            (audio::BeatRoute::Combined, audio::BeatBand::Broadband) => 0.80,
+                                            (audio::BeatRoute::Low,       audio::BeatBand::Low)       => 1.0,
+                                            (audio::BeatRoute::Mid,       audio::BeatBand::Mid)       => 1.0,
+                                            (audio::BeatRoute::High,      audio::BeatBand::High)      => 1.0,
+                                            (audio::BeatRoute::Broadband, audio::BeatBand::Broadband) => 1.0,
+                                            _ => 0.0,
+                                        };
+                                        if fire_scale > 0.0 {
+                                            gpu.kick_shake((strength * fire_scale).clamp(0.0, 1.0));
+                                        }
                                     }
                                 }
                             }
@@ -6109,9 +6390,14 @@ impl ApplicationHandler for App {
 
                 let raw_bands: [f32; 8] = match mode {
                     AudioSourceMode::Silent => {
-                        gpu.shader_beat_decay      = 0.0;
-                        gpu.shader_beat_decay_low  = 0.0;
-                        gpu.shader_beat_decay_high = 0.0;
+                        gpu.shader_beat_decay           = 0.0;
+                        gpu.shader_beat_decay_low       = 0.0;
+                        gpu.shader_beat_decay_mid       = 0.0;
+                        gpu.shader_beat_decay_high      = 0.0;
+                        gpu.shader_beat_decay_broadband = 0.0;
+                        gpu.shader_bpm                  = None;
+                        gpu.shader_beat_phase           = 0.0;
+                        gpu.shader_bpm_confidence       = 0.0;
                         [0.0; 8]
                     }
                     AudioSourceMode::File => {
@@ -6127,30 +6413,57 @@ impl ApplicationHandler for App {
                                     }
                                 }
                                 gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
-                                gpu.shader_beat_decay      = gpu.file_beat_envelope.update(frame_dt);
-                                gpu.shader_beat_decay_low  = 0.0;
-                                gpu.shader_beat_decay_high = 0.0;
+                                gpu.shader_beat_decay           = gpu.file_beat_envelope.update(frame_dt);
+                                gpu.shader_beat_decay_low       = 0.0;
+                                gpu.shader_beat_decay_mid       = 0.0;
+                                gpu.shader_beat_decay_high      = 0.0;
+                                gpu.shader_beat_decay_broadband = 0.0;
+                                gpu.shader_bpm                  = None;
+                                gpu.shader_beat_phase           = 0.0;
+                                gpu.shader_bpm_confidence       = 0.0;
                                 bands
                             }
                             None => {
                                 // File mode but not playing — let envelope decay naturally.
-                                gpu.shader_beat_decay      = gpu.file_beat_envelope.update(frame_dt);
-                                gpu.shader_beat_decay_low  = 0.0;
-                                gpu.shader_beat_decay_high = 0.0;
+                                gpu.shader_beat_decay           = gpu.file_beat_envelope.update(frame_dt);
+                                gpu.shader_beat_decay_low       = 0.0;
+                                gpu.shader_beat_decay_mid       = 0.0;
+                                gpu.shader_beat_decay_high      = 0.0;
+                                gpu.shader_beat_decay_broadband = 0.0;
+                                gpu.shader_bpm                  = None;
+                                gpu.shader_beat_phase           = 0.0;
+                                gpu.shader_bpm_confidence       = 0.0;
                                 [0.0; 8]
                             }
                         }
                     }
                     AudioSourceMode::Mic | AudioSourceMode::Loopback => {
-                        let (bands, bd, bd_low, bd_high) = self.audio.as_ref()
-                            .map(|a| {
-                                let s = a.state.lock();
-                                (s.bands, s.beat_decay, s.beat_decay_low, s.beat_decay_high)
-                            })
-                            .unwrap_or(([0.0; 8], 0.0, 0.0, 0.0));
-                        gpu.shader_beat_decay      = bd;
-                        gpu.shader_beat_decay_low  = bd_low;
-                        gpu.shader_beat_decay_high = bd_high;
+                        let snapshot = self.audio.as_ref().map(|a| {
+                            let s = a.state.lock();
+                            (
+                                s.bands,
+                                s.beat_decay,
+                                s.beat_decay_low,
+                                s.beat_decay_mid,
+                                s.beat_decay_high,
+                                s.beat_decay_broadband,
+                                s.current_bpm,
+                                s.beat_phase,
+                                s.bpm_confidence,
+                            )
+                        });
+                        let (bands, bd, bd_low, bd_mid, bd_high, bd_broad,
+                             bpm, phase, conf) = snapshot.unwrap_or((
+                            [0.0; 8], 0.0, 0.0, 0.0, 0.0, 0.0, None, 0.0, 0.0,
+                        ));
+                        gpu.shader_beat_decay           = bd;
+                        gpu.shader_beat_decay_low       = bd_low;
+                        gpu.shader_beat_decay_mid       = bd_mid;
+                        gpu.shader_beat_decay_high      = bd_high;
+                        gpu.shader_beat_decay_broadband = bd_broad;
+                        gpu.shader_bpm                  = bpm;
+                        gpu.shader_beat_phase           = phase;
+                        gpu.shader_bpm_confidence       = conf;
                         bands
                     }
                 };
@@ -6322,6 +6635,15 @@ impl ApplicationHandler for App {
                         ParamChange::DistortionPlusRoll(v)      => gpu.params.distortion_plus_roll     = v,
                         ParamChange::MidiShakeEnabled(v)     => gpu.params.midi_shake_enabled  = v,
                         ParamChange::AudioShakeEnabled(v)    => gpu.params.audio_shake_enabled = v,
+                        ParamChange::AudioRouteShape(v)      => gpu.params.audio_route_shape   = v,
+                        ParamChange::AudioRouteKaleido(v)    => gpu.params.audio_route_kaleido = v,
+                        ParamChange::AudioRouteShake(v)      => gpu.params.audio_route_shake   = v,
+                        ParamChange::PhaseLockEnabled(v)     => gpu.params.phase_lock_enabled     = v,
+                        ParamChange::PhaseLockKaleido(v)     => gpu.params.phase_lock_kaleido     = v,
+                        ParamChange::PhaseLockShape(v)       => gpu.params.phase_lock_shape       = v,
+                        ParamChange::PhaseLockScale(v)       => gpu.params.phase_lock_scale       = v,
+                        ParamChange::PhaseLockScaleDepth(v)  => gpu.params.phase_lock_scale_depth = v,
+                        ParamChange::PhaseLockBeats(v)       => gpu.params.phase_lock_beats       = v,
                         ParamChange::RibbonsEnabled(v)       => gpu.params.ribbons_enabled     = v,
                         ParamChange::RibbonsIntensity(v)     => gpu.params.ribbons_intensity   = v,
                         ParamChange::BassZoomStrength(v)     => gpu.params.bass_zoom_strength  = v,
@@ -6396,6 +6718,15 @@ impl ApplicationHandler for App {
                                 LockTarget::BeatReactivity     => gpu.params.locks.beat_reactivity      = !gpu.params.locks.beat_reactivity,
                                 LockTarget::MidiShakeEnabled   => gpu.params.locks.midi_shake_enabled   = !gpu.params.locks.midi_shake_enabled,
                                 LockTarget::AudioShakeEnabled  => gpu.params.locks.audio_shake_enabled  = !gpu.params.locks.audio_shake_enabled,
+                                LockTarget::AudioRouteShape    => gpu.params.locks.audio_route_shape    = !gpu.params.locks.audio_route_shape,
+                                LockTarget::AudioRouteKaleido  => gpu.params.locks.audio_route_kaleido  = !gpu.params.locks.audio_route_kaleido,
+                                LockTarget::AudioRouteShake    => gpu.params.locks.audio_route_shake    = !gpu.params.locks.audio_route_shake,
+                                LockTarget::PhaseLockEnabled     => gpu.params.locks.phase_lock_enabled     = !gpu.params.locks.phase_lock_enabled,
+                                LockTarget::PhaseLockKaleido     => gpu.params.locks.phase_lock_kaleido     = !gpu.params.locks.phase_lock_kaleido,
+                                LockTarget::PhaseLockShape       => gpu.params.locks.phase_lock_shape       = !gpu.params.locks.phase_lock_shape,
+                                LockTarget::PhaseLockScale       => gpu.params.locks.phase_lock_scale       = !gpu.params.locks.phase_lock_scale,
+                                LockTarget::PhaseLockScaleDepth  => gpu.params.locks.phase_lock_scale_depth = !gpu.params.locks.phase_lock_scale_depth,
+                                LockTarget::PhaseLockBeats       => gpu.params.locks.phase_lock_beats       = !gpu.params.locks.phase_lock_beats,
                                 LockTarget::RibbonsEnabled     => gpu.params.locks.ribbons_enabled      = !gpu.params.locks.ribbons_enabled,
                                 LockTarget::RibbonsIntensity   => gpu.params.locks.ribbons_intensity    = !gpu.params.locks.ribbons_intensity,
                                 LockTarget::PaletteMode        => gpu.params.locks.palette_mode         = !gpu.params.locks.palette_mode,
@@ -6412,8 +6743,12 @@ impl ApplicationHandler for App {
                                 LockTarget::ColorAnchorHue        => gpu.params.locks.color_anchor_hue        = !gpu.params.locks.color_anchor_hue,
                                 LockTarget::ColorSaturationMode   => gpu.params.locks.color_saturation_mode   = !gpu.params.locks.color_saturation_mode,
                                 LockTarget::ColorSaturation       => gpu.params.locks.color_saturation        = !gpu.params.locks.color_saturation,
+                                LockTarget::ColorValueKey         => gpu.params.locks.color_value_key         = !gpu.params.locks.color_value_key,
                                 LockTarget::ColorValue            => gpu.params.locks.color_value             = !gpu.params.locks.color_value,
-                                LockTarget::ColorHarmonyStrength  => gpu.params.locks.color_harmony_strength  = !gpu.params.locks.color_harmony_strength,
+                                LockTarget::ColorHarmonyStrength      => gpu.params.locks.color_harmony_strength      = !gpu.params.locks.color_harmony_strength,
+                                LockTarget::ColorPhaseCycleEnabled    => gpu.params.locks.color_phase_cycle_enabled    = !gpu.params.locks.color_phase_cycle_enabled,
+                                LockTarget::ColorPhaseCycleDegrees    => gpu.params.locks.color_phase_cycle_degrees    = !gpu.params.locks.color_phase_cycle_degrees,
+                                LockTarget::ColorPhaseCycleLocked     => gpu.params.locks.color_phase_cycle_locked     = !gpu.params.locks.color_phase_cycle_locked,
                                 LockTarget::AppliedHarmonyEnabled => gpu.params.locks.applied_harmony_enabled = !gpu.params.locks.applied_harmony_enabled,
                                 LockTarget::PhantomEnabled       => gpu.params.locks.phantom_enabled       = !gpu.params.locks.phantom_enabled,
                                 LockTarget::PhantomDelaySeconds  => gpu.params.locks.phantom_delay_seconds = !gpu.params.locks.phantom_delay_seconds,
@@ -6466,8 +6801,15 @@ impl ApplicationHandler for App {
                             gpu.params.color_saturation = v.clamp(gpu.params.color_saturation);
                         }
                         ParamChange::ColorSaturation(v)       => gpu.params.color_saturation        = v,
+                        ParamChange::ColorValueKey(v)         => {
+                            gpu.params.color_value_key = v;
+                            gpu.params.color_value = v.clamp(gpu.params.color_value);
+                        }
                         ParamChange::ColorValue(v)            => gpu.params.color_value             = v,
-                        ParamChange::ColorHarmonyStrength(v)  => gpu.params.color_harmony_strength  = v,
+                        ParamChange::ColorHarmonyStrength(v)     => gpu.params.color_harmony_strength     = v,
+                        ParamChange::ColorPhaseCycleEnabled(v)   => gpu.params.color_phase_cycle_enabled   = v,
+                        ParamChange::ColorPhaseCycleDegrees(v)   => gpu.params.color_phase_cycle_degrees   = v,
+                        ParamChange::ColorPhaseCycleLocked(v)    => gpu.params.color_phase_cycle_locked     = v,
                         ParamChange::AppliedHarmonyEnabled(v) => gpu.params.applied_harmony_enabled = v,
                         ParamChange::PhantomEnabled(v)       => gpu.params.phantom_enabled       = v,
                         ParamChange::PhantomDelaySeconds(v)  => gpu.params.phantom_delay_seconds = v,
@@ -6543,6 +6885,7 @@ fn main() {
     println!("  D      toggle distortion");
     println!("  Q W    distortion amplitude (0 to 0.5)");
     println!("  E F    distortion frequency (0.5 to 8)");
+    println!("  K      toggle phase lock (sync visuals to detected beat)");
     println!("  P      cycle painter (HueStripe → Spiral → Plasma → Skin)");
     println!("  M      toggle parameters panel");
     println!("  ?      toggle help overlay");
@@ -6612,6 +6955,15 @@ mod tests {
             distortion_plus_roll:    90.0,
             midi_shake_enabled:  false,
             audio_shake_enabled: true,
+            audio_route_shape:   audio::BeatRoute::Low,
+            audio_route_kaleido: audio::BeatRoute::High,
+            audio_route_shake:   audio::BeatRoute::Mid,
+            phase_lock_enabled:     true,
+            phase_lock_kaleido:     false,
+            phase_lock_shape:       true,
+            phase_lock_scale:       false,
+            phase_lock_scale_depth: 0.20,
+            phase_lock_beats:       2,
             ribbons_enabled:   true,
             ribbons_intensity: 0.8,
             bass_zoom_strength: 0.8,
@@ -6656,8 +7008,12 @@ mod tests {
             color_temperature_audio: 0.6,
             color_saturation_mode:   color::SaturationMode::Pure,
             color_saturation:        0.8,
+            color_value_key:         color::ValueKey::Low,
             color_value:             0.9,
             color_harmony_strength:  0.6,
+            color_phase_cycle_enabled: true,
+            color_phase_cycle_degrees: 180.0,
+            color_phase_cycle_locked:  false,
             applied_harmony_enabled: true,
         }
     }
@@ -6693,6 +7049,15 @@ mod tests {
         assert_eq!(restored.distortion_plus_roll,    original.distortion_plus_roll,    "distortion_plus_roll failed");
         assert_eq!(restored.midi_shake_enabled,  original.midi_shake_enabled,  "midi_shake_enabled failed");
         assert_eq!(restored.audio_shake_enabled, original.audio_shake_enabled, "audio_shake_enabled failed");
+        assert_eq!(restored.audio_route_shape,   original.audio_route_shape,   "audio_route_shape failed");
+        assert_eq!(restored.audio_route_kaleido, original.audio_route_kaleido, "audio_route_kaleido failed");
+        assert_eq!(restored.audio_route_shake,   original.audio_route_shake,   "audio_route_shake failed");
+        assert_eq!(restored.phase_lock_enabled,     original.phase_lock_enabled,     "phase_lock_enabled failed");
+        assert_eq!(restored.phase_lock_kaleido,     original.phase_lock_kaleido,     "phase_lock_kaleido failed");
+        assert_eq!(restored.phase_lock_shape,       original.phase_lock_shape,       "phase_lock_shape failed");
+        assert_eq!(restored.phase_lock_scale,       original.phase_lock_scale,       "phase_lock_scale failed");
+        assert_eq!(restored.phase_lock_scale_depth, original.phase_lock_scale_depth, "phase_lock_scale_depth failed");
+        assert_eq!(restored.phase_lock_beats,       original.phase_lock_beats,       "phase_lock_beats failed");
         assert_eq!(restored.ribbons_enabled,   original.ribbons_enabled,   "ribbons_enabled failed");
         assert_eq!(restored.ribbons_intensity, original.ribbons_intensity, "ribbons_intensity failed");
         assert_eq!(restored.bass_zoom_strength, original.bass_zoom_strength, "bass_zoom_strength failed");
@@ -6734,8 +7099,12 @@ mod tests {
         assert_eq!(restored.color_temperature_audio, original.color_temperature_audio, "color_temperature_audio failed");
         assert_eq!(restored.color_saturation_mode,   original.color_saturation_mode,   "color_saturation_mode failed");
         assert_eq!(restored.color_saturation,        original.color_saturation,        "color_saturation failed");
+        assert_eq!(restored.color_value_key,         original.color_value_key,         "color_value_key failed");
         assert_eq!(restored.color_value,             original.color_value,             "color_value failed");
-        assert_eq!(restored.color_harmony_strength,  original.color_harmony_strength,  "color_harmony_strength failed");
+        assert_eq!(restored.color_harmony_strength,    original.color_harmony_strength,    "color_harmony_strength failed");
+        assert_eq!(restored.color_phase_cycle_enabled, original.color_phase_cycle_enabled, "color_phase_cycle_enabled failed");
+        assert_eq!(restored.color_phase_cycle_degrees, original.color_phase_cycle_degrees, "color_phase_cycle_degrees failed");
+        assert_eq!(restored.color_phase_cycle_locked,  original.color_phase_cycle_locked,  "color_phase_cycle_locked failed");
         assert_eq!(restored.applied_harmony_enabled, original.applied_harmony_enabled, "applied_harmony_enabled failed");
     }
 

@@ -7,6 +7,46 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use realfft::RealFftPlanner;
 
+/// User-selectable routing target for per-band beat envelopes.
+/// Superset of BeatBand: adds Combined (legacy max behavior) and Off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BeatRoute {
+    Combined,
+    Low,
+    Mid,
+    High,
+    Broadband,
+    Off,
+}
+
+impl Default for BeatRoute {
+    fn default() -> Self { BeatRoute::Combined }
+}
+
+impl BeatRoute {
+    pub fn name(self) -> &'static str {
+        match self {
+            BeatRoute::Combined  => "Combined",
+            BeatRoute::Low       => "Low (kicks)",
+            BeatRoute::Mid       => "Mid (snares)",
+            BeatRoute::High      => "High (hats)",
+            BeatRoute::Broadband => "Broadband",
+            BeatRoute::Off       => "Off",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            BeatRoute::Combined  => BeatRoute::Low,
+            BeatRoute::Low       => BeatRoute::Mid,
+            BeatRoute::Mid       => BeatRoute::High,
+            BeatRoute::High      => BeatRoute::Broadband,
+            BeatRoute::Broadband => BeatRoute::Off,
+            BeatRoute::Off       => BeatRoute::Combined,
+        }
+    }
+}
+
 /// Which part of the spectrum triggered a beat onset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BeatBand {
@@ -159,14 +199,170 @@ impl Default for AdaptiveCooldown {
 
 #[derive(Default)]
 pub struct AudioState {
-    pub bands:           [f32; 8],
-    pub beat_decay:      f32,
-    /// Per-band envelope values from the slice 7 detector.
-    /// Low/high exposed so visual params can route specific bands separately
-    /// (e.g. temperature bias: low→warm, high→cool).
-    pub beat_decay_low:  f32,
-    pub beat_decay_mid:  f32,
-    pub beat_decay_high: f32,
+    pub bands:                [f32; 8],
+    pub beat_decay:           f32,  // combined (max of all four) — legacy
+    pub beat_decay_low:       f32,
+    pub beat_decay_mid:       f32,
+    pub beat_decay_high:      f32,
+    pub beat_decay_broadband: f32,
+    pub current_bpm:          Option<f32>,
+    pub beat_phase:           f32,
+    pub bpm_confidence:       f32,
+}
+
+/// Tracks tempo via autocorrelation of broadband flux history, then maintains
+/// a phase-locked loop that produces a continuous beat_phase ∈ [0, 1).
+#[derive(Debug, Clone)]
+pub struct TempoTracker {
+    flux_history:            Vec<f32>,
+    history_size:            usize,
+    chunk_seconds:           f32,
+    locked_bpm:              Option<f32>,
+    locked_confidence:       f32,
+    chunks_since_estimate:   u32,
+    estimate_period_chunks:  u32,
+    pub phase:               f32,
+    pll_gain:                f32,
+    candidate_bpm:           Option<f32>,
+    candidate_hits:          u32,
+    candidate_hits_required: u32,
+}
+
+impl TempoTracker {
+    const BPM_MIN: f32 =  60.0;
+    const BPM_MAX: f32 = 180.0;
+    const CONFIDENCE_THRESHOLD: f32 = 1.8;
+    const HISTORY_SECONDS: f32 = 6.0;
+    const ESTIMATE_PERIOD_SECONDS: f32 = 0.25;
+
+    pub fn new(chunk_seconds: f32) -> Self {
+        let history_size = (Self::HISTORY_SECONDS / chunk_seconds).ceil() as usize;
+        let estimate_period_chunks =
+            (Self::ESTIMATE_PERIOD_SECONDS / chunk_seconds).ceil() as u32;
+        Self {
+            flux_history: Vec::with_capacity(history_size),
+            history_size,
+            chunk_seconds,
+            locked_bpm: None,
+            locked_confidence: 0.0,
+            chunks_since_estimate: 0,
+            estimate_period_chunks: estimate_period_chunks.max(1),
+            phase: 0.0,
+            pll_gain: 0.10,
+            candidate_bpm: None,
+            candidate_hits: 0,
+            candidate_hits_required: 3,
+        }
+    }
+
+    pub fn process_chunk(&mut self, broadband_flux: f32) {
+        self.flux_history.push(broadband_flux);
+        if self.flux_history.len() > self.history_size {
+            self.flux_history.remove(0);
+        }
+        if let Some(bpm) = self.locked_bpm {
+            let beat_period_seconds = 60.0 / bpm;
+            self.phase += self.chunk_seconds / beat_period_seconds;
+            while self.phase >= 1.0 { self.phase -= 1.0; }
+        }
+        self.chunks_since_estimate += 1;
+        if self.chunks_since_estimate >= self.estimate_period_chunks
+            && self.flux_history.len() >= self.history_size
+        {
+            self.chunks_since_estimate = 0;
+            self.estimate_tempo();
+        }
+    }
+
+    pub fn on_broadband_onset(&mut self) {
+        if self.locked_bpm.is_none() { return; }
+        let error = if self.phase < 0.5 { -self.phase } else { 1.0 - self.phase };
+        self.phase += error * self.pll_gain;
+        while self.phase >= 1.0 { self.phase -= 1.0; }
+        while self.phase <  0.0 { self.phase += 1.0; }
+    }
+
+    fn estimate_tempo(&mut self) {
+        let bin_seconds = self.chunk_seconds;
+        let lag_min = (60.0 / Self::BPM_MAX / bin_seconds).floor() as usize;
+        let lag_max = (60.0 / Self::BPM_MIN / bin_seconds).ceil() as usize;
+        if lag_max >= self.flux_history.len() || lag_min >= lag_max { return; }
+
+        let mean: f32 = self.flux_history.iter().sum::<f32>()
+            / self.flux_history.len() as f32;
+
+        let mut best_lag: usize = lag_min;
+        let mut best_score: f32 = 0.0;
+        let mut score_sum: f32 = 0.0;
+        let mut score_count: u32 = 0;
+
+        for lag in lag_min..=lag_max {
+            let n = self.flux_history.len() - lag;
+            let mut score: f32 = 0.0;
+            for i in 0..n {
+                let a = self.flux_history[i] - mean;
+                let b = self.flux_history[i + lag] - mean;
+                score += a * b;
+            }
+            score /= n as f32;
+            score_sum += score.max(0.0);
+            score_count += 1;
+            if score > best_score { best_score = score; best_lag = lag; }
+        }
+
+        if score_count == 0 || best_score <= 0.0 { return; }
+        let mean_score = score_sum / score_count as f32;
+        let confidence = if mean_score > 1e-9 { best_score / mean_score } else { 0.0 };
+
+        if confidence < Self::CONFIDENCE_THRESHOLD {
+            self.locked_confidence = confidence;
+            return;
+        }
+
+        let bpm_candidate = 60.0 / (best_lag as f32 * bin_seconds);
+
+        match self.locked_bpm {
+            None => {
+                self.locked_bpm = Some(bpm_candidate);
+                self.locked_confidence = confidence;
+                self.phase = 0.0;
+                self.candidate_bpm = None;
+                self.candidate_hits = 0;
+            }
+            Some(current) => {
+                let drift = (bpm_candidate - current).abs() / current;
+                if drift < 0.03 {
+                    self.locked_confidence = confidence;
+                    self.candidate_bpm = None;
+                    self.candidate_hits = 0;
+                } else {
+                    match self.candidate_bpm {
+                        Some(c) if (c - bpm_candidate).abs() / c < 0.05 => {
+                            self.candidate_hits += 1;
+                            if self.candidate_hits >= self.candidate_hits_required {
+                                self.locked_bpm = Some(bpm_candidate);
+                                self.locked_confidence = confidence;
+                                self.candidate_bpm = None;
+                                self.candidate_hits = 0;
+                            }
+                        }
+                        _ => {
+                            self.candidate_bpm = Some(bpm_candidate);
+                            self.candidate_hits = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn bpm(&self)        -> Option<f32> { self.locked_bpm }
+    pub fn phase(&self)      -> f32         { self.phase }
+    pub fn confidence(&self) -> f32         { self.locked_confidence }
+}
+
+impl Default for TempoTracker {
+    fn default() -> Self { Self::new(2048.0 / 48000.0) }
 }
 
 /// Mic noise filter: high-pass IIR at 80 Hz, RMS gate with hysteresis,
@@ -516,6 +712,7 @@ struct BeatAnalyzer {
     agc_log_timer:      Instant,
     agc_logged:         bool,
     noise_filter:       NoiseFilter,
+    tempo_tracker:      TempoTracker,
 }
 
 impl BeatAnalyzer {
@@ -546,6 +743,7 @@ impl BeatAnalyzer {
             agc_log_timer: Instant::now(),
             agc_logged: false,
             noise_filter: NoiseFilter::new(sample_rate, noise_filter_enabled),
+            tempo_tracker: TempoTracker::new(fft_size as f32 / sample_rate as f32),
         }
     }
 
@@ -662,13 +860,20 @@ impl BeatAnalyzer {
         let v_high = self.high_envelope.update(dt);
         let combined_decay = v_bb.max(v_low).max(v_mid).max(v_high);
 
+        // Feed broadband flux to tempo estimator before onset detection.
+        self.tempo_tracker.process_chunk(flux_bb);
+
         {
             let mut s = state.lock();
-            s.bands           = bands;
-            s.beat_decay      = combined_decay;
-            s.beat_decay_low  = v_low;
-            s.beat_decay_mid  = v_mid;
-            s.beat_decay_high = v_high;
+            s.bands                = bands;
+            s.beat_decay           = combined_decay;
+            s.beat_decay_low       = v_low;
+            s.beat_decay_mid       = v_mid;
+            s.beat_decay_high      = v_high;
+            s.beat_decay_broadband = v_bb;
+            s.current_bpm          = self.tempo_tracker.bpm();
+            s.beat_phase           = self.tempo_tracker.phase();
+            s.bpm_confidence       = self.tempo_tracker.confidence();
         }
 
         // Push flux values to per-band histories.
@@ -683,7 +888,13 @@ impl BeatAnalyzer {
         self.flux_history_high.push_back(flux_high);
 
         // Per-band onset detection.
+        // Broadband: capture envelope value before/after to detect fresh triggers for PLL.
+        let bb_before = self.broadband_envelope.value();
         Self::detect_and_fire(flux_bb,   &self.flux_history_bb,   sz, 1.5, 0.50, &mut self.broadband_cooldown, &mut self.broadband_envelope, BeatBand::Broadband, event_tx);
+        let bb_after  = self.broadband_envelope.value();
+        if bb_after > bb_before + 0.2 {
+            self.tempo_tracker.on_broadband_onset();
+        }
         Self::detect_and_fire(flux_low,  &self.flux_history_low,  sz, 1.5, 0.30, &mut self.low_cooldown,       &mut self.low_envelope,       BeatBand::Low,       event_tx);
         Self::detect_and_fire(flux_mid,  &self.flux_history_mid,  sz, 1.5, 0.30, &mut self.mid_cooldown,       &mut self.mid_envelope,       BeatBand::Mid,       event_tx);
         Self::detect_and_fire(flux_high, &self.flux_history_high, sz, 1.5, 0.20, &mut self.high_cooldown,      &mut self.high_envelope,      BeatBand::High,      event_tx);
@@ -999,5 +1210,76 @@ mod tests {
             bands[0] > 0.0,
             "band 0 should still be positive (signal well above floor)"
         );
+    }
+
+    #[test]
+    fn tempo_tracker_reports_no_bpm_initially() {
+        let t = TempoTracker::new(0.04);
+        assert!(t.bpm().is_none());
+        assert_eq!(t.phase(), 0.0);
+    }
+
+    #[test]
+    fn tempo_tracker_locks_to_120bpm_synthetic_pulse() {
+        let chunk_seconds = 0.04;
+        let mut t = TempoTracker::new(chunk_seconds);
+        let beats_chunks = 13_usize;
+        let total_chunks = (7.5 / chunk_seconds) as usize;
+        for i in 0..total_chunks {
+            let flux = if i % beats_chunks == 0 { 10.0 } else { 0.1 };
+            t.process_chunk(flux);
+        }
+        let bpm = t.bpm();
+        assert!(bpm.is_some(), "tracker should have locked tempo by now");
+        let detected = bpm.unwrap();
+        assert!(detected > 100.0 && detected < 140.0,
+            "expected BPM near 118, got {}", detected);
+    }
+
+    #[test]
+    fn tempo_tracker_phase_advances_when_locked() {
+        let chunk_seconds = 0.04;
+        let mut t = TempoTracker::new(chunk_seconds);
+        let total_chunks = (8.0 / chunk_seconds) as usize;
+        for i in 0..total_chunks {
+            let flux = if i % 13 == 0 { 10.0 } else { 0.1 };
+            t.process_chunk(flux);
+        }
+        assert!(t.bpm().is_some());
+        let phase_before = t.phase();
+        t.process_chunk(0.1);
+        let phase_after = t.phase();
+        assert!(phase_after >= 0.0 && phase_after < 1.0);
+        assert!(phase_after != phase_before
+            || (phase_before > 0.99 && phase_after < 0.01),
+            "phase should advance");
+    }
+
+    #[test]
+    fn tempo_tracker_silence_keeps_no_bpm() {
+        let mut t = TempoTracker::new(0.04);
+        for _ in 0..200 {
+            t.process_chunk(0.0);
+        }
+        assert!(t.bpm().is_none(), "silence should not produce a tempo lock");
+    }
+
+    #[test]
+    fn tempo_tracker_onset_nudges_phase_when_locked() {
+        let chunk_seconds = 0.04;
+        let mut t = TempoTracker::new(chunk_seconds);
+        for i in 0..200 {
+            let flux = if i % 13 == 0 { 10.0 } else { 0.1 };
+            t.process_chunk(flux);
+        }
+        if t.bpm().is_none() { return; }
+        t.phase = 0.4;
+        let before = t.phase;
+        t.on_broadband_onset();
+        let after = t.phase;
+        assert!(after < before,
+            "onset at phase=0.4 should pull phase down; before={}, after={}", before, after);
+        assert!((before - after - 0.04).abs() < 0.01,
+            "expected phase to drop by ~0.04, dropped by {}", before - after);
     }
 }
