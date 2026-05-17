@@ -1871,6 +1871,8 @@ struct GpuState {
 
     // File-beat detection state (for shake when playing from file)
     file_rms_baseline:  f32,
+    file_tempo_tracker: Option<audio::TempoTracker>,
+    file_band_flux:     audio::BandFlux,
     last_file_beat:     Instant,
     file_beat_envelope: audio::BeatEnvelope,
 
@@ -3436,6 +3438,8 @@ impl GpuState {
             loaded_audio: None,
             audio_player: None,
             file_rms_baseline:  0.0,
+            file_tempo_tracker: None,
+            file_band_flux:     audio::BandFlux::new(),
             last_file_beat:     Instant::now(),
             file_beat_envelope: audio::BeatEnvelope::new(),
             last_random_change:    Instant::now(),
@@ -4595,6 +4599,8 @@ impl GpuState {
         self.shake_offset   = glam::Vec3::ZERO;
         self.shake_velocity = glam::Vec3::ZERO;
         self.file_rms_baseline = 0.0;
+        self.file_tempo_tracker = None;
+        self.file_band_flux.reset();
 
         self.export_state = Some(ExportState {
             phase: ExportPhase::Rendering,
@@ -6403,6 +6409,7 @@ impl ApplicationHandler for App {
                     AudioSourceMode::File => {
                         match file_energies {
                             Some((bands, rms)) => {
+                                // ── existing RMS-based shake / beat envelope ─
                                 if gpu.params.audio_shake_enabled {
                                     let threshold = gpu.file_rms_baseline * 1.5 + 0.01;
                                     if rms > threshold && gpu.last_file_beat.elapsed().as_millis() > 120 {
@@ -6413,23 +6420,38 @@ impl ApplicationHandler for App {
                                     }
                                 }
                                 gpu.file_rms_baseline = gpu.file_rms_baseline * 0.95 + rms * 0.05;
-                                gpu.shader_beat_decay           = gpu.file_beat_envelope.update(frame_dt);
-                                gpu.shader_beat_decay_low       = 0.0;
-                                gpu.shader_beat_decay_mid       = 0.0;
-                                gpu.shader_beat_decay_high      = 0.0;
-                                gpu.shader_beat_decay_broadband = 0.0;
-                                gpu.shader_bpm                  = None;
-                                gpu.shader_beat_phase           = 0.0;
-                                gpu.shader_bpm_confidence       = 0.0;
+                                gpu.shader_beat_decay = gpu.file_beat_envelope.update(frame_dt);
+
+                                // Mirror combined into all four per-band slots —
+                                // per-band envelopes aren't computed in File mode.
+                                gpu.shader_beat_decay_low       = gpu.shader_beat_decay;
+                                gpu.shader_beat_decay_mid       = gpu.shader_beat_decay;
+                                gpu.shader_beat_decay_high      = gpu.shader_beat_decay;
+                                gpu.shader_beat_decay_broadband = gpu.shader_beat_decay;
+
+                                // ── File-mode tempo tracking ─────────────────
+                                let tracker = gpu.file_tempo_tracker.get_or_insert_with(|| {
+                                    audio::TempoTracker::new(frame_dt)
+                                });
+                                let flux = gpu.file_band_flux.from_bands(&bands);
+                                tracker.process_chunk(flux);
+                                // Nudge PLL on detected beat envelope peaks.
+                                if gpu.file_beat_envelope.value() > 0.85 {
+                                    tracker.on_broadband_onset();
+                                }
+                                gpu.shader_bpm            = tracker.bpm();
+                                gpu.shader_beat_phase     = tracker.phase();
+                                gpu.shader_bpm_confidence = tracker.confidence();
+
                                 bands
                             }
                             None => {
                                 // File mode but not playing — let envelope decay naturally.
                                 gpu.shader_beat_decay           = gpu.file_beat_envelope.update(frame_dt);
-                                gpu.shader_beat_decay_low       = 0.0;
-                                gpu.shader_beat_decay_mid       = 0.0;
-                                gpu.shader_beat_decay_high      = 0.0;
-                                gpu.shader_beat_decay_broadband = 0.0;
+                                gpu.shader_beat_decay_low       = gpu.shader_beat_decay;
+                                gpu.shader_beat_decay_mid       = gpu.shader_beat_decay;
+                                gpu.shader_beat_decay_high      = gpu.shader_beat_decay;
+                                gpu.shader_beat_decay_broadband = gpu.shader_beat_decay;
                                 gpu.shader_bpm                  = None;
                                 gpu.shader_beat_phase           = 0.0;
                                 gpu.shader_bpm_confidence       = 0.0;
@@ -6563,6 +6585,8 @@ impl ApplicationHandler for App {
                                         let arc_audio = Arc::new(audio);
                                         gpu.loaded_audio = Some(arc_audio.clone());
                                         gpu.file_rms_baseline = 0.0;
+                                        gpu.file_tempo_tracker = None;
+                                        gpu.file_band_flux.reset();
                                         match AudioPlayer::new(arc_audio) {
                                             Ok(player) => {
                                                 gpu.audio_player = Some(player);

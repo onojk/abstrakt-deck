@@ -365,6 +365,28 @@ impl Default for TempoTracker {
     fn default() -> Self { Self::new(2048.0 / 48000.0) }
 }
 
+/// Simple flux proxy derived from per-frame band energies.
+///
+/// Used by File-mode tempo detection where FFT spectral flux isn't computed.
+/// Flux = positive-only change in total band energy between consecutive calls.
+#[derive(Debug, Clone, Default)]
+pub struct BandFlux {
+    prev_total: f32,
+}
+
+impl BandFlux {
+    pub fn new() -> Self { Self { prev_total: 0.0 } }
+
+    pub fn reset(&mut self) { self.prev_total = 0.0; }
+
+    pub fn from_bands(&mut self, bands: &[f32; 8]) -> f32 {
+        let total: f32 = bands.iter().sum();
+        let flux = (total - self.prev_total).max(0.0);
+        self.prev_total = total;
+        flux
+    }
+}
+
 /// Mic noise filter: high-pass IIR at 80 Hz, RMS gate with hysteresis,
 /// and per-band noise floor subtraction applied after FFT.
 ///
@@ -1281,5 +1303,36 @@ mod tests {
             "onset at phase=0.4 should pull phase down; before={}, after={}", before, after);
         assert!((before - after - 0.04).abs() < 0.01,
             "expected phase to drop by ~0.04, dropped by {}", before - after);
+    }
+
+    #[test]
+    fn band_flux_starts_at_zero() {
+        let mut bf = BandFlux::new();
+        let bands = [0.5_f32; 8];
+        let f1 = bf.from_bands(&bands);
+        assert!((f1 - 4.0).abs() < 1e-4, "expected 4.0, got {}", f1);
+        let f2 = bf.from_bands(&bands);
+        assert!(f2 < 1e-4, "same bands should give flux≈0, got {}", f2);
+    }
+
+    #[test]
+    fn band_flux_reports_positive_change_only() {
+        let mut bf = BandFlux::new();
+        let high = [1.0_f32; 8];
+        let low  = [0.1_f32; 8];
+        let _ = bf.from_bands(&high);
+        let drop = bf.from_bands(&low);
+        assert_eq!(drop, 0.0, "flux should clamp negative changes to 0");
+        let rise = bf.from_bands(&high);
+        assert!((rise - 7.2).abs() < 1e-3, "expected 7.2, got {}", rise);
+    }
+
+    #[test]
+    fn band_flux_reset_clears_history() {
+        let mut bf = BandFlux::new();
+        let _ = bf.from_bands(&[0.5; 8]);
+        bf.reset();
+        let f = bf.from_bands(&[0.3; 8]);
+        assert!((f - 2.4).abs() < 1e-3, "expected 2.4 after reset, got {}", f);
     }
 }
