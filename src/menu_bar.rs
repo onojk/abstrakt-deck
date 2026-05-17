@@ -70,6 +70,9 @@ pub enum LockTarget {
     PhantomKeySoftness,
     PhantomKeyStrength,
     PhantomOpacity,
+    BezoldEnabled,
+    BezoldStrength,
+    BezoldRadius,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +179,9 @@ pub enum ParamChange {
     PhantomKeySoftness(f32),
     PhantomKeyStrength(f32),
     PhantomOpacity(f32),
+    BezoldEnabled(bool),
+    BezoldStrength(f32),
+    BezoldRadius(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -448,6 +454,8 @@ impl MenuBar {
                             Self::blackhole_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::phantom_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::bezold_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::color_theory_section(ui, current_params, &mut frame_changes);
                         });
@@ -1437,6 +1445,68 @@ impl MenuBar {
                         if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("Opacity").step_by(0.05)).changed() {
                             changes.push(ParamChange::PhantomOpacity(v));
                         }
+                    });
+                });
+            });
+        });
+    }
+
+    fn bezold_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Bezold Contrast", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Pushes each pixel's hue away from its neighborhood — colors pop against their surroundings. (V)"
+                ).small().weak()
+            );
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.bezold_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::BezoldEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.bezold_enabled, |ui| {
+                    let mut v = params.bezold_enabled;
+                    if ui.checkbox(&mut v, "Enable (V)").changed() {
+                        changes.push(ParamChange::BezoldEnabled(v));
+                    }
+                });
+            });
+
+            ui.add_enabled_ui(params.bezold_enabled, |ui| {
+                ui.indent("bezold_indent", |ui| {
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.bezold_strength).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::BezoldStrength));
+                        }
+                        ui.add_enabled_ui(!params.locks.bezold_strength, |ui| {
+                            let mut v = params.bezold_strength;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.0..=1.0)
+                                    .text("Strength")
+                                    .step_by(0.01)
+                            ).changed() {
+                                changes.push(ParamChange::BezoldStrength(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.bezold_radius).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::BezoldRadius));
+                        }
+                        ui.add_enabled_ui(!params.locks.bezold_radius, |ui| {
+                            let mut v = params.bezold_radius;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 1.0..=10.0)
+                                    .text("Radius (px)")
+                                    .step_by(0.5)
+                            ).changed() {
+                                changes.push(ParamChange::BezoldRadius(v));
+                            }
+                        });
                     });
                 });
             });

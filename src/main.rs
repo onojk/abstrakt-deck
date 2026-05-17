@@ -1,4 +1,5 @@
 mod audio;
+mod bezold;
 mod color;
 mod help_overlay;
 mod menu_bar;
@@ -375,6 +376,10 @@ pub struct ParamLocks {
     pub phantom_key_softness:  bool,
     pub phantom_key_strength:  bool,
     pub phantom_opacity:       bool,
+    // Bezold simultaneous-contrast
+    pub bezold_enabled:        bool,
+    pub bezold_strength:       bool,
+    pub bezold_radius:         bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -523,6 +528,10 @@ pub struct VisualParams {
     pub phantom_key_softness:  f32,
     pub phantom_key_strength:  f32,
     pub phantom_opacity:       f32,
+    // Bezold simultaneous-contrast
+    pub bezold_enabled:        bool,
+    pub bezold_strength:       f32,
+    pub bezold_radius:         f32,
 }
 
 impl Default for VisualParams {
@@ -604,6 +613,9 @@ impl Default for VisualParams {
             phantom_key_softness:  0.05,
             phantom_key_strength:  1.0,
             phantom_opacity:       0.85,
+            bezold_enabled:        false,
+            bezold_strength:       0.50,
+            bezold_radius:         3.0,
         }
     }
 }
@@ -741,6 +753,12 @@ struct Preset {
     phantom_key_strength: f32,
     #[serde(default = "default_phantom_opacity")]
     phantom_opacity: f32,
+    #[serde(default)]
+    bezold_enabled: bool,
+    #[serde(default = "default_bezold_strength")]
+    bezold_strength: f32,
+    #[serde(default = "default_bezold_radius")]
+    bezold_radius: f32,
     #[serde(default = "default_color_harmony")]
     color_harmony:    color::ColorHarmony,
     #[serde(default = "default_color_anchor_hue")]
@@ -787,6 +805,8 @@ fn default_phantom_key_tolerance()   -> f32  { 0.15 }
 fn default_phantom_key_softness()    -> f32  { 0.05 }
 fn default_phantom_key_strength()    -> f32  { 1.0 }
 fn default_phantom_opacity()         -> f32  { 0.85 }
+fn default_bezold_strength()         -> f32  { 0.50 }
+fn default_bezold_radius()           -> f32  { 3.0  }
 fn default_color_harmony()           -> color::ColorHarmony    { color::ColorHarmony::Analogous }
 fn default_color_anchor_hue()        -> f32                     { 210.0 }
 fn default_color_temperature_bias()  -> f32                     { 0.0 }
@@ -875,6 +895,9 @@ impl Preset {
             phantom_key_softness:  params.phantom_key_softness,
             phantom_key_strength:  params.phantom_key_strength,
             phantom_opacity:       params.phantom_opacity,
+            bezold_enabled:        params.bezold_enabled,
+            bezold_strength:       params.bezold_strength,
+            bezold_radius:         params.bezold_radius,
             color_harmony:           params.color_harmony,
             color_anchor_hue:        params.color_anchor_hue,
             color_temperature_bias:  params.color_temperature_bias,
@@ -993,6 +1016,9 @@ impl Preset {
         params.phantom_key_softness  = self.phantom_key_softness;
         params.phantom_key_strength  = self.phantom_key_strength;
         params.phantom_opacity       = self.phantom_opacity;
+        params.bezold_enabled        = self.bezold_enabled;
+        params.bezold_strength       = self.bezold_strength;
+        params.bezold_radius         = self.bezold_radius;
         params.color_harmony            = self.color_harmony;
         params.color_anchor_hue         = self.color_anchor_hue;
         params.color_temperature_bias   = self.color_temperature_bias;
@@ -1841,6 +1867,9 @@ struct GpuState {
     export_ribbon: Option<ExportRibbonState>,
     // Export feedback FBOs for blackhole pass (None when not exporting or blackhole disabled)
     export_feedback: Option<ExportFeedbackState>,
+
+    // Bezold simultaneous-contrast post-process
+    bezold: bezold::Bezold,
 
     // Phantom Alpha: chroma-keyed delayed-frame overlay
     phantom: phantom::PhantomAlpha,
@@ -3374,6 +3403,7 @@ impl GpuState {
             multiview: None, cache: None,
         });
 
+        let bezold = bezold::Bezold::new(&device, w, h, surface_format);
         let phantom = phantom::PhantomAlpha::new(&device, surface_format);
 
         Self {
@@ -3421,6 +3451,7 @@ impl GpuState {
             applied_harmony_buffer, applied_harmony_bgl, applied_harmony_bind_group,
             export_ribbon: None,
             export_feedback: None,
+            bezold,
             phantom,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
@@ -3598,6 +3629,7 @@ impl GpuState {
         });
         self.scene_view = new_scene_tex.create_view(&wgpu::TextureViewDescriptor::default());
         self.scene_texture = new_scene_tex;
+        self.bezold.resize(&self.device, w, h, self.config.format);
 
         self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Blit BG"),
@@ -4219,6 +4251,51 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
+        // Pass 4.5: Bezold simultaneous-contrast (optional).
+        // Runs after all compositing is done; pushes each pixel's hue away from
+        // its neighborhood. Downstream passes read bezold.view when enabled.
+        if self.params.bezold_enabled {
+            self.bezold.write_uniforms(&self.queue, bezold::BezoldUniforms {
+                strength: self.params.bezold_strength,
+                radius:   self.params.bezold_radius,
+                texel_x:  1.0 / self.bezold.width() as f32,
+                texel_y:  1.0 / self.bezold.height() as f32,
+            });
+            let scene_view_bz = self.scene_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let bezold_bg = self.bezold.make_bind_group(&self.device, &scene_view_bz);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Bezold pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.bezold.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.bezold.pipeline);
+                pass.set_bind_group(0, &bezold_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Choose the source for Pass 5: bezold when enabled, scene otherwise.
+        // We must own a TextureView for the scene case; bezold.view is a field ref.
+        let pass5_scene_view_owned;
+        let pass5_source_view: &wgpu::TextureView = if self.params.bezold_enabled {
+            &self.bezold.view
+        } else {
+            pass5_scene_view_owned = self.scene_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            &pass5_scene_view_owned
+        };
+
         // Pass 5: blit scene FBO → swapchain.
         // Priority: blackhole > phantom > plain blit. Blackhole and phantom are mutually exclusive.
         if self.params.blackhole_enabled {
@@ -4306,11 +4383,10 @@ impl GpuState {
 
             self.feedback_current_is_a = !self.feedback_current_is_a;
         } else if self.params.phantom_enabled {
-            let scene_view_for_capture = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.phantom.capture(&mut encoder, &self.device, &scene_view_for_capture);
+            self.phantom.capture(&mut encoder, &self.device, pass5_source_view);
             self.phantom.composite(
                 &mut encoder, &self.device, &self.queue,
-                &scene_view_for_capture, &screen_view,
+                pass5_source_view, &screen_view,
                 self.params.phantom_delay_seconds,
                 self.params.phantom_key_color,
                 self.params.phantom_key_tolerance,
@@ -4320,6 +4396,43 @@ impl GpuState {
             );
             self.blackhole_was_enabled = false;
         } else {
+            // Build a blit bind group from the chosen source (bezold or scene).
+            let blit_bg = if self.params.bezold_enabled {
+                let blit_sampler_view = &self.bezold.view;
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Blit BG (Bezold)"),
+                    layout: &self.blit_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(blit_sampler_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(
+                                // Reuse the shape_sampler which is a simple clamp linear sampler
+                                &self.shape_sampler,
+                            ),
+                        },
+                    ],
+                })
+            } else {
+                // Recreate the standard blit bind group from scene_view.
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Blit BG"),
+                    layout: &self.blit_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.scene_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                        },
+                    ],
+                })
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Blit pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -4333,7 +4446,7 @@ impl GpuState {
                 occlusion_query_set: None, timestamp_writes: None,
             });
             pass.set_pipeline(&self.blit_pipeline);
-            pass.set_bind_group(0, &self.blit_bind_group, &[]);
+            pass.set_bind_group(0, &blit_bg, &[]);
             pass.draw(0..3, 0..1);
             self.blackhole_was_enabled = false;
         }
@@ -5754,6 +5867,15 @@ impl GpuState {
         if !self.params.locks.applied_harmony_enabled {
             self.params.applied_harmony_enabled = rng.gen_bool(0.25);
         }
+        if !self.params.locks.bezold_enabled {
+            self.params.bezold_enabled = rng.gen_bool(0.20);
+        }
+        if !self.params.locks.bezold_strength && self.params.bezold_enabled {
+            self.params.bezold_strength = rng.gen_range(0.30_f32..=0.75);
+        }
+        if !self.params.locks.bezold_radius && self.params.bezold_enabled {
+            self.params.bezold_radius = rng.gen_range(2.0_f32..=5.0);
+        }
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
@@ -6175,6 +6297,13 @@ impl ApplicationHandler for App {
                     KeyCode::KeyB => {
                         gpu.params.reactive_mode_enabled = !gpu.params.reactive_mode_enabled;
                         log::info!("Reactive Mode: {}", gpu.params.reactive_mode_enabled);
+                    }
+                    KeyCode::KeyV if !gpu.params.locks.bezold_enabled => {
+                        gpu.params.bezold_enabled = !gpu.params.bezold_enabled;
+                        log::info!("Bezold contrast: {}", if gpu.params.bezold_enabled { "ON" } else { "OFF" });
+                    }
+                    KeyCode::KeyV => {
+                        log::info!("Bezold contrast: LOCKED");
                     }
                     KeyCode::KeyN if !ctrl => {
                         gpu.params.random_mode_enabled = !gpu.params.random_mode_enabled;
@@ -6780,6 +6909,9 @@ impl ApplicationHandler for App {
                                 LockTarget::PhantomKeySoftness   => gpu.params.locks.phantom_key_softness  = !gpu.params.locks.phantom_key_softness,
                                 LockTarget::PhantomKeyStrength   => gpu.params.locks.phantom_key_strength  = !gpu.params.locks.phantom_key_strength,
                                 LockTarget::PhantomOpacity       => gpu.params.locks.phantom_opacity       = !gpu.params.locks.phantom_opacity,
+                                LockTarget::BezoldEnabled        => gpu.params.locks.bezold_enabled        = !gpu.params.locks.bezold_enabled,
+                                LockTarget::BezoldStrength       => gpu.params.locks.bezold_strength       = !gpu.params.locks.bezold_strength,
+                                LockTarget::BezoldRadius         => gpu.params.locks.bezold_radius         = !gpu.params.locks.bezold_radius,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -6841,6 +6973,9 @@ impl ApplicationHandler for App {
                         ParamChange::PhantomKeySoftness(v)   => gpu.params.phantom_key_softness  = v,
                         ParamChange::PhantomKeyStrength(v)   => gpu.params.phantom_key_strength  = v,
                         ParamChange::PhantomOpacity(v)       => gpu.params.phantom_opacity       = v,
+                        ParamChange::BezoldEnabled(v)        => gpu.params.bezold_enabled        = v,
+                        ParamChange::BezoldStrength(v)       => gpu.params.bezold_strength       = v,
+                        ParamChange::BezoldRadius(v)         => gpu.params.bezold_radius         = v,
                     }
                 }
 
@@ -6896,6 +7031,7 @@ fn main() {
     println!("  - =    frame size");
     println!("  R      cycle frame color hue (+30°)");
     println!("  G      toggle Phantom Alpha overlay");
+    println!("  V      toggle Bezold simultaneous-contrast (color pop)");
     println!("  H      cycle color harmony (Mono/Analogous/Comp/Split/Triad/Tetra)");
     println!("  J      toggle applied harmony (recolor Skin/Image/PrintHead via Color Theory)");
     println!("  space  toggle MIDI shake");
@@ -7038,6 +7174,9 @@ mod tests {
             color_phase_cycle_degrees: 180.0,
             color_phase_cycle_locked:  false,
             applied_harmony_enabled: true,
+            bezold_enabled:  true,
+            bezold_strength: 0.65,
+            bezold_radius:   4.0,
         }
     }
 
@@ -7129,6 +7268,9 @@ mod tests {
         assert_eq!(restored.color_phase_cycle_degrees, original.color_phase_cycle_degrees, "color_phase_cycle_degrees failed");
         assert_eq!(restored.color_phase_cycle_locked,  original.color_phase_cycle_locked,  "color_phase_cycle_locked failed");
         assert_eq!(restored.applied_harmony_enabled, original.applied_harmony_enabled, "applied_harmony_enabled failed");
+        assert_eq!(restored.bezold_enabled,  original.bezold_enabled,  "bezold_enabled failed");
+        assert_eq!(restored.bezold_strength, original.bezold_strength, "bezold_strength failed");
+        assert_eq!(restored.bezold_radius,   original.bezold_radius,   "bezold_radius failed");
     }
 
     #[test]
