@@ -292,6 +292,7 @@ impl TempoTracker {
         let mut best_score: f32 = 0.0;
         let mut score_sum: f32 = 0.0;
         let mut score_count: u32 = 0;
+        let mut scores: Vec<f32> = Vec::with_capacity(lag_max - lag_min + 1);
 
         for lag in lag_min..=lag_max {
             let n = self.flux_history.len() - lag;
@@ -302,12 +303,32 @@ impl TempoTracker {
                 score += a * b;
             }
             score /= n as f32;
+            scores.push(score);
             score_sum += score.max(0.0);
             score_count += 1;
             if score > best_score { best_score = score; best_lag = lag; }
         }
 
         if score_count == 0 || best_score <= 0.0 { return; }
+
+        // Tempo doubling check: if lag/2 is in the search range and its
+        // correlation score is ≥ 65% of the peak, the music likely has a
+        // faster underlying tempo hidden by strong off-beat emphasis (common
+        // in hip-hop and reggae). Prefer the faster tempo. Done only once —
+        // recursing to lag/4 would over-fire on any regularly structured signal.
+        let half_lag = best_lag / 2;
+        if half_lag >= lag_min && half_lag <= lag_max {
+            let half_score = scores[half_lag - lag_min];
+            if half_score >= best_score * 0.65 {
+                log::debug!(
+                    "Tempo doubling: lag {} (BPM {:.1}, score {:.3}) → lag {} (BPM {:.1}, score {:.3})",
+                    best_lag, 60.0 / (best_lag as f32 * bin_seconds), best_score,
+                    half_lag, 60.0 / (half_lag as f32 * bin_seconds), half_score,
+                );
+                best_lag   = half_lag;
+                best_score = half_score;
+            }
+        }
         let mean_score = score_sum / score_count as f32;
         let confidence = if mean_score > 1e-9 { best_score / mean_score } else { 0.0 };
 
@@ -1331,5 +1352,65 @@ mod tests {
         bf.reset();
         let f = bf.compute(&[0.3; 8]);
         assert!((f - 2.4).abs() < 1e-3, "expected 2.4 after reset, got {}", f);
+    }
+
+    #[test]
+    fn tempo_tracker_doubles_when_half_tempo_score_is_strong() {
+        // Signal with strong "every other beat" emphasis — odd beats louder.
+        // This simulates strong 2-and-4 snare emphasis (hip-hop / reggae).
+        // Without doubling, autocorrelation may lock on the loud-beat period;
+        // with doubling it should correct to the true (faster) beat period.
+        let chunk_seconds = 0.04;
+        let mut t = TempoTracker::new(chunk_seconds);
+
+        // Use 13 chunks/beat → BPM ≈ 60/(13*0.04) = 115.4
+        let chunks_per_beat = 13_usize;
+        let total_chunks = (8.0 / chunk_seconds) as usize;
+
+        for i in 0..total_chunks {
+            let beat_idx = i / chunks_per_beat;
+            let is_on_beat = i % chunks_per_beat == 0;
+            let flux = if is_on_beat {
+                if beat_idx.is_multiple_of(2) { 4.0 } else { 10.0 }
+            } else {
+                0.1
+            };
+            t.process_chunk(flux);
+        }
+
+        let bpm = t.bpm();
+        assert!(bpm.is_some(), "tracker should have locked");
+        let detected = bpm.unwrap();
+        assert!(
+            detected > 100.0 && detected < 140.0,
+            "tempo doubling should have caught the true tempo near 115, got {}",
+            detected
+        );
+    }
+
+    #[test]
+    fn tempo_tracker_does_not_double_on_clean_slow_signal() {
+        // Pure 70 BPM signal with no half-tempo emphasis. Doubling would
+        // incorrectly flip this to ~140 BPM — verify it doesn't.
+        let chunk_seconds = 0.04;
+        let mut t = TempoTracker::new(chunk_seconds);
+
+        // 21 chunks/beat → BPM ≈ 60/(21*0.04) = 71.4
+        let chunks_per_beat = 21_usize;
+        let total_chunks = (10.0 / chunk_seconds) as usize;
+
+        for i in 0..total_chunks {
+            let flux = if i % chunks_per_beat == 0 { 10.0 } else { 0.1 };
+            t.process_chunk(flux);
+        }
+
+        let bpm = t.bpm();
+        assert!(bpm.is_some(), "tracker should have locked");
+        let detected = bpm.unwrap();
+        assert!(
+            detected > 60.0 && detected < 90.0,
+            "clean ~71 BPM signal should not be doubled to ~143, got {}",
+            detected
+        );
     }
 }
