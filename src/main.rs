@@ -1,6 +1,7 @@
 mod audio;
 mod bezold;
 mod bundles;
+mod pitch;
 mod color;
 mod help_overlay;
 mod menu_bar;
@@ -197,6 +198,15 @@ impl FrameUniforms {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpinTrailUniforms {
+    resolution_x: f32,
+    resolution_y: f32,
+    spin_angle:   f32,
+    trail_decay:  f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrameShape {
     None    = 0,
@@ -382,6 +392,11 @@ pub struct ParamLocks {
     pub bezold_enabled:        bool,
     pub bezold_strength:       bool,
     pub bezold_radius:         bool,
+    // Spin & Trails
+    pub spin_enabled:     bool,
+    pub spin_speed:       bool,
+    pub spin_audio_react: bool,
+    pub trail_decay:      bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -535,6 +550,13 @@ pub struct VisualParams {
     pub bezold_enabled:        bool,
     pub bezold_strength:       f32,
     pub bezold_radius:         f32,
+    // Spin & Trails
+    pub spin_enabled:     bool,
+    pub spin_speed:       f32,   // revolutions per second, signed; -2.0..+2.0
+    pub spin_audio_react: bool,  // bass boosts base speed by up to 50%
+    pub trail_decay:      f32,   // 0.0 (no trail) .. 0.98 (long trail)
+    // Pitch layer (Slice 25)
+    pub pitch_to_hue: bool,  // drive colorize_hue from chroma_peak when true
 }
 
 impl Default for VisualParams {
@@ -620,6 +642,11 @@ impl Default for VisualParams {
             bezold_enabled:        false,
             bezold_strength:       0.50,
             bezold_radius:         3.0,
+            spin_enabled:     false,
+            spin_speed:       0.0,
+            spin_audio_react: false,
+            trail_decay:      0.0,
+            pitch_to_hue:     false,
         }
     }
 }
@@ -765,6 +792,16 @@ struct Preset {
     bezold_strength: f32,
     #[serde(default = "default_bezold_radius")]
     bezold_radius: f32,
+    #[serde(default)]
+    spin_enabled: bool,
+    #[serde(default = "default_spin_speed")]
+    spin_speed: f32,
+    #[serde(default)]
+    spin_audio_react: bool,
+    #[serde(default = "default_trail_decay")]
+    trail_decay: f32,
+    #[serde(default)]
+    pitch_to_hue: bool,
     #[serde(default = "default_color_harmony")]
     color_harmony:    color::ColorHarmony,
     #[serde(default = "default_color_anchor_hue")]
@@ -813,6 +850,8 @@ fn default_phantom_key_strength()    -> f32  { 1.0 }
 fn default_phantom_opacity()         -> f32  { 0.85 }
 fn default_bezold_strength()         -> f32  { 0.50 }
 fn default_bezold_radius()           -> f32  { 3.0  }
+fn default_spin_speed()              -> f32  { 0.0  }
+fn default_trail_decay()             -> f32  { 0.0  }
 fn default_color_harmony()           -> color::ColorHarmony    { color::ColorHarmony::Analogous }
 fn default_color_anchor_hue()        -> f32                     { 210.0 }
 fn default_color_temperature_bias()  -> f32                     { 0.0 }
@@ -906,6 +945,11 @@ impl Preset {
             bezold_enabled:        params.bezold_enabled,
             bezold_strength:       params.bezold_strength,
             bezold_radius:         params.bezold_radius,
+            spin_enabled:     params.spin_enabled,
+            spin_speed:       params.spin_speed,
+            spin_audio_react: params.spin_audio_react,
+            trail_decay:      params.trail_decay,
+            pitch_to_hue:     params.pitch_to_hue,
             color_harmony:           params.color_harmony,
             color_anchor_hue:        params.color_anchor_hue,
             color_temperature_bias:  params.color_temperature_bias,
@@ -1028,6 +1072,11 @@ impl Preset {
         params.bezold_enabled        = self.bezold_enabled;
         params.bezold_strength       = self.bezold_strength;
         params.bezold_radius         = self.bezold_radius;
+        params.spin_enabled     = self.spin_enabled;
+        params.spin_speed       = self.spin_speed;
+        params.spin_audio_react = self.spin_audio_react;
+        params.trail_decay      = self.trail_decay;
+        params.pitch_to_hue     = self.pitch_to_hue;
         params.color_harmony            = self.color_harmony;
         params.color_anchor_hue         = self.color_anchor_hue;
         params.color_temperature_bias   = self.color_temperature_bias;
@@ -1631,6 +1680,21 @@ struct ExportFeedbackState {
     rng: rand::rngs::StdRng,
 }
 
+struct ExportSpinState {
+    #[allow(dead_code)]
+    tex_a: wgpu::Texture,
+    view_a: wgpu::TextureView,
+    #[allow(dead_code)]
+    tex_b: wgpu::Texture,
+    view_b: wgpu::TextureView,
+    bg_read_a: wgpu::BindGroup,  // history=A → write B
+    bg_read_b: wgpu::BindGroup,  // history=B → write A
+    frame_bg_a: wgpu::BindGroup, // frame reads A
+    frame_bg_b: wgpu::BindGroup, // frame reads B
+    current_is_a: bool,
+    spin_angle: f32,
+}
+
 pub struct ExportState {
     pub phase: ExportPhase,
     pub current_frame: u32,
@@ -1872,10 +1936,29 @@ struct GpuState {
     applied_harmony_bgl:        wgpu::BindGroupLayout,
     applied_harmony_bind_group: wgpu::BindGroup,
 
+    // Spin & Trails pass (pass 3.5): rotate kaleido output + motion-blur feedback
+    spin_trail_uniforms_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    spin_trail_bgl: wgpu::BindGroupLayout,
+    spin_trail_pipeline: wgpu::RenderPipeline,
+    #[allow(dead_code)]
+    spin_tex_a: wgpu::Texture,
+    spin_view_a: wgpu::TextureView,
+    #[allow(dead_code)]
+    spin_tex_b: wgpu::Texture,
+    spin_view_b: wgpu::TextureView,
+    spin_trail_bg_read_a: wgpu::BindGroup,  // history=A → write B
+    spin_trail_bg_read_b: wgpu::BindGroup,  // history=B → write A
+    frame_bg_spin_b: wgpu::BindGroup,       // frame reads B
+    spin_trail_current_is_a: bool,
+    spin_angle: f32,
+
     // Export ribbon FBOs (persistent across export frames, None when not exporting)
     export_ribbon: Option<ExportRibbonState>,
     // Export feedback FBOs for blackhole pass (None when not exporting or blackhole disabled)
     export_feedback: Option<ExportFeedbackState>,
+    // Export spin+trail FBOs (None when not exporting)
+    export_spin: Option<ExportSpinState>,
 
     // Bezold simultaneous-contrast post-process
     bezold: bezold::Bezold,
@@ -1931,6 +2014,14 @@ struct GpuState {
     shader_bpm:                   Option<f32>,
     shader_beat_phase:            f32,
     shader_bpm_confidence:        f32,
+    // Pitch layer (Slice 25)
+    shader_chroma_peak:    f32,
+    shader_key_root:       u8,
+    shader_key_is_major:   bool,
+    shader_key_confidence: f32,
+    last_key_root:         u8,    // 255 = sentinel (no key seen yet)
+    last_key_is_major:     bool,
+    last_key_party_trigger: Instant,
     last_audio_update:            Instant,
 
     pub params: VisualParams,
@@ -1992,6 +2083,24 @@ impl GpuState {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         (color, color_view, depth, depth_view)
+    }
+
+    fn create_spin_fbo(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Spin FBO"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
     }
 
     fn create_kaleido_fbo(
@@ -2075,6 +2184,48 @@ impl GpuState {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    // BGL for spin_trail pass: uniform + kaleido_tex + sampler + history_tex + sampler
+    fn make_spin_trail_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("SpinTrail BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -2514,6 +2665,44 @@ impl GpuState {
             ],
         });
 
+        // ── Spin & Trails pass (pass 3.5) ────────────────────────────────────
+        let (spin_tex_a, spin_view_a) = Self::create_spin_fbo(&device, w, h);
+        let (spin_tex_b, spin_view_b) = Self::create_spin_fbo(&device, w, h);
+        let spin_trail_bgl = Self::make_spin_trail_bgl(&device);
+        let spin_trail_uniforms_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("SpinTrail uniforms"),
+                contents: bytemuck::cast_slice(&[SpinTrailUniforms {
+                    resolution_x: w as f32, resolution_y: h as f32,
+                    spin_angle: 0.0, trail_decay: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        // read_a: history=A (used when WRITING to B)
+        let spin_trail_bg_read_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SpinTrail BG read-A"),
+            layout: &spin_trail_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: spin_trail_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&kaleido_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shape_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&spin_view_a) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&shape_sampler) },
+            ],
+        });
+        // read_b: history=B (used when WRITING to A)
+        let spin_trail_bg_read_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SpinTrail BG read-B"),
+            layout: &spin_trail_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: spin_trail_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&kaleido_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shape_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&spin_view_b) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&shape_sampler) },
+            ],
+        });
+
         // ── Frame uniforms + BGL + BG ─────────────────────────────────────────
         let frame_uniforms_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2522,8 +2711,9 @@ impl GpuState {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
         let frame_bgl = Self::make_uts_bgl(&device, "Frame BGL");
+        // frame_bind_group reads spin output A (ping-pong; updated each frame via frame_bg_spin_b)
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Frame BG"),
+            label: Some("Frame BG spin-A"),
             layout: &frame_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2532,7 +2722,25 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&kaleido_view),
+                    resource: wgpu::BindingResource::TextureView(&spin_view_a),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
+                },
+            ],
+        });
+        let frame_bg_spin_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Frame BG spin-B"),
+            layout: &frame_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&spin_view_b),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -3063,6 +3271,38 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        let spin_trail_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SpinTrail shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/spin_trail.wgsl").into()),
+        });
+        let spin_trail_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("SpinTrail pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None, bind_group_layouts: &[&spin_trail_bgl], push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &spin_trail_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &spin_trail_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blit shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
@@ -3459,8 +3699,15 @@ impl GpuState {
             palette_uniforms_buffer, palette_bgl, palette_bind_group, palette_pipeline,
             palette_scratch_texture, palette_scratch_view,
             applied_harmony_buffer, applied_harmony_bgl, applied_harmony_bind_group,
+            spin_trail_uniforms_buffer, spin_trail_bgl, spin_trail_pipeline,
+            spin_tex_a, spin_view_a, spin_tex_b, spin_view_b,
+            spin_trail_bg_read_a, spin_trail_bg_read_b,
+            frame_bg_spin_b,
+            spin_trail_current_is_a: false,
+            spin_angle: 0.0,
             export_ribbon: None,
             export_feedback: None,
+            export_spin: None,
             bezold,
             phantom,
             readback_buffer, readback_padded_bytes_per_row,
@@ -3497,6 +3744,13 @@ impl GpuState {
             shader_bpm:                  None,
             shader_beat_phase:           0.0,
             shader_bpm_confidence:       0.0,
+            shader_chroma_peak:    0.0,
+            shader_key_root:       0,
+            shader_key_is_major:   true,
+            shader_key_confidence: 0.0,
+            last_key_root:         255,
+            last_key_is_major:     true,
+            last_key_party_trigger: Instant::now(),
             last_audio_update:  Instant::now(),
             params: VisualParams::default(),
             last_bundle_applied: None,
@@ -3592,10 +3846,43 @@ impl GpuState {
                 ],
             });
 
-        // Frame BG references kaleido_view → recreate.
+        // Spin FBOs — resize to new resolution.
+        let (sta, sva) = Self::create_spin_fbo(&self.device, w, h);
+        self.spin_tex_a = sta; self.spin_view_a = sva;
+        let (stb, svb) = Self::create_spin_fbo(&self.device, w, h);
+        self.spin_tex_b = stb; self.spin_view_b = svb;
+        self.spin_trail_current_is_a = false; // fresh start; both cleared to black
+
+        // SpinTrail BGs reference kaleido_view + spin views → recreate.
+        self.spin_trail_bg_read_a =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SpinTrail BG read-A"),
+                layout: &self.spin_trail_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.spin_trail_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.kaleido_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.spin_view_a) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+        self.spin_trail_bg_read_b =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SpinTrail BG read-B"),
+                layout: &self.spin_trail_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.spin_trail_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.kaleido_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.spin_view_b) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+
+        // Frame BG references spin output (A/B) → recreate both.
         self.frame_bind_group =
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Frame BG"),
+                label: Some("Frame BG spin-A"),
                 layout: &self.frame_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -3604,7 +3891,26 @@ impl GpuState {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.kaleido_view),
+                        resource: wgpu::BindingResource::TextureView(&self.spin_view_a),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
+        self.frame_bg_spin_b =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Frame BG spin-B"),
+                layout: &self.frame_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.frame_uniforms_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.spin_view_b),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -3901,6 +4207,27 @@ impl GpuState {
         let force = -stiffness * self.shake_offset - damping * self.shake_velocity;
         self.shake_velocity += force * dt;
         self.shake_offset += self.shake_velocity * dt;
+
+        // Integrate spin angle (independent of shape rotation_speed).
+        {
+            let base_speed = self.params.spin_speed * std::f32::consts::TAU; // rev/s → rad/s
+            let audio_boost = if self.params.spin_audio_react {
+                self.bass_mid_smoothed * 0.5
+            } else {
+                0.0
+            };
+            self.spin_angle = (self.spin_angle + base_speed * (1.0 + audio_boost) * dt)
+                .rem_euclid(std::f32::consts::TAU);
+        }
+        let effective_spin_angle = if self.params.spin_enabled { self.spin_angle } else { 0.0 };
+        let effective_trail_decay = if self.params.spin_enabled { self.params.trail_decay.min(0.98) } else { 0.0 };
+        self.queue.write_buffer(&self.spin_trail_uniforms_buffer, 0,
+            bytemuck::cast_slice(&[SpinTrailUniforms {
+                resolution_x: self.size.width as f32,
+                resolution_y: self.size.height as f32,
+                spin_angle:  effective_spin_angle,
+                trail_decay: effective_trail_decay,
+            }]));
 
         let phase_signal = self.phase_lock_signal();
 
@@ -4245,8 +4572,44 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
+        // Pass 3.5: spin & trails → spin output (ping-pong A/B)
+        {
+            let (spin_bg, spin_write_view) = if self.spin_trail_current_is_a {
+                // A has last frame's output → read A as history, write to B
+                (&self.spin_trail_bg_read_a, &self.spin_view_b)
+            } else {
+                // B has last frame's output (or startup: cleared black) → read B, write to A
+                (&self.spin_trail_bg_read_b, &self.spin_view_a)
+            };
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("SpinTrail pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: spin_write_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.spin_trail_pipeline);
+                pass.set_bind_group(0, spin_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            // Flip ping-pong: the buffer we just wrote is now "current".
+            self.spin_trail_current_is_a = !self.spin_trail_current_is_a;
+        }
+
         // Pass 4: frame overlay (SDF mask) → scene FBO
         {
+            // Select frame bind group based on which spin output is current.
+            let frame_bg = if self.spin_trail_current_is_a {
+                &self.frame_bind_group  // reads spin_view_a
+            } else {
+                &self.frame_bg_spin_b   // reads spin_view_b
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Frame pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -4260,7 +4623,7 @@ impl GpuState {
                 occlusion_query_set: None, timestamp_writes: None,
             });
             pass.set_pipeline(&self.frame_pipeline);
-            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_bind_group(0, frame_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -4901,6 +5264,62 @@ impl GpuState {
                 rng: rand::rngs::StdRng::seed_from_u64(0x600D_5EED_0000_0000),
             });
         }
+
+        // Allocate persistent spin+trail FBOs for export at export resolution.
+        {
+            let (tex_a, view_a) = Self::create_spin_fbo(&self.device, off_w, off_h);
+            let (tex_b, view_b) = Self::create_spin_fbo(&self.device, off_w, off_h);
+            // For export, kaleido input comes from exp_kaleido_view created per-frame;
+            // we reuse the live kaleido_view placeholder in the BG here (it will be
+            // replaced by a freshly-created bind group each export frame that references
+            // the per-frame exp_kaleido_view).  Store just A/B textures + frame BGs.
+            let bg_read_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export SpinTrail BG read-A"),
+                layout: &self.spin_trail_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.spin_trail_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.kaleido_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let bg_read_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export SpinTrail BG read-B"),
+                layout: &self.spin_trail_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.spin_trail_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.kaleido_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let frame_bg_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export SpinTrail frame-A"),
+                layout: &self.frame_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.frame_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let frame_bg_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export SpinTrail frame-B"),
+                layout: &self.frame_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.frame_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            self.export_spin = Some(ExportSpinState {
+                tex_a, view_a, tex_b, view_b,
+                bg_read_a, bg_read_b, frame_bg_a, frame_bg_b,
+                current_is_a: false,
+                spin_angle: 0.0,
+            });
+        }
         Ok(())
     }
 
@@ -5431,7 +5850,71 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 4: frame overlay → offline target
+        // Pass 3.5: spin & trails → export spin output (ping-pong)
+        let exp_spin_frame_bg = if let Some(es) = self.export_spin.as_mut() {
+            // Integrate spin angle (deterministic: dt = 1/fps).
+            let base_speed = self.params.spin_speed * std::f32::consts::TAU;
+            let audio_boost = if self.params.spin_audio_react {
+                // Use export bands[0] as bass proxy.
+                let eb = self.export_state.as_ref().map(|e| e.export_bands_smoothed[0]).unwrap_or(0.0);
+                eb * 0.5
+            } else {
+                0.0
+            };
+            es.spin_angle = (es.spin_angle + base_speed * (1.0 + audio_boost) * dt)
+                .rem_euclid(std::f32::consts::TAU);
+
+            let eff_angle = if self.params.spin_enabled { es.spin_angle } else { 0.0 };
+            let eff_decay = if self.params.spin_enabled { self.params.trail_decay.min(0.98) } else { 0.0 };
+            self.queue.write_buffer(&self.spin_trail_uniforms_buffer, 0,
+                bytemuck::cast_slice(&[SpinTrailUniforms {
+                    resolution_x: off_w as f32, resolution_y: off_h as f32,
+                    spin_angle: eff_angle, trail_decay: eff_decay,
+                }]));
+
+            let (history_view, write_view) = if es.current_is_a {
+                (&es.view_a, &es.view_b)  // read A, write B
+            } else {
+                (&es.view_b, &es.view_a)  // read B, write A
+            };
+            // Create fresh per-frame BG with the actual exp_kaleido_view.
+            let exp_spin_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export SpinTrail BG"),
+                layout: &self.spin_trail_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.spin_trail_uniforms_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&exp_kaleido_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(history_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Export SpinTrail pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: write_view, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.spin_trail_pipeline);
+                pass.set_bind_group(0, &exp_spin_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            // Flip: the buffer we just wrote is now "current".
+            es.current_is_a = !es.current_is_a;
+            // Return the frame BG for the newly written buffer.
+            if es.current_is_a { &es.frame_bg_a } else { &es.frame_bg_b }
+        } else {
+            &exp_frame_bg
+        };
+
+        // Pass 4: frame overlay → offline target (reads spin output)
         {
             let offline_view = &self.offline_target.as_ref().unwrap().view;
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -5447,7 +5930,7 @@ impl GpuState {
                 occlusion_query_set: None, timestamp_writes: None,
             });
             pass.set_pipeline(&self.frame_pipeline);
-            pass.set_bind_group(0, &exp_frame_bg, &[]);
+            pass.set_bind_group(0, exp_spin_frame_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -6421,6 +6904,16 @@ impl ApplicationHandler for App {
                     KeyCode::KeyK => {
                         log::info!("phase lock: LOCKED (skipping toggle)");
                     }
+                    KeyCode::KeyC => {
+                        gpu.params.pitch_to_hue = !gpu.params.pitch_to_hue;
+                        log::info!(
+                            "pitch_to_hue: {} (key={}{} conf={:.2})",
+                            if gpu.params.pitch_to_hue { "ON" } else { "OFF" },
+                            pitch::pitch_class_name(gpu.shader_key_root),
+                            if gpu.shader_key_is_major { " major" } else { " minor" },
+                            gpu.shader_key_confidence,
+                        );
+                    }
                     KeyCode::KeyP => {
                         gpu.params.painter_kind = gpu.params.painter_kind.next();
                         log::info!("painter: {}", gpu.params.painter_kind.name());
@@ -6631,11 +7124,18 @@ impl ApplicationHandler for App {
                                 s.current_bpm,
                                 s.beat_phase,
                                 s.bpm_confidence,
+                                s.chroma_peak,
+                                s.key_root,
+                                s.key_is_major,
+                                s.key_confidence,
                             )
                         });
                         let (bands, bd, bd_low, bd_mid, bd_high, bd_broad,
-                             bpm, phase, conf) = snapshot.unwrap_or((
+                             bpm, phase, conf,
+                             chroma_peak, key_root, key_is_major, key_confidence)
+                            = snapshot.unwrap_or((
                             [0.0; 8], 0.0, 0.0, 0.0, 0.0, 0.0, None, 0.0, 0.0,
+                            0.0, 0, true, 0.0,
                         ));
                         gpu.shader_beat_decay           = bd;
                         gpu.shader_beat_decay_low       = bd_low;
@@ -6645,6 +7145,10 @@ impl ApplicationHandler for App {
                         gpu.shader_bpm                  = bpm;
                         gpu.shader_beat_phase           = phase;
                         gpu.shader_bpm_confidence       = conf;
+                        gpu.shader_chroma_peak          = chroma_peak;
+                        gpu.shader_key_root             = key_root;
+                        gpu.shader_key_is_major         = key_is_major;
+                        gpu.shader_key_confidence       = key_confidence;
                         bands
                     }
                 };
@@ -6657,6 +7161,53 @@ impl ApplicationHandler for App {
 
                 gpu.update_bass_zoom(raw_bands[0]);
                 gpu.update_modes(raw_bands[0], raw_bands[3], None);
+
+                // ── Pitch layer consumers (Slice 25, live Mic/Loopback only) ──────
+                if matches!(mode, AudioSourceMode::Mic | AudioSourceMode::Loopback) {
+                    // chroma_peak → colorize_hue: maps dominant pitch class (0..12)
+                    // to a hue (0°..360°) whenever pitch_to_hue is enabled.
+                    if gpu.params.pitch_to_hue {
+                        let new_hue = gpu.shader_chroma_peak * 360.0;
+                        if (new_hue - gpu.params.colorize_hue).abs() > 5.0 {
+                            log::debug!(
+                                "pitch_to_hue: colorize_hue {:.0}°→{:.0}°  (peak={:.2} key={}{})",
+                                gpu.params.colorize_hue, new_hue, gpu.shader_chroma_peak,
+                                pitch::pitch_class_name(gpu.shader_key_root),
+                                if gpu.shader_key_is_major { " maj" } else { " min" },
+                            );
+                        }
+                        gpu.params.colorize_hue = new_hue;
+                    }
+
+                    // Key-change → Party Mode trigger: fires randomize_all_params()
+                    // when the detected key changes and confidence is sufficient.
+                    // Gated by a 2 s cooldown and the last_key_root sentinel (255 =
+                    // "no key seen yet") to suppress the spurious first-frame change.
+                    let key_changed = gpu.shader_key_root != gpu.last_key_root
+                        || gpu.shader_key_is_major != gpu.last_key_is_major;
+                    let first_key = gpu.last_key_root == 255;
+                    gpu.last_key_root     = gpu.shader_key_root;
+                    gpu.last_key_is_major = gpu.shader_key_is_major;
+
+                    if key_changed
+                        && !first_key
+                        && gpu.shader_key_confidence > 0.5
+                        && gpu.params.party_mode_enabled
+                    {
+                        let now = Instant::now();
+                        if now.duration_since(gpu.last_key_party_trigger).as_secs_f32() >= 2.0 {
+                            gpu.randomize_all_params();
+                            gpu.last_key_party_trigger = now;
+                            log::info!(
+                                "Party Mode: key change → {} {} (conf={:.2})",
+                                pitch::pitch_class_name(gpu.shader_key_root),
+                                if gpu.shader_key_is_major { "major" } else { "minor" },
+                                gpu.shader_key_confidence,
+                            );
+                        }
+                    }
+
+                }
 
                 // Update player info displayed in the panel
                 let player_info = if let (Some(player), Some(audio)) =
@@ -7224,6 +7775,11 @@ mod tests {
             bezold_enabled:  true,
             bezold_strength: 0.65,
             bezold_radius:   4.0,
+            spin_enabled:     true,
+            spin_speed:       0.5,
+            spin_audio_react: true,
+            trail_decay:      0.7,
+            pitch_to_hue:     true,
         }
     }
 
@@ -7319,6 +7875,11 @@ mod tests {
         assert_eq!(restored.bezold_enabled,  original.bezold_enabled,  "bezold_enabled failed");
         assert_eq!(restored.bezold_strength, original.bezold_strength, "bezold_strength failed");
         assert_eq!(restored.bezold_radius,   original.bezold_radius,   "bezold_radius failed");
+        assert_eq!(restored.spin_enabled,     original.spin_enabled,     "spin_enabled failed");
+        assert_eq!(restored.spin_speed,       original.spin_speed,       "spin_speed failed");
+        assert_eq!(restored.spin_audio_react, original.spin_audio_react, "spin_audio_react failed");
+        assert_eq!(restored.trail_decay,      original.trail_decay,      "trail_decay failed");
+        assert_eq!(restored.pitch_to_hue,     original.pitch_to_hue,     "pitch_to_hue failed");
     }
 
     #[test]

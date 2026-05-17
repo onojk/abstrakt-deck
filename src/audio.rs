@@ -7,6 +7,8 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use realfft::RealFftPlanner;
 
+use crate::pitch;
+
 /// User-selectable routing target for per-band beat envelopes.
 /// Superset of BeatBand: adds Combined (legacy max behavior) and Off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -205,6 +207,12 @@ pub struct AudioState {
     pub current_bpm:          Option<f32>,
     pub beat_phase:           f32,
     pub bpm_confidence:       f32,
+    // Pitch layer (Slice 25)
+    pub chroma:         [f32; 12],  // normalized per-chunk chromagram
+    pub chroma_peak:    f32,        // index of strongest bin / 12.0 → hue [0..1)
+    pub key_root:       u8,         // 0=C … 11=B
+    pub key_is_major:   bool,
+    pub key_confidence: f32,        // Pearson r of best K-S match
 }
 
 /// Tracks tempo via autocorrelation of broadband flux history, then maintains
@@ -752,6 +760,7 @@ struct BeatAnalyzer {
     agc_logged:         bool,
     noise_filter:       NoiseFilter,
     tempo_tracker:      TempoTracker,
+    key_tracker:        pitch::KeyTracker,
 }
 
 impl BeatAnalyzer {
@@ -783,6 +792,7 @@ impl BeatAnalyzer {
             agc_logged: false,
             noise_filter: NoiseFilter::new(sample_rate, noise_filter_enabled),
             tempo_tracker: TempoTracker::new(fft_size as f32 / sample_rate as f32),
+            key_tracker: pitch::KeyTracker::new(fft_size as f32 / sample_rate as f32),
         }
     }
 
@@ -845,6 +855,10 @@ impl BeatAnalyzer {
         }
 
         let magnitudes = spectral_magnitudes(&spectrum);
+
+        // Chromagram + key detection (Slice 25).
+        let raw_chroma = pitch::chromagram(&magnitudes, self.sample_rate, self.fft_size);
+        self.key_tracker.process_chunk(raw_chroma);
 
         // Per-band spectral flux: split by frequency range.
         let bin_hz  = self.sample_rate as f32 / self.fft_size as f32;
@@ -913,6 +927,11 @@ impl BeatAnalyzer {
             s.current_bpm          = self.tempo_tracker.bpm();
             s.beat_phase           = self.tempo_tracker.phase();
             s.bpm_confidence       = self.tempo_tracker.confidence();
+            s.chroma               = *self.key_tracker.chroma();
+            s.chroma_peak          = self.key_tracker.chroma_peak();
+            s.key_root             = self.key_tracker.key_root();
+            s.key_is_major         = self.key_tracker.key_is_major();
+            s.key_confidence       = self.key_tracker.key_confidence();
         }
 
         // Push flux values to per-band histories.
@@ -995,13 +1014,20 @@ pub fn compute_band_energies(mono: &[f32], sample_rate: u32) -> [f32; 8] {
 }
 
 /// Per-export-frame analyzer: stateful spectral-flux beat detection + envelope-based beat decay.
+/// Pitch fields (chroma_peak, key_root, key_is_major, key_confidence) are updated every frame
+/// after `analyze_frame` returns — read them directly from the struct after the call.
 pub struct OfflineAnalyzer {
     planner: RealFftPlanner<f32>,
     prev_spectrum: Vec<f32>,
     flux_history: VecDeque<f32>,
     cooldown_frames: u32,
-    pub beat_decay: f32,
-    envelope: BeatEnvelope,
+    pub beat_decay:     f32,
+    envelope:           BeatEnvelope,
+    key_tracker:        pitch::KeyTracker,
+    pub chroma_peak:    f32,
+    pub key_root:       u8,
+    pub key_is_major:   bool,
+    pub key_confidence: f32,
 }
 
 impl OfflineAnalyzer {
@@ -1014,8 +1040,13 @@ impl OfflineAnalyzer {
             prev_spectrum: vec![0.0; Self::FFT_SIZE / 2 + 1],
             flux_history: VecDeque::with_capacity(Self::FLUX_HISTORY_SIZE + 1),
             cooldown_frames: 0,
-            beat_decay: 0.0,
-            envelope: BeatEnvelope::new(),
+            beat_decay:     0.0,
+            envelope:       BeatEnvelope::new(),
+            key_tracker:    pitch::KeyTracker::new(Self::FFT_SIZE as f32 / 48000.0),
+            chroma_peak:    0.0,
+            key_root:       0,
+            key_is_major:   true,
+            key_confidence: 0.0,
         }
     }
 
@@ -1048,6 +1079,14 @@ impl OfflineAnalyzer {
 
         let magnitudes = spectral_magnitudes(&spectrum);
         let bands = bands_from_magnitudes(&magnitudes, sample_rate, Self::FFT_SIZE);
+
+        // Pitch layer: chromagram → key estimation.
+        let raw_chroma = pitch::chromagram(&magnitudes, sample_rate, Self::FFT_SIZE);
+        self.key_tracker.process_chunk(raw_chroma);
+        self.chroma_peak    = self.key_tracker.chroma_peak();
+        self.key_root       = self.key_tracker.key_root();
+        self.key_is_major   = self.key_tracker.key_is_major();
+        self.key_confidence = self.key_tracker.key_confidence();
 
         let n = self.prev_spectrum.len().min(magnitudes.len());
         let flux: f32 = magnitudes[..n]
