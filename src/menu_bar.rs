@@ -34,6 +34,7 @@ pub enum LockTarget {
     AudioRouteShape,
     AudioRouteKaleido,
     AudioRouteShake,
+    AudioRoutePainter,
     PhaseLockEnabled,
     PhaseLockKaleido,
     PhaseLockShape,
@@ -119,6 +120,7 @@ pub enum ParamChange {
     AudioRouteShape(crate::audio::BeatRoute),
     AudioRouteKaleido(crate::audio::BeatRoute),
     AudioRouteShake(crate::audio::BeatRoute),
+    AudioRoutePainter(crate::audio::BeatRoute),
     PhaseLockEnabled(bool),
     PhaseLockKaleido(bool),
     PhaseLockShape(bool),
@@ -1064,6 +1066,24 @@ impl MenuBar {
                                 for r in route_options {
                                     if ui.selectable_label(current == r, r.name()).clicked() {
                                         changes.push(ParamChange::AudioRouteShake(r));
+                                    }
+                                }
+                            });
+                    });
+                });
+                ui.horizontal(|ui| {
+                    if Self::lock_button(ui, params.locks.audio_route_painter).clicked() {
+                        changes.push(ParamChange::ToggleLock(LockTarget::AudioRoutePainter));
+                    }
+                    ui.add_enabled_ui(!params.locks.audio_route_painter, |ui| {
+                        ui.label("Painter");
+                        let current = params.audio_route_painter;
+                        egui::ComboBox::from_id_salt("audio_route_painter_combo")
+                            .selected_text(current.name())
+                            .show_ui(ui, |ui| {
+                                for r in route_options {
+                                    if ui.selectable_label(current == r, r.name()).clicked() {
+                                        changes.push(ParamChange::AudioRoutePainter(r));
                                     }
                                 }
                             });

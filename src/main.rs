@@ -335,6 +335,7 @@ pub struct ParamLocks {
     pub audio_route_shape:    bool,
     pub audio_route_kaleido:  bool,
     pub audio_route_shake:    bool,
+    pub audio_route_painter:  bool,
     // Phase Lock
     pub phase_lock_enabled:     bool,
     pub phase_lock_kaleido:     bool,
@@ -465,6 +466,7 @@ pub struct VisualParams {
     pub audio_route_shape:   audio::BeatRoute,
     pub audio_route_kaleido: audio::BeatRoute,
     pub audio_route_shake:   audio::BeatRoute,
+    pub audio_route_painter: audio::BeatRoute,
     pub phase_lock_enabled:      bool,
     pub phase_lock_kaleido:      bool,
     pub phase_lock_shape:        bool,
@@ -561,6 +563,7 @@ impl Default for VisualParams {
             audio_route_shape:   audio::BeatRoute::Combined,
             audio_route_kaleido: audio::BeatRoute::Combined,
             audio_route_shake:   audio::BeatRoute::Combined,
+            audio_route_painter: audio::BeatRoute::Combined,
             phase_lock_enabled:     false,
             phase_lock_kaleido:     true,
             phase_lock_shape:       true,
@@ -676,6 +679,8 @@ struct Preset {
     audio_route_kaleido: audio::BeatRoute,
     #[serde(default = "default_audio_route_shake")]
     audio_route_shake:   audio::BeatRoute,
+    #[serde(default = "default_audio_route_painter")]
+    audio_route_painter: audio::BeatRoute,
     #[serde(default = "default_phase_lock_enabled")]
     phase_lock_enabled:     bool,
     #[serde(default = "default_phase_lock_kaleido")]
@@ -820,6 +825,7 @@ fn default_color_harmony_strength() -> f32                { 0.5 }
 fn default_audio_route_shape()   -> audio::BeatRoute { audio::BeatRoute::Combined }
 fn default_audio_route_kaleido() -> audio::BeatRoute { audio::BeatRoute::Combined }
 fn default_audio_route_shake()   -> audio::BeatRoute { audio::BeatRoute::Combined }
+fn default_audio_route_painter() -> audio::BeatRoute { audio::BeatRoute::Combined }
 fn default_phase_lock_enabled()     -> bool { false }
 fn default_phase_lock_kaleido()     -> bool { true  }
 fn default_phase_lock_shape()       -> bool { true  }
@@ -856,6 +862,7 @@ impl Preset {
             audio_route_shape:   params.audio_route_shape,
             audio_route_kaleido: params.audio_route_kaleido,
             audio_route_shake:   params.audio_route_shake,
+            audio_route_painter: params.audio_route_painter,
             phase_lock_enabled:     params.phase_lock_enabled,
             phase_lock_kaleido:     params.phase_lock_kaleido,
             phase_lock_shape:       params.phase_lock_shape,
@@ -956,6 +963,7 @@ impl Preset {
         params.audio_route_shape   = self.audio_route_shape;
         params.audio_route_kaleido = self.audio_route_kaleido;
         params.audio_route_shake   = self.audio_route_shake;
+        params.audio_route_painter = self.audio_route_painter;
         params.phase_lock_enabled     = self.phase_lock_enabled;
         params.phase_lock_kaleido     = self.phase_lock_kaleido;
         params.phase_lock_shape       = self.phase_lock_shape;
@@ -3933,12 +3941,13 @@ impl GpuState {
             });
 
         let beat_r = self.params.beat_reactivity * 4.0;
+        let painter_beat = self.resolve_route(self.params.audio_route_painter);
         self.queue.write_buffer(&self.painter_audio_buffer, 0,
             bytemuck::cast_slice(&[PainterAudioUniforms {
                 time_seconds: shader_time,
                 bass:         self.bands_smoothed[0],
                 mid:          self.bands_smoothed[3],
-                beat_decay:   (self.resolve_route(self.params.audio_route_shape) * beat_r).min(1.0),
+                beat_decay:   (painter_beat * beat_r).min(1.0),
                 bands:        self.bands_smoothed,
             }]));
 
@@ -5127,12 +5136,13 @@ impl GpuState {
             let eb = exp.export_bands_smoothed;
             let bd = exp.offline_analyzer.beat_decay;
             let beat_r = self.params.beat_reactivity * 4.0;
+            let painter_beat = bd; // export uses combined beat_decay; per-band routing is live-only
             self.queue.write_buffer(&self.painter_audio_buffer, 0,
                 bytemuck::cast_slice(&[PainterAudioUniforms {
                     time_seconds: shader_time,
                     bass:         eb[0],
                     mid:          eb[3],
-                    beat_decay:   (bd * beat_r).min(1.0),
+                    beat_decay:   (painter_beat * beat_r).min(1.0),
                     bands:        eb,
                 }]));
         }
@@ -5748,6 +5758,20 @@ impl GpuState {
                 audio::BeatRoute::Low
             } else {
                 audio::BeatRoute::Mid
+            };
+        }
+        if !self.params.locks.audio_route_painter {
+            let roll: f32 = rng.gen();
+            self.params.audio_route_painter = if roll < 0.60 {
+                audio::BeatRoute::Combined
+            } else if roll < 0.78 {
+                audio::BeatRoute::Low
+            } else if roll < 0.88 {
+                audio::BeatRoute::Mid
+            } else if roll < 0.97 {
+                audio::BeatRoute::High
+            } else {
+                audio::BeatRoute::Broadband
             };
         }
         if !self.params.locks.ribbons_enabled      { self.params.ribbons_enabled      = rng.gen_bool(0.5); }
@@ -6796,6 +6820,7 @@ impl ApplicationHandler for App {
                         ParamChange::AudioRouteShape(v)      => gpu.params.audio_route_shape   = v,
                         ParamChange::AudioRouteKaleido(v)    => gpu.params.audio_route_kaleido = v,
                         ParamChange::AudioRouteShake(v)      => gpu.params.audio_route_shake   = v,
+                        ParamChange::AudioRoutePainter(v)    => gpu.params.audio_route_painter = v,
                         ParamChange::PhaseLockEnabled(v)     => gpu.params.phase_lock_enabled     = v,
                         ParamChange::PhaseLockKaleido(v)     => gpu.params.phase_lock_kaleido     = v,
                         ParamChange::PhaseLockShape(v)       => gpu.params.phase_lock_shape       = v,
@@ -6879,6 +6904,7 @@ impl ApplicationHandler for App {
                                 LockTarget::AudioRouteShape    => gpu.params.locks.audio_route_shape    = !gpu.params.locks.audio_route_shape,
                                 LockTarget::AudioRouteKaleido  => gpu.params.locks.audio_route_kaleido  = !gpu.params.locks.audio_route_kaleido,
                                 LockTarget::AudioRouteShake    => gpu.params.locks.audio_route_shake    = !gpu.params.locks.audio_route_shake,
+                                LockTarget::AudioRoutePainter  => gpu.params.locks.audio_route_painter  = !gpu.params.locks.audio_route_painter,
                                 LockTarget::PhaseLockEnabled     => gpu.params.locks.phase_lock_enabled     = !gpu.params.locks.phase_lock_enabled,
                                 LockTarget::PhaseLockKaleido     => gpu.params.locks.phase_lock_kaleido     = !gpu.params.locks.phase_lock_kaleido,
                                 LockTarget::PhaseLockShape       => gpu.params.locks.phase_lock_shape       = !gpu.params.locks.phase_lock_shape,
@@ -7128,6 +7154,7 @@ mod tests {
             audio_route_shape:   audio::BeatRoute::Low,
             audio_route_kaleido: audio::BeatRoute::High,
             audio_route_shake:   audio::BeatRoute::Mid,
+            audio_route_painter: audio::BeatRoute::High,
             phase_lock_enabled:     true,
             phase_lock_kaleido:     false,
             phase_lock_shape:       true,
@@ -7225,6 +7252,7 @@ mod tests {
         assert_eq!(restored.audio_route_shape,   original.audio_route_shape,   "audio_route_shape failed");
         assert_eq!(restored.audio_route_kaleido, original.audio_route_kaleido, "audio_route_kaleido failed");
         assert_eq!(restored.audio_route_shake,   original.audio_route_shake,   "audio_route_shake failed");
+        assert_eq!(restored.audio_route_painter, original.audio_route_painter, "audio_route_painter failed");
         assert_eq!(restored.phase_lock_enabled,     original.phase_lock_enabled,     "phase_lock_enabled failed");
         assert_eq!(restored.phase_lock_kaleido,     original.phase_lock_kaleido,     "phase_lock_kaleido failed");
         assert_eq!(restored.phase_lock_shape,       original.phase_lock_shape,       "phase_lock_shape failed");
