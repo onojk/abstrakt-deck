@@ -230,7 +230,7 @@ impl PhantomAlpha {
         device: &wgpu::Device,
         scene_view: &wgpu::TextureView,
     ) {
-        if self.frame_counter % CAPTURE_STRIDE != 0 { return; }
+        if !self.frame_counter.is_multiple_of(CAPTURE_STRIDE) { return; }
 
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Phantom capture BG"),
@@ -325,7 +325,7 @@ impl PhantomAlpha {
     /// Advance ring-buffer state — call once per render loop, after queue.submit().
     pub fn advance_frame(&mut self) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        if self.frame_counter % CAPTURE_STRIDE == 0 {
+        if self.frame_counter.is_multiple_of(CAPTURE_STRIDE) {
             self.write_head = (self.write_head + 1) % RING_SIZE;
         }
     }

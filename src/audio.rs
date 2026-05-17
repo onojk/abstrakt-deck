@@ -9,18 +9,15 @@ use realfft::RealFftPlanner;
 
 /// User-selectable routing target for per-band beat envelopes.
 /// Superset of BeatBand: adds Combined (legacy max behavior) and Off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum BeatRoute {
+    #[default]
     Combined,
     Low,
     Mid,
     High,
     Broadband,
     Off,
-}
-
-impl Default for BeatRoute {
-    fn default() -> Self { BeatRoute::Combined }
 }
 
 impl BeatRoute {
@@ -379,7 +376,7 @@ impl BandFlux {
 
     pub fn reset(&mut self) { self.prev_total = 0.0; }
 
-    pub fn from_bands(&mut self, bands: &[f32; 8]) -> f32 {
+    pub fn compute(&mut self, bands: &[f32; 8]) -> f32 {
         let total: f32 = bands.iter().sum();
         let flux = (total - self.prev_total).max(0.0);
         self.prev_total = total;
@@ -509,8 +506,8 @@ impl NoiseFilter {
             return;
         }
 
-        for i in 0..8 {
-            let live = bands[i];
+        for (i, band) in bands.iter_mut().enumerate() {
+            let live = *band;
             // Update floor estimate
             let target = if !self.gate_open || live < self.band_floor[i] * 1.5 {
                 // Treat as noise — pull floor toward live energy.
@@ -527,8 +524,7 @@ impl NoiseFilter {
             self.band_floor[i] = self.band_floor[i] * (1.0 - rate) + target * rate;
 
             // Spectral subtraction.
-            let cleaned = (live - self.band_floor[i] * self.floor_margin).max(0.0);
-            bands[i] = cleaned;
+            *band = (live - self.band_floor[i] * self.floor_margin).max(0.0);
         }
     }
 
@@ -922,6 +918,7 @@ impl BeatAnalyzer {
         Self::detect_and_fire(flux_high, &self.flux_history_high, sz, 1.5, 0.20, &mut self.high_cooldown,      &mut self.high_envelope,      BeatBand::High,      event_tx);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn detect_and_fire(
         flux: f32,
         history: &VecDeque<f32>,
@@ -1271,7 +1268,7 @@ mod tests {
         let phase_before = t.phase();
         t.process_chunk(0.1);
         let phase_after = t.phase();
-        assert!(phase_after >= 0.0 && phase_after < 1.0);
+        assert!((0.0..1.0).contains(&phase_after));
         assert!(phase_after != phase_before
             || (phase_before > 0.99 && phase_after < 0.01),
             "phase should advance");
@@ -1309,9 +1306,9 @@ mod tests {
     fn band_flux_starts_at_zero() {
         let mut bf = BandFlux::new();
         let bands = [0.5_f32; 8];
-        let f1 = bf.from_bands(&bands);
+        let f1 = bf.compute(&bands);
         assert!((f1 - 4.0).abs() < 1e-4, "expected 4.0, got {}", f1);
-        let f2 = bf.from_bands(&bands);
+        let f2 = bf.compute(&bands);
         assert!(f2 < 1e-4, "same bands should give flux≈0, got {}", f2);
     }
 
@@ -1320,19 +1317,19 @@ mod tests {
         let mut bf = BandFlux::new();
         let high = [1.0_f32; 8];
         let low  = [0.1_f32; 8];
-        let _ = bf.from_bands(&high);
-        let drop = bf.from_bands(&low);
+        let _ = bf.compute(&high);
+        let drop = bf.compute(&low);
         assert_eq!(drop, 0.0, "flux should clamp negative changes to 0");
-        let rise = bf.from_bands(&high);
+        let rise = bf.compute(&high);
         assert!((rise - 7.2).abs() < 1e-3, "expected 7.2, got {}", rise);
     }
 
     #[test]
     fn band_flux_reset_clears_history() {
         let mut bf = BandFlux::new();
-        let _ = bf.from_bands(&[0.5; 8]);
+        let _ = bf.compute(&[0.5; 8]);
         bf.reset();
-        let f = bf.from_bands(&[0.3; 8]);
+        let f = bf.compute(&[0.3; 8]);
         assert!((f - 2.4).abs() < 1e-3, "expected 2.4 after reset, got {}", f);
     }
 }

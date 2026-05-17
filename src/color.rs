@@ -24,11 +24,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// Visual analogy: imagine the anchor as 12 o'clock on a clock face; each
 /// variant specifies which other clock positions the palette occupies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ColorHarmony {
     /// All colors share the anchor hue; variation comes from value/saturation only.
     Monochromatic,
     /// Anchor ± 30°. Adjacent on the wheel, "consonant" feel.
+    #[default]
     Analogous,
     /// Anchor + 180°. Maximum hue tension, "dissonant resolution" feel.
     Complementary,
@@ -38,12 +39,6 @@ pub enum ColorHarmony {
     Triadic,
     /// Anchor + 90° + 180° + 270°. Rectangular harmony, four colors.
     Tetradic,
-}
-
-impl Default for ColorHarmony {
-    fn default() -> Self {
-        ColorHarmony::Analogous
-    }
 }
 
 impl ColorHarmony {
@@ -228,9 +223,10 @@ pub fn random_color_tasteful<R: rand::Rng>(rng: &mut R) -> [f32; 3] {
 ///
 /// `Free` means no constraint — the saturation slider can be anywhere in
 /// [0, 1] and randomization picks across the full range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SaturationMode {
     /// No constraint — saturation can be anywhere in [0, 1]
+    #[default]
     Free,
     /// High saturation: vibrant, punchy, electric. Pop art / neon territory.
     Pure,
@@ -238,10 +234,6 @@ pub enum SaturationMode {
     Muted,
     /// Very low saturation but still hue-identified. Atmospheric, fog-like.
     ChromaticGray,
-}
-
-impl Default for SaturationMode {
-    fn default() -> Self { SaturationMode::Free }
 }
 
 impl SaturationMode {
@@ -288,9 +280,10 @@ impl SaturationMode {
 ///
 /// `Free` means no constraint — value can be anywhere in [0, 1] and
 /// randomization picks across the full range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ValueKey {
     /// No constraint — value can be anywhere in [0, 1]
+    #[default]
     Free,
     /// Light, airy, ethereal: most colors in the upper brightness range.
     High,
@@ -298,10 +291,6 @@ pub enum ValueKey {
     Mid,
     /// Moody, cinematic, dark with selective highlights.
     Low,
-}
-
-impl Default for ValueKey {
-    fn default() -> Self { ValueKey::Free }
 }
 
 impl ValueKey {
@@ -486,7 +475,7 @@ mod tests {
         for _ in 0..100 {
             let rgb = random_color_tasteful(&mut rng);
             for &c in &rgb {
-                assert!(c >= 0.0 && c <= 1.0, "channel {} out of range", c);
+                assert!((0.0..=1.0).contains(&c), "channel {} out of range", c);
             }
             let (_h, s, v) = rgb_to_hsv(rgb);
             assert!(s >= 0.5,  "tasteful color should be at least 0.5 saturated, got {}", s);

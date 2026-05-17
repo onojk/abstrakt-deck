@@ -6151,11 +6151,9 @@ impl ApplicationHandler for App {
                         gpu.params.frame_color_hue = (gpu.params.frame_color_hue + 30.0) % 360.0;
                         log::info!("frame_color_hue = {:.0}°", gpu.params.frame_color_hue);
                     }
-                    KeyCode::KeyG => {
-                        if !gpu.params.blackhole_enabled {
-                            gpu.params.phantom_enabled = !gpu.params.phantom_enabled;
-                            log::info!("Phantom Alpha: {}", gpu.params.phantom_enabled);
-                        }
+                    KeyCode::KeyG if !gpu.params.blackhole_enabled => {
+                        gpu.params.phantom_enabled = !gpu.params.phantom_enabled;
+                        log::info!("Phantom Alpha: {}", gpu.params.phantom_enabled);
                     }
                     KeyCode::KeyH => {
                         if !gpu.params.locks.color_harmony {
@@ -6256,11 +6254,12 @@ impl ApplicationHandler for App {
                         gpu.params.distortion_frequency = (gpu.params.distortion_frequency + 0.5).min(8.0);
                         log::info!("distortion_frequency = {:.1}", gpu.params.distortion_frequency);
                     }
+                    KeyCode::KeyK if !gpu.params.locks.phase_lock_enabled => {
+                        gpu.params.phase_lock_enabled = !gpu.params.phase_lock_enabled;
+                        log::info!("phase lock: {}", if gpu.params.phase_lock_enabled { "ON" } else { "OFF" });
+                    }
                     KeyCode::KeyK => {
-                        if !gpu.params.locks.phase_lock_enabled {
-                            gpu.params.phase_lock_enabled = !gpu.params.phase_lock_enabled;
-                            log::info!("phase lock: {}", if gpu.params.phase_lock_enabled { "ON" } else { "OFF" });
-                        }
+                        log::info!("phase lock: LOCKED (skipping toggle)");
                     }
                     KeyCode::KeyP => {
                         gpu.params.painter_kind = gpu.params.painter_kind.next();
@@ -6433,7 +6432,7 @@ impl ApplicationHandler for App {
                                 let tracker = gpu.file_tempo_tracker.get_or_insert_with(|| {
                                     audio::TempoTracker::new(frame_dt)
                                 });
-                                let flux = gpu.file_band_flux.from_bands(&bands);
+                                let flux = gpu.file_band_flux.compute(&bands);
                                 tracker.process_chunk(flux);
                                 // Nudge PLL on detected beat envelope peaks.
                                 if gpu.file_beat_envelope.value() > 0.85 {

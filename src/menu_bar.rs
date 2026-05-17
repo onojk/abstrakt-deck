@@ -1154,10 +1154,9 @@ impl MenuBar {
                 });
 
                 if params.phase_lock_enabled {
-                    if shader_bpm.is_some() {
+                    if let Some(bpm) = shader_bpm {
                         ui.label(egui::RichText::new(
-                            format!("● {:.1} BPM  conf {:.2}",
-                                shader_bpm.unwrap(), shader_bpm_confidence)
+                            format!("● {:.1} BPM  conf {:.2}", bpm, shader_bpm_confidence)
                         ).small());
                     } else {
                         ui.label(egui::RichText::new(
