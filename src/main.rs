@@ -974,6 +974,7 @@ impl Preset {
             "Icosahedron" => ShapeKind::Icosahedron,
             "Urchin"      => ShapeKind::Urchin,
             "Caltrop"     => ShapeKind::Caltrop,
+            "Myocyte"     => ShapeKind::Myocyte,
             _             => ShapeKind::Cylinder,
         };
         params.fold_count = self.fold_count;
@@ -4510,14 +4511,17 @@ impl GpuState {
                 }),
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            pass.set_pipeline(&self.shape_pipeline);
-            pass.set_bind_group(0, &self.transform_bind_group, &[]);
-            pass.set_bind_group(1, &self.shape_bind_group, &[]);
-            pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
-            let buffers = &self.shape_buffers[&self.params.current_shape];
-            pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
-            pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+            // Phase 1: Myocyte renders no shape geometry; future phases add cell-grid draws.
+            if self.params.current_shape != ShapeKind::Myocyte {
+                pass.set_pipeline(&self.shape_pipeline);
+                pass.set_bind_group(0, &self.transform_bind_group, &[]);
+                pass.set_bind_group(1, &self.shape_bind_group, &[]);
+                pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
+                let buffers = &self.shape_buffers[&self.params.current_shape];
+                pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+            }
         }
 
         // Pass 2.5: distortion plus (optional equirectangular rotation → dp FBO)
@@ -5790,14 +5794,17 @@ impl GpuState {
                 }),
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            pass.set_pipeline(&self.shape_pipeline);
-            pass.set_bind_group(0, &self.transform_bind_group, &[]);
-            pass.set_bind_group(1, &self.shape_bind_group, &[]);
-            pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
-            let bufs = &self.shape_buffers[&self.params.current_shape];
-            pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
-            pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+            // Phase 1: Myocyte renders no shape geometry; future phases add cell-grid draws.
+            if self.params.current_shape != ShapeKind::Myocyte {
+                pass.set_pipeline(&self.shape_pipeline);
+                pass.set_bind_group(0, &self.transform_bind_group, &[]);
+                pass.set_bind_group(1, &self.shape_bind_group, &[]);
+                pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
+                let bufs = &self.shape_buffers[&self.params.current_shape];
+                pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
+                pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+            }
         }
 
         // Pass 2.5: distortion plus → export-res dp view (optional)
@@ -7632,7 +7639,7 @@ fn main() {
     println!("  H      cycle color harmony (Mono/Analogous/Comp/Split/Triad/Tetra)");
     println!("  J      toggle applied harmony (recolor Skin/Image/PrintHead via Color Theory)");
     println!("  space  toggle MIDI shake");
-    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop)");
+    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop → Myocyte)");
     println!("  / '   bass-zoom intensity (0 to 1)");
     println!("  I      toggle color invert");
     println!("  T      toggle colorize tint");
@@ -7886,7 +7893,7 @@ mod tests {
     fn shape_kind_name_roundtrip() {
         for kind in [
             ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron,
-            ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop,
+            ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop, ShapeKind::Myocyte,
         ] {
             let name = kind.name();
             let parsed = match name {
@@ -7896,6 +7903,7 @@ mod tests {
                 "Icosahedron" => ShapeKind::Icosahedron,
                 "Urchin"      => ShapeKind::Urchin,
                 "Caltrop"     => ShapeKind::Caltrop,
+                "Myocyte"     => ShapeKind::Myocyte,
                 _             => ShapeKind::Cylinder,
             };
             assert_eq!(parsed, kind, "ShapeKind {:?} did not round-trip via name()", kind);
@@ -7928,7 +7936,7 @@ mod tests {
     fn rotation_axes_are_normalized() {
         for shape in [
             ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron,
-            ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop,
+            ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop, ShapeKind::Myocyte,
         ] {
             let [x, y, z] = shape.rotation_axis();
             let length_sq = x * x + y * y + z * z;

@@ -36,6 +36,7 @@ pub enum ShapeKind {
     Icosahedron,
     Urchin,
     Caltrop,
+    Myocyte,
 }
 
 impl ShapeKind {
@@ -47,7 +48,8 @@ impl ShapeKind {
             ShapeKind::Tetrahedron => ShapeKind::Icosahedron,
             ShapeKind::Icosahedron => ShapeKind::Urchin,
             ShapeKind::Urchin      => ShapeKind::Caltrop,
-            ShapeKind::Caltrop     => ShapeKind::Cylinder,
+            ShapeKind::Caltrop     => ShapeKind::Myocyte,
+            ShapeKind::Myocyte     => ShapeKind::Cylinder,
         }
     }
 
@@ -60,6 +62,7 @@ impl ShapeKind {
             ShapeKind::Icosahedron => "Icosahedron",
             ShapeKind::Urchin      => "Urchin",
             ShapeKind::Caltrop     => "Caltrop",
+            ShapeKind::Myocyte     => "Myocyte",
         }
     }
 
@@ -72,6 +75,7 @@ impl ShapeKind {
             ShapeKind::Icosahedron => 1.6,
             ShapeKind::Urchin      => 1.3,
             ShapeKind::Caltrop     => 1.2,
+            ShapeKind::Myocyte     => 1.0,
         }
     }
 
@@ -102,6 +106,7 @@ impl ShapeKind {
                 let n = 1.0_f32 / 3.0_f32.sqrt();
                 [n, n, n]
             }
+            ShapeKind::Myocyte => [0.0, 1.0, 0.0],
         }
     }
 
@@ -114,6 +119,7 @@ impl ShapeKind {
             ShapeKind::Icosahedron => 26.0,
             ShapeKind::Urchin      => 28.0,
             ShapeKind::Caltrop     => 20.0,
+            ShapeKind::Myocyte     => 30.0,
         }
     }
 
@@ -126,6 +132,7 @@ impl ShapeKind {
             ShapeKind::Icosahedron => 0.75,
             ShapeKind::Urchin      => 0.8,
             ShapeKind::Caltrop     => 0.55,
+            ShapeKind::Myocyte     => 1.0,
         }
     }
 }
