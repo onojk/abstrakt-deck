@@ -8,6 +8,7 @@ mod help_overlay;
 mod influencer;
 mod menu_bar;
 mod midi;
+mod myocyte_color;
 mod phantom;
 mod pitch;
 mod recorder;
@@ -4514,9 +4515,9 @@ impl GpuState {
                 self.myocyte_grid = Some(grid);
                 log::info!("[myocyte] allocated 16³ cell grid");
                 self.myocyte_influencer = Box::new(
-                    influencer::audio_cells::AudioCellsPlaceholder::new()
+                    influencer::audio_cells::AudioCells::new()
                 );
-                log::info!("[myocyte] AudioCellsPlaceholder active");
+                log::info!("[myocyte] AudioCells active");
             }
             if !self.myocyte_last_logged {
                 log::info!("[myocyte] mode active");
