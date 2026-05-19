@@ -5,6 +5,9 @@
 // CellGrid. Deck ships with NoOpInfluencer as a placeholder; phase 3+
 // will wire in GrayScott and Authored influencers.
 
+pub mod authored;
+pub mod gray_scott;
+
 use crate::cell::CellGrid;
 
 pub trait Influencer {

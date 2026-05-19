@@ -2036,7 +2036,8 @@ struct GpuState {
     // worth of memory when the user never visits this mode.
     myocyte_grid:        Option<cell::CellGrid>,
     myocyte_influencer:  Box<dyn influencer::Influencer>,
-    myocyte_last_logged: bool,   // for one-shot debug log; remove in phase 3
+    myocyte_last_logged: bool,
+    myocyte_debug_timer: f32,    // temporary, removed in phase 5
 }
 
 impl GpuState {
@@ -3768,6 +3769,7 @@ impl GpuState {
             myocyte_grid:        None,
             myocyte_influencer:  Box::new(influencer::NoOpInfluencer),
             myocyte_last_logged: false,
+            myocyte_debug_timer: 0.0,
         }
     }
 
@@ -4511,6 +4513,10 @@ impl GpuState {
                 grid::activate_varied_cells(&mut grid, 0.30);
                 self.myocyte_grid = Some(grid);
                 log::info!("[myocyte] allocated 16³ cell grid");
+                self.myocyte_influencer = Box::new(
+                    influencer::gray_scott::GrayScott::new([16, 16, 16])
+                );
+                log::info!("[myocyte] GrayScott influencer active");
             }
             if !self.myocyte_last_logged {
                 log::info!("[myocyte] mode active");
@@ -4518,6 +4524,18 @@ impl GpuState {
             }
             if let Some(grid) = self.myocyte_grid.as_mut() {
                 self.myocyte_influencer.step(grid, dt);
+            }
+            // TEMPORARY debug — remove in phase 5 when rendering proves cells evolve.
+            if let Some(grid) = self.myocyte_grid.as_ref() {
+                // Log cell [8,8,8] (grid center) once per second.
+                self.myocyte_debug_timer += dt;
+                if self.myocyte_debug_timer > 1.0 {
+                    self.myocyte_debug_timer = 0.0;
+                    let idx = grid.idx(8, 8, 8);
+                    let c = &grid.cells[idx];
+                    log::info!("[myocyte] center cell: opacity={:.3} color_inner=({:.2},{:.2},{:.2})",
+                        c.opacity, c.color_inner.x, c.color_inner.y, c.color_inner.z);
+                }
             }
         } else {
             self.myocyte_last_logged = false;
