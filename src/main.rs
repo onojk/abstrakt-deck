@@ -8,7 +8,11 @@ mod help_overlay;
 mod influencer;
 mod menu_bar;
 mod midi;
+mod myocyte_camera;
 mod myocyte_color;
+mod myocyte_preprocess;
+mod myocyte_render;
+mod myocyte_sort;
 mod phantom;
 mod pitch;
 mod recorder;
@@ -2039,6 +2043,7 @@ struct GpuState {
     myocyte_influencer:  Box<dyn influencer::Influencer>,
     myocyte_last_logged: bool,
     myocyte_debug_timer: f32,    // temporary, removed in phase 5
+    myocyte_renderer:    myocyte_render::MyocyteRenderer,
 }
 
 impl GpuState {
@@ -3668,6 +3673,10 @@ impl GpuState {
 
         let bezold = bezold::Bezold::new(&device, w, h, surface_format);
         let phantom = phantom::PhantomAlpha::new(&device, surface_format);
+        let myocyte_renderer = myocyte_render::MyocyteRenderer::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
 
         Self {
             surface, device, queue, config, size,
@@ -3771,6 +3780,7 @@ impl GpuState {
             myocyte_influencer:  Box::new(influencer::NoOpInfluencer),
             myocyte_last_logged: false,
             myocyte_debug_timer: 0.0,
+            myocyte_renderer,
         }
     }
 
@@ -3797,6 +3807,8 @@ impl GpuState {
         let (kc, kv) = Self::create_kaleido_fbo(&self.device, w, h);
         self.kaleido_texture = kc;
         self.kaleido_view = kv;
+
+        self.myocyte_renderer.resize(w, h);
 
         // DP FBO references shape_view → recreate.
         let (dpc, dpv) = Self::create_dp_fbo(&self.device, w, h);
@@ -4574,8 +4586,13 @@ impl GpuState {
                 }),
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            // Phase 1: Myocyte renders no shape geometry; future phases add cell-grid draws.
-            if self.params.current_shape != ShapeKind::Myocyte {
+            if self.params.current_shape == ShapeKind::Myocyte {
+                if let Some(grid) = self.myocyte_grid.as_ref() {
+                    let aspect = self.size.width as f32 / self.size.height as f32;
+                    self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                }
+                // No grid yet: tolerate as no-op (grid allocated in the per-frame block above).
+            } else {
                 pass.set_pipeline(&self.shape_pipeline);
                 pass.set_bind_group(0, &self.transform_bind_group, &[]);
                 pass.set_bind_group(1, &self.shape_bind_group, &[]);
@@ -5857,8 +5874,12 @@ impl GpuState {
                 }),
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            // Phase 1: Myocyte renders no shape geometry; future phases add cell-grid draws.
-            if self.params.current_shape != ShapeKind::Myocyte {
+            if self.params.current_shape == ShapeKind::Myocyte {
+                if let Some(grid) = self.myocyte_grid.as_ref() {
+                    let aspect = off_w as f32 / off_h as f32;
+                    self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                }
+            } else {
                 pass.set_pipeline(&self.shape_pipeline);
                 pass.set_bind_group(0, &self.transform_bind_group, &[]);
                 pass.set_bind_group(1, &self.shape_bind_group, &[]);
