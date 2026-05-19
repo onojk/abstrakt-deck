@@ -4518,8 +4518,9 @@ impl GpuState {
             );
         }
 
-        // Myocyte: lazy grid allocation + per-frame influencer step
+        // Myocyte: lazy grid allocation + per-frame camera rotation + influencer step
         if self.params.current_shape == ShapeKind::Myocyte {
+            self.myocyte_renderer.camera.tick_auto_rotation(dt);
             if self.myocyte_grid.is_none() {
                 let mut grid = cell::CellGrid::new([16, 16, 16], 1.0);
                 grid::place_cells(&mut grid);
