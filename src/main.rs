@@ -6248,14 +6248,15 @@ impl GpuState {
             };
         }
         if !self.params.locks.current_shape {
-            self.params.current_shape = match rng.gen_range(0u8..7) {
+            self.params.current_shape = match rng.gen_range(0u8..8) {
                 0 => ShapeKind::Cylinder,
                 1 => ShapeKind::Sphere,
                 2 => ShapeKind::Cube,
                 3 => ShapeKind::Tetrahedron,
                 4 => ShapeKind::Icosahedron,
                 5 => ShapeKind::Urchin,
-                _ => ShapeKind::Caltrop,
+                6 => ShapeKind::Caltrop,
+                _ => ShapeKind::Myocyte,
             };
         }
         if !self.params.locks.frame_shape {

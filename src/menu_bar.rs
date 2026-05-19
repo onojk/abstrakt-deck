@@ -594,6 +594,7 @@ impl MenuBar {
                                 crate::ShapeKind::Icosahedron,
                                 crate::ShapeKind::Urchin,
                                 crate::ShapeKind::Caltrop,
+                                crate::ShapeKind::Myocyte,
                             ] {
                                 ui.selectable_value(&mut shape, v, v.name());
                             }
