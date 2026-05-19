@@ -4514,16 +4514,27 @@ impl GpuState {
                 self.myocyte_grid = Some(grid);
                 log::info!("[myocyte] allocated 16³ cell grid");
                 self.myocyte_influencer = Box::new(
-                    influencer::gray_scott::GrayScott::new([16, 16, 16])
+                    influencer::audio_cells::AudioCellsPlaceholder::new()
                 );
-                log::info!("[myocyte] GrayScott influencer active");
+                log::info!("[myocyte] AudioCellsPlaceholder active");
             }
             if !self.myocyte_last_logged {
                 log::info!("[myocyte] mode active");
                 self.myocyte_last_logged = true;
             }
             if let Some(grid) = self.myocyte_grid.as_mut() {
-                self.myocyte_influencer.step(grid, dt);
+                let audio = influencer::AudioSnapshot {
+                    bands:                self.bands_smoothed,
+                    beat_decay_low:       self.shader_beat_decay_low,
+                    beat_decay_mid:       self.shader_beat_decay_mid,
+                    beat_decay_high:      self.shader_beat_decay_high,
+                    beat_decay_broadband: self.shader_beat_decay_broadband,
+                    beat_decay_max:       self.shader_beat_decay,
+                    beat_phase:           self.shader_beat_phase,
+                    bpm:                  self.shader_bpm,
+                    bpm_confidence:       self.shader_bpm_confidence,
+                };
+                self.myocyte_influencer.step_with_audio(grid, &audio, dt);
             }
             // TEMPORARY debug — remove in phase 5 when rendering proves cells evolve.
             if let Some(grid) = self.myocyte_grid.as_ref() {
