@@ -1,12 +1,15 @@
 mod audio;
 mod bezold;
 mod bundles;
-mod pitch;
+mod cell;
 mod color;
+mod grid;
 mod help_overlay;
+mod influencer;
 mod menu_bar;
 mod midi;
 mod phantom;
+mod pitch;
 mod recorder;
 mod shape;
 use audio::{AudioCapture, AudioEvent};
@@ -2027,6 +2030,13 @@ struct GpuState {
 
     pub params: VisualParams,
     last_bundle_applied: Option<bundles::BundleId>,
+
+    // Myocyte port: cell grid is allocated lazily when ShapeKind::Myocyte
+    // is first selected. None until then to avoid allocating ~4096 cells
+    // worth of memory when the user never visits this mode.
+    myocyte_grid:        Option<cell::CellGrid>,
+    myocyte_influencer:  Box<dyn influencer::Influencer>,
+    myocyte_last_logged: bool,   // for one-shot debug log; remove in phase 3
 }
 
 impl GpuState {
@@ -3755,6 +3765,9 @@ impl GpuState {
             last_audio_update:  Instant::now(),
             params: VisualParams::default(),
             last_bundle_applied: None,
+            myocyte_grid:        None,
+            myocyte_influencer:  Box::new(influencer::NoOpInfluencer),
+            myocyte_last_logged: false,
         }
     }
 
@@ -4488,6 +4501,26 @@ impl GpuState {
                     width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
                 },
             );
+        }
+
+        // Myocyte: lazy grid allocation + per-frame influencer step
+        if self.params.current_shape == ShapeKind::Myocyte {
+            if self.myocyte_grid.is_none() {
+                let mut grid = cell::CellGrid::new([16, 16, 16], 1.0);
+                grid::place_cells(&mut grid);
+                grid::activate_varied_cells(&mut grid, 0.30);
+                self.myocyte_grid = Some(grid);
+                log::info!("[myocyte] allocated 16³ cell grid");
+            }
+            if !self.myocyte_last_logged {
+                log::info!("[myocyte] mode active");
+                self.myocyte_last_logged = true;
+            }
+            if let Some(grid) = self.myocyte_grid.as_mut() {
+                self.myocyte_influencer.step(grid, dt);
+            }
+        } else {
+            self.myocyte_last_logged = false;
         }
 
         // Pass 2: shape → shape FBO
