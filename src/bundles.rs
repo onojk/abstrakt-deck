@@ -143,6 +143,10 @@ fn apply_defaults(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, bezold_enabled,           bezold_enabled,           def.bezold_enabled);
     set_if!(p, locks, bezold_strength,          bezold_strength,          def.bezold_strength);
     set_if!(p, locks, bezold_radius,            bezold_radius,            def.bezold_radius);
+    set_if!(p, locks, micro_swirl_enabled,      micro_swirl_enabled,      def.micro_swirl_enabled);
+    set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      def.micro_swirl_density);
+    set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    def.micro_swirl_amplitude);
+    set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        def.micro_swirl_speed);
     set_if!(p, locks, audio_route_shape,        audio_route_shape,        def.audio_route_shape);
     set_if!(p, locks, audio_route_kaleido,      audio_route_kaleido,      def.audio_route_kaleido);
     set_if!(p, locks, audio_route_shake,        audio_route_shake,        def.audio_route_shake);
@@ -199,6 +203,10 @@ fn apply_prism(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, bezold_enabled,           bezold_enabled,           true);
     set_if!(p, locks, bezold_strength,          bezold_strength,          0.65);
     set_if!(p, locks, bezold_radius,            bezold_radius,            3.0);
+    set_if!(p, locks, micro_swirl_enabled,      micro_swirl_enabled,      true);
+    set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      12.0);
+    set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    0.9);
+    set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.4);
 }
 
 fn apply_organic(p: &mut VisualParams, locks: &crate::ParamLocks) {
@@ -251,6 +259,10 @@ fn apply_neon(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, bezold_enabled,           bezold_enabled,           true);
     set_if!(p, locks, bezold_strength,          bezold_strength,          0.8);
     set_if!(p, locks, bezold_radius,            bezold_radius,            2.0);
+    set_if!(p, locks, micro_swirl_enabled,      micro_swirl_enabled,      true);
+    set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      8.0);
+    set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    1.0);
+    set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.5);
 }
 
 fn apply_frost(p: &mut VisualParams, locks: &crate::ParamLocks) {
@@ -360,6 +372,10 @@ fn apply_void(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, blackhole_wander_amount,  blackhole_wander_amount,  0.001);
     set_if!(p, locks, phantom_enabled,          phantom_enabled,          false);
     set_if!(p, locks, bezold_enabled,           bezold_enabled,           false);
+    set_if!(p, locks, micro_swirl_enabled,      micro_swirl_enabled,      true);
+    set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      14.0);
+    set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    0.7);
+    set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.25);
 }
 
 fn apply_carnival(p: &mut VisualParams, locks: &crate::ParamLocks) {
@@ -387,6 +403,10 @@ fn apply_carnival(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, bezold_enabled,           bezold_enabled,           true);
     set_if!(p, locks, bezold_strength,          bezold_strength,          0.5);
     set_if!(p, locks, bezold_radius,            bezold_radius,            3.0);
+    set_if!(p, locks, micro_swirl_enabled,      micro_swirl_enabled,      true);
+    set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      10.0);
+    set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    0.85);
+    set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.45);
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

@@ -6,8 +6,10 @@
 // will wire in GrayScott and Authored influencers.
 
 pub mod audio_cells;
+pub mod audio_wheel;
 pub mod authored;
 pub mod gray_scott;
+pub mod prime_activation;
 
 use crate::cell::CellGrid;
 
@@ -19,6 +21,7 @@ use crate::cell::CellGrid;
 /// Field choices match what GpuState already exposes at render time —
 /// no new analysis, just a structured view.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub struct AudioSnapshot {
     /// 8 exponentially-smoothed band energies.
     /// Index layout (Hz ranges per Task 0 findings):

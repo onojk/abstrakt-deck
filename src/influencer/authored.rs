@@ -1,4 +1,5 @@
 // Ported from myocyte. Authored shapes (Sphere, Shell, LetterA) that write cell state each frame to form fixed geometric shapes.
+#![allow(dead_code)]
 //
 // Unlike Gray-Scott, these shapes don't evolve — they're computed once on the
 // first step() call and then left alone. Serves as a proof of concept that the

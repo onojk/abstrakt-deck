@@ -42,6 +42,7 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
 /// Inverse of hsv_to_rgb. Inputs clamped to [0, 1].
 /// Returns `(hue_deg in [0, 360), saturation, value)`.
 /// Pure grays (saturation = 0) return hue = 0 by convention.
+#[allow(dead_code)]
 #[inline]
 pub fn rgb_to_hsv(rgb: [f32; 3]) -> (f32, f32, f32) {
     let r = rgb[0].clamp(0.0, 1.0);

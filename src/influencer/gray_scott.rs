@@ -1,4 +1,5 @@
 // Ported from myocyte. 3D Gray-Scott reaction-diffusion that writes cell colors and opacity each frame.
+#![allow(dead_code)]
 //
 // RD equations (Pearson spots/coral regime: f=0.035, k=0.065):
 //   dU/dt = Du·∇²U − U·V² + f·(1−U)

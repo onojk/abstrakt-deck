@@ -1,5 +1,6 @@
 // Continuous audio-reactive cell behavior driven by deck's 8-band
 // analysis and beat envelopes.
+#![allow(dead_code)]
 //
 // Design (phase 4b):
 //   - Each cell has a preferred band index, fixed at init. Y-slab

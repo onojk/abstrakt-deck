@@ -189,11 +189,12 @@ Plug in any USB MIDI controller, or use a virtual one like [VMPK](https://vmpk.s
 
 ## Architecture
 
-The render pipeline is five passes per frame:
+The render pipeline is six passes per frame:
 
 1. **Painter pass** — selected painter shader writes to a 4096×256 RGBA offscreen texture
-2. **Shape pass** — 3D mesh rendered with the painter texture wrapped on its surface, output to a screen-resolution shape FBO. Distortion, invert, colorize, contrast, and saturation effects apply here.
-3. **Kaleido pass** — fragment shader samples the shape FBO with polar-coordinate folding. Zoom is modulated by smoothed bass energy.
+2. **Shape pass** — 3D mesh rendered with the painter texture wrapped on its surface, output to a screen-resolution shape FBO. Only painter-UV scroll logic lives here.
+2b. **Shape effects pass** — fullscreen post-processing reads the shape FBO and writes to a shape-post FBO. Applies contrast, saturation, invert, colorize, and distortion. Runs for every shape including Myocyte.
+3. **Kaleido pass** — fragment shader samples the shape-post FBO with polar-coordinate folding. Zoom is modulated by smoothed bass energy.
 4. **Frame pass** — SDF-based frame mask composited over the kaleido FBO, writing to the scene texture.
 5. **Blit pass** — copies the scene texture to the swapchain. When recording is active, the scene texture is also copied to a CPU-readable buffer and piped to an `ffmpeg` subprocess as raw RGBA frames.
 

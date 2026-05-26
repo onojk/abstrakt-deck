@@ -1,12 +1,16 @@
 mod audio;
 mod bezold;
+mod micro_swirl;
+mod echo_composite;
 mod bundles;
 mod cell;
 mod color;
 mod grid;
 mod help_overlay;
 mod influencer;
+mod prime_helix;
 mod menu_bar;
+mod qbist;
 mod midi;
 mod myocyte_camera;
 mod myocyte_color;
@@ -31,7 +35,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use wgpu::util::DeviceExt;
@@ -41,9 +45,12 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const PAINTER_TEXTURE_WIDTH: u32  = 4096;
+const PAINTER_TEXTURE_WIDTH: u32  = 4096;  // standard; also fixed for ribbon FBOs
 const PAINTER_TEXTURE_HEIGHT: u32 = 256;
-const SKIN_MIP_LEVELS: u32        = 13; // ilog2(4096) + 1
+const PAINTER_HD_WIDTH: u32  = 8192;
+const PAINTER_HD_HEIGHT: u32 = 512;
+
+fn skin_mip_levels(w: u32) -> u32 { u32::BITS - w.leading_zeros() }
 const PAINTER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 const RIBBON_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
@@ -400,6 +407,11 @@ pub struct ParamLocks {
     pub bezold_enabled:        bool,
     pub bezold_strength:       bool,
     pub bezold_radius:         bool,
+    // Micro swirl distortion
+    pub micro_swirl_enabled:   bool,
+    pub micro_swirl_density:   bool,
+    pub micro_swirl_amplitude: bool,
+    pub micro_swirl_speed:     bool,
     // Spin & Trails
     pub spin_enabled:     bool,
     pub spin_speed:       bool,
@@ -523,6 +535,9 @@ pub struct VisualParams {
     pub export_resolution: ResolutionPreset,
     pub export_framerate:  FramerateChoice,
     pub export_live_preview: bool,
+    pub echo_mode_enabled:  bool,
+    pub echo_delay_white_s: f32,
+    pub echo_delay_color_s: f32,
     pub audio_source_mode: AudioSourceMode,
     pub palette_mode:     PaletteMode,
     pub palette_tint:     f32,
@@ -558,6 +573,11 @@ pub struct VisualParams {
     pub bezold_enabled:        bool,
     pub bezold_strength:       f32,
     pub bezold_radius:         f32,
+    // Micro swirl screen-space distortion
+    pub micro_swirl_enabled:   bool,
+    pub micro_swirl_density:   f32,
+    pub micro_swirl_amplitude: f32,
+    pub micro_swirl_speed:     f32,
     // Spin & Trails
     pub spin_enabled:     bool,
     pub spin_speed:       f32,   // revolutions per second, signed; -2.0..+2.0
@@ -565,6 +585,8 @@ pub struct VisualParams {
     pub trail_decay:      f32,   // 0.0 (no trail) .. 0.98 (long trail)
     // Pitch layer (Slice 25)
     pub pitch_to_hue: bool,  // drive colorize_hue from chroma_peak when true
+    // HD skin mode
+    pub hd_skin_enabled: bool,
 }
 
 impl Default for VisualParams {
@@ -618,6 +640,9 @@ impl Default for VisualParams {
             export_resolution: ResolutionPreset::HD720,
             export_framerate:  FramerateChoice::Fps60,
             export_live_preview: true,
+            echo_mode_enabled:  false,
+            echo_delay_white_s: 2.0,
+            echo_delay_color_s: 4.0,
             audio_source_mode: AudioSourceMode::File,
             palette_mode:     PaletteMode::Off,
             palette_tint:     1.0,
@@ -650,11 +675,16 @@ impl Default for VisualParams {
             bezold_enabled:        false,
             bezold_strength:       0.50,
             bezold_radius:         3.0,
+            micro_swirl_enabled:   false,
+            micro_swirl_density:   10.0,
+            micro_swirl_amplitude: 0.8,
+            micro_swirl_speed:     0.35,
             spin_enabled:     false,
             spin_speed:       0.0,
             spin_audio_react: false,
             trail_decay:      0.0,
             pitch_to_hue:     false,
+            hd_skin_enabled:  false,
         }
     }
 }
@@ -762,6 +792,12 @@ struct Preset {
     export_framerate: FramerateChoice,
     #[serde(default = "default_true")]
     export_live_preview: bool,
+    #[serde(default)]
+    echo_mode_enabled: bool,
+    #[serde(default = "default_echo_delay_white_s")]
+    echo_delay_white_s: f32,
+    #[serde(default = "default_echo_delay_color_s")]
+    echo_delay_color_s: f32,
     #[serde(default = "default_audio_source_mode")]
     audio_source_mode: String,
     #[serde(default = "default_palette_mode")]
@@ -801,6 +837,14 @@ struct Preset {
     #[serde(default = "default_bezold_radius")]
     bezold_radius: f32,
     #[serde(default)]
+    micro_swirl_enabled: bool,
+    #[serde(default = "default_micro_swirl_density")]
+    micro_swirl_density: f32,
+    #[serde(default = "default_micro_swirl_amplitude")]
+    micro_swirl_amplitude: f32,
+    #[serde(default = "default_micro_swirl_speed")]
+    micro_swirl_speed: f32,
+    #[serde(default)]
     spin_enabled: bool,
     #[serde(default = "default_spin_speed")]
     spin_speed: f32,
@@ -810,6 +854,8 @@ struct Preset {
     trail_decay: f32,
     #[serde(default)]
     pitch_to_hue: bool,
+    #[serde(default)]
+    hd_skin_enabled: bool,
     #[serde(default = "default_color_harmony")]
     color_harmony:    color::ColorHarmony,
     #[serde(default = "default_color_anchor_hue")]
@@ -858,12 +904,17 @@ fn default_phantom_key_strength()    -> f32  { 1.0 }
 fn default_phantom_opacity()         -> f32  { 0.85 }
 fn default_bezold_strength()         -> f32  { 0.50 }
 fn default_bezold_radius()           -> f32  { 3.0  }
+fn default_micro_swirl_density()     -> f32  { 10.0 }
+fn default_micro_swirl_amplitude()   -> f32  { 0.8  }
+fn default_micro_swirl_speed()       -> f32  { 0.35 }
 fn default_spin_speed()              -> f32  { 0.0  }
 fn default_trail_decay()             -> f32  { 0.0  }
 fn default_color_harmony()           -> color::ColorHarmony    { color::ColorHarmony::Analogous }
 fn default_color_anchor_hue()        -> f32                     { 210.0 }
 fn default_color_temperature_bias()  -> f32                     { 0.0 }
 fn default_color_temperature_audio() -> f32                     { 0.0 }
+fn default_echo_delay_white_s()      -> f32 { 2.0 }
+fn default_echo_delay_color_s()      -> f32 { 4.0 }
 fn default_color_saturation_mode()   -> color::SaturationMode   { color::SaturationMode::Free }
 fn default_color_saturation()        -> f32                     { 0.75 }
 fn default_color_value_key()         -> color::ValueKey          { color::ValueKey::Free }
@@ -934,6 +985,9 @@ impl Preset {
             export_resolution: params.export_resolution,
             export_framerate:  params.export_framerate,
             export_live_preview: params.export_live_preview,
+            echo_mode_enabled:  params.echo_mode_enabled,
+            echo_delay_white_s: params.echo_delay_white_s,
+            echo_delay_color_s: params.echo_delay_color_s,
             audio_source_mode: params.audio_source_mode.as_str().to_string(),
             palette_mode:     params.palette_mode.as_str().to_string(),
             palette_tint:     params.palette_tint,
@@ -953,11 +1007,16 @@ impl Preset {
             bezold_enabled:        params.bezold_enabled,
             bezold_strength:       params.bezold_strength,
             bezold_radius:         params.bezold_radius,
+            micro_swirl_enabled:   params.micro_swirl_enabled,
+            micro_swirl_density:   params.micro_swirl_density,
+            micro_swirl_amplitude: params.micro_swirl_amplitude,
+            micro_swirl_speed:     params.micro_swirl_speed,
             spin_enabled:     params.spin_enabled,
             spin_speed:       params.spin_speed,
             spin_audio_react: params.spin_audio_react,
             trail_decay:      params.trail_decay,
             pitch_to_hue:     params.pitch_to_hue,
+            hd_skin_enabled:  params.hd_skin_enabled,
             color_harmony:           params.color_harmony,
             color_anchor_hue:        params.color_anchor_hue,
             color_temperature_bias:  params.color_temperature_bias,
@@ -983,6 +1042,7 @@ impl Preset {
             "Urchin"      => ShapeKind::Urchin,
             "Caltrop"     => ShapeKind::Caltrop,
             "Myocyte"     => ShapeKind::Myocyte,
+            "PrimeHelix"  => ShapeKind::PrimeHelix,
             _             => ShapeKind::Cylinder,
         };
         params.fold_count = self.fold_count;
@@ -1049,6 +1109,9 @@ impl Preset {
         params.export_resolution  = self.export_resolution;
         params.export_framerate   = self.export_framerate;
         params.export_live_preview = self.export_live_preview;
+        params.echo_mode_enabled  = self.echo_mode_enabled;
+        params.echo_delay_white_s = self.echo_delay_white_s;
+        params.echo_delay_color_s = self.echo_delay_color_s;
         params.audio_source_mode = match self.audio_source_mode.as_str() {
             "Mic"      => AudioSourceMode::Mic,
             "Loopback" => AudioSourceMode::Loopback,
@@ -1081,11 +1144,16 @@ impl Preset {
         params.bezold_enabled        = self.bezold_enabled;
         params.bezold_strength       = self.bezold_strength;
         params.bezold_radius         = self.bezold_radius;
+        params.micro_swirl_enabled   = self.micro_swirl_enabled;
+        params.micro_swirl_density   = self.micro_swirl_density;
+        params.micro_swirl_amplitude = self.micro_swirl_amplitude;
+        params.micro_swirl_speed     = self.micro_swirl_speed;
         params.spin_enabled     = self.spin_enabled;
         params.spin_speed       = self.spin_speed;
         params.spin_audio_react = self.spin_audio_react;
         params.trail_decay      = self.trail_decay;
         params.pitch_to_hue     = self.pitch_to_hue;
+        params.hd_skin_enabled  = self.hd_skin_enabled;
         params.color_harmony            = self.color_harmony;
         params.color_anchor_hue         = self.color_anchor_hue;
         params.color_temperature_bias   = self.color_temperature_bias;
@@ -1234,7 +1302,35 @@ fn fs_main(in: Vary) -> @location(0) vec4<f32> {
 }
 
 fn decode_and_validate_skin(path: &std::path::Path) -> Result<image::DynamicImage, String> {
-    image::open(path).map_err(|e| e.to_string())
+    // Phase 1: read W×H from the file header only — no pixel allocation.
+    // Default limits have no width/height caps and don't call reserve(), so even a
+    // 20000×20000 source is safe to dimension-check here.
+    let (w, h) = image::ImageReader::open(path)
+        .map_err(|e| format!("cannot open skin: {e}"))?
+        .with_guessed_format()
+        .map_err(|e| format!("cannot read skin format: {e}"))?
+        .into_dimensions()
+        .map_err(|e| format!("cannot read skin dimensions: {e}"))?;
+
+    if w > 20000 || h > 20000 {
+        return Err(format!("skin too large: {w}×{h}, max 20000×20000"));
+    }
+
+    // Phase 2: decode pixels with an explicit 2 GiB allocation ceiling.
+    // The default is 512 MiB which would reject a 14000×14000 image (~784 MB decoded).
+    // 2 GiB covers the worst-case 20000×20000 RGBA buffer (~1.6 GB).
+    let mut limits = image::Limits::default();
+    limits.max_image_width  = Some(20000);
+    limits.max_image_height = Some(20000);
+    limits.max_alloc        = Some(2 * 1024 * 1024 * 1024);
+
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| format!("cannot open skin: {e}"))?
+        .with_guessed_format()
+        .map_err(|e| format!("cannot read skin format: {e}"))?;
+    reader.limits(limits);
+
+    reader.decode().map_err(|e| format!("cannot decode skin: {e}"))
 }
 
 pub struct LoadedAudio {
@@ -1539,7 +1635,15 @@ fn compute_file_energies(player: &AudioPlayer, audio: &LoadedAudio) -> ([f32; 8]
     (bands, rms)
 }
 
-fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32) -> Vec<u8> {
+fn painter_target_dims(params: &VisualParams) -> (u32, u32) {
+    if params.hd_skin_enabled {
+        (PAINTER_HD_WIDTH, PAINTER_HD_HEIGHT)
+    } else {
+        (PAINTER_TEXTURE_WIDTH, PAINTER_TEXTURE_HEIGHT)
+    }
+}
+
+fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32, target_w: u32, target_h: u32) -> Vec<u8> {
     use image::GenericImageView;
     let (src_w, src_h) = img.dimensions();
     let (crop_w, crop_h, crop_x, crop_y) = if src_w as f32 / src_h as f32 > 16.0 {
@@ -1557,8 +1661,8 @@ fn crop_skin_image(img: &image::DynamicImage, vertical_offset: f32) -> Vec<u8> {
     let rgba = cropped.to_rgba8();
     image::imageops::resize(
         &rgba,
-        PAINTER_TEXTURE_WIDTH,
-        PAINTER_TEXTURE_HEIGHT,
+        target_w,
+        target_h,
         image::imageops::FilterType::Lanczos3,
     ).into_raw()
 }
@@ -1568,6 +1672,36 @@ fn preset_path() -> Option<std::path::PathBuf> {
     path.push("abstrakt-deck");
     path.push("preset.json");
     Some(path)
+}
+
+/// Returns the directory where generated qbist skins are saved.
+/// Matches the abstrakt-deck config dir used for presets.
+fn qbist_skins_dir() -> Option<std::path::PathBuf> {
+    let mut p = dirs::config_dir()?;
+    p.push("abstrakt-deck");
+    p.push("skins");
+    Some(p)
+}
+
+/// Generate a qbist skin from `seed`, render at `width`×`height`, save as JPG.
+/// Returns the saved file path on success.
+fn generate_qbist_to_file(seed: u64, detail: f32, width: u32, height: u32) -> Result<std::path::PathBuf, String> {
+    log::info!("[qbist] thread started, rendering {width}x{height}, detail={detail:.2}");
+    let dir = qbist_skins_dir().ok_or("could not locate config dir")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir skins: {e}"))?;
+    let genome = qbist::QbistGenome::from_seed(seed, detail);
+    let rgba   = qbist::render_rgba(&genome, width, height);
+    // Convert to RGB — JPEG encoder requires RGB, not RGBA.
+    let rgb_img: image::RgbImage = image::DynamicImage::ImageRgba8(
+        image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or("qbist render dimensions mismatch")?
+    ).to_rgb8();
+    let detail_pct = (detail * 100.0).round() as u32;
+    let path = dir.join(format!("qbist_{seed:016x}_d{detail_pct:03}.jpg"));
+    rgb_img.save_with_format(&path, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("save JPG: {e}"))?;
+    log::info!("[qbist] wrote file: {}", path.display());
+    Ok(path)
 }
 
 fn save_preset(gpu: &GpuState) -> Result<(), String> {
@@ -1647,6 +1781,7 @@ pub struct FrameSaveJob {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportPhase {
     Rendering,
+    EchoComposite,
     Muxing,
     Complete,
     Failed,
@@ -1696,8 +1831,10 @@ struct ExportSpinState {
     #[allow(dead_code)]
     tex_b: wgpu::Texture,
     view_b: wgpu::TextureView,
-    bg_read_a: wgpu::BindGroup,  // history=A → write B
-    bg_read_b: wgpu::BindGroup,  // history=B → write A
+    // Pre-built BGs never used: export path builds fresh per-frame BGs because
+    // exp_kaleido_view (binding 1) varies each export. frame_bg_a/b ARE used.
+    #[allow(dead_code)] bg_read_a: wgpu::BindGroup,
+    #[allow(dead_code)] bg_read_b: wgpu::BindGroup,
     frame_bg_a: wgpu::BindGroup, // frame reads A
     frame_bg_b: wgpu::BindGroup, // frame reads B
     current_is_a: bool,
@@ -1711,8 +1848,13 @@ pub struct ExportState {
     pub output_dir: PathBuf,
     pub fps: u32,
     pub start_time: Instant,
+    /// Path of the audio file captured at export-start. Using a snapshot here
+    /// rather than reading loaded_audio at mux time prevents a stale-audio bug:
+    /// if the user loads a new song while frames are rendering, or if the load
+    /// silently fails, the mux always uses the audio that drove the frame renders.
+    pub audio_source_path: String,
     // Rendering phase: Some; set to None when transitioning to Muxing to signal worker
-    pub frame_save_sender: Option<Sender<FrameSaveJob>>,
+    pub frame_save_sender: Option<SyncSender<FrameSaveJob>>,
     pub frame_save_thread: Option<std::thread::JoinHandle<()>>,
     pub mux_thread: Option<std::thread::JoinHandle<MuxResult>>,
     // Smoothed audio energies — EMA prevents FFT window-shift jitter at 60fps
@@ -1723,10 +1865,15 @@ pub struct ExportState {
     pub export_random_elapsed:   f32,
     pub export_reactive_elapsed: f32,
     pub export_party_elapsed:    f32,
+    // Echo-mode state (None when echo mode is off)
+    pub renders_dir:       Option<PathBuf>,
+    pub composite_thread:  Option<std::thread::JoinHandle<Result<PathBuf, String>>>,
 }
 
-fn spawn_frame_save_worker() -> (Sender<FrameSaveJob>, std::thread::JoinHandle<()>) {
-    let (tx, rx) = std::sync::mpsc::channel::<FrameSaveJob>();
+fn spawn_frame_save_worker() -> (SyncSender<FrameSaveJob>, std::thread::JoinHandle<()>) {
+    // Bounded to 4 frames: backpressures the render loop so raw pixel buffers
+    // (~33 MB each at 4K) don't accumulate when PNG encoding falls behind.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<FrameSaveJob>(4);
     let handle = std::thread::spawn(move || {
         while let Ok(job) = rx.recv() {
             match image::RgbaImage::from_raw(job.width, job.height, job.rgba_bytes) {
@@ -1814,6 +1961,10 @@ struct GpuState {
     painter_view: wgpu::TextureView,
     #[allow(dead_code)]
     painter_sampler: wgpu::Sampler,
+    painter_w: u32,
+    painter_h: u32,
+    skin_mips: u32,
+    shape_painter_bgl: wgpu::BindGroupLayout,
 
     // Skin painter resources
     skin_tex: wgpu::Texture,
@@ -1857,7 +2008,15 @@ struct GpuState {
     shape_effects_buffer: wgpu::Buffer,
     shape_effects_bind_group: wgpu::BindGroup,
 
-    // Pass 2.5 — distortion plus (shape FBO → dp FBO, optional equirectangular rotation)
+    // Pass 2b — shape effects post-processing (shape FBO → shape_post FBO)
+    #[allow(dead_code)]
+    shape_post_texture: wgpu::Texture,
+    shape_post_view: wgpu::TextureView,
+    shape_effects_post_bgl: wgpu::BindGroupLayout,
+    shape_effects_post_bind_group: wgpu::BindGroup,
+    shape_effects_pipeline: wgpu::RenderPipeline,
+
+    // Pass 2.5 — distortion plus (shape_post FBO → dp FBO, optional equirectangular rotation)
     #[allow(dead_code)]
     distortion_plus_texture: wgpu::Texture,
     distortion_plus_view: wgpu::TextureView,
@@ -1972,6 +2131,9 @@ struct GpuState {
     // Bezold simultaneous-contrast post-process
     bezold: bezold::Bezold,
 
+    // Micro swirl screen-space distortion post-process
+    micro_swirl: micro_swirl::MicroSwirl,
+
     // Phantom Alpha: chroma-keyed delayed-frame overlay
     phantom: phantom::PhantomAlpha,
 
@@ -2044,6 +2206,10 @@ struct GpuState {
     myocyte_last_logged: bool,
     myocyte_debug_timer: f32,    // temporary, removed in phase 5
     myocyte_renderer:    myocyte_render::MyocyteRenderer,
+
+    // PrimeHelix: lazily allocated semiprime cylinder grid + beat-driven influencer.
+    prime_helix_grid:       Option<cell::CellGrid>,
+    prime_helix_influencer: Box<dyn influencer::Influencer>,
 }
 
 impl GpuState {
@@ -2365,12 +2531,14 @@ impl GpuState {
         let w = size.width.max(1);
         let h = size.height.max(1);
 
-        // ── Painter texture (fixed 4096×256, 16:1 strip to match abstrakt-engine) ──
+        // ── Painter texture (16:1 strip; standard = 4096×256, HD = 8192×512) ──
+        let painter_w = PAINTER_TEXTURE_WIDTH;
+        let painter_h = PAINTER_TEXTURE_HEIGHT;
         let painter_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Painter texture"),
             size: wgpu::Extent3d {
-                width: PAINTER_TEXTURE_WIDTH,
-                height: PAINTER_TEXTURE_HEIGHT,
+                width: painter_w,
+                height: painter_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1, sample_count: 1,
@@ -2394,6 +2562,16 @@ impl GpuState {
         // ── Screen-res FBOs ────────────────────────────────────────────────────
         let (shape_texture, shape_view, shape_depth, shape_depth_view) =
             Self::create_shape_fbo(&device, w, h);
+        let shape_post_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shape post FBO"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shape_post_view = shape_post_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let (kaleido_texture, kaleido_view) = Self::create_kaleido_fbo(&device, w, h);
 
         let shape_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2534,6 +2712,27 @@ impl GpuState {
             }],
         });
 
+        // ── Shape effects post BGL + BG (effects pass: reads shape_view, writes shape_post) ──
+        let shape_effects_post_bgl = Self::make_uts_bgl(&device, "Shape effects post BGL");
+        let shape_effects_post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shape effects post BG"),
+            layout: &shape_effects_post_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shape_effects_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shape_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shape_sampler),
+                },
+            ],
+        });
+
         // ── Globals uniform (painter pass) ────────────────────────────────────
         let uniforms_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2591,7 +2790,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shape_view),
+                    resource: wgpu::BindingResource::TextureView(&shape_post_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -2656,7 +2855,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shape_view),
+                    resource: wgpu::BindingResource::TextureView(&shape_post_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -3225,6 +3424,40 @@ impl GpuState {
                 multiview: None, cache: None,
             });
 
+        let shape_effects_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shape effects shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shape_effects.wgsl").into()),
+        });
+        let shape_effects_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Shape effects pipeline"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&shape_effects_post_bgl],
+                    push_constant_ranges: &[],
+                })),
+                vertex: wgpu::VertexState {
+                    module: &shape_effects_shader, entry_point: Some("vs_main"),
+                    buffers: &[], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shape_effects_shader, entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None, cache: None,
+            });
+
         let kaleido_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Kaleido shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/kaleido.wgsl").into()),
@@ -3611,7 +3844,7 @@ impl GpuState {
         let palette_scratch_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Palette scratch"),
             size: wgpu::Extent3d {
-                width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+                width: painter_w, height: painter_h, depth_or_array_layers: 1,
             },
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -3671,7 +3904,8 @@ impl GpuState {
             multiview: None, cache: None,
         });
 
-        let bezold = bezold::Bezold::new(&device, w, h, surface_format);
+        let bezold       = bezold::Bezold::new(&device, w, h, surface_format);
+        let micro_swirl  = micro_swirl::MicroSwirl::new(&device, w, h, surface_format);
         let phantom = phantom::PhantomAlpha::new(&device, surface_format);
         let myocyte_renderer = myocyte_render::MyocyteRenderer::new(
             &device,
@@ -3683,6 +3917,8 @@ impl GpuState {
             uniforms_buffer,
             painter_uniforms_bind_group, painter_pipelines,
             painter_texture, painter_view, painter_sampler,
+            painter_w, painter_h, skin_mips: skin_mip_levels(painter_w),
+            shape_painter_bgl: tex2_bgl,
             skin_tex, skin_view, skin_bgl, skin_bind_group, skin_sampler, painter_skin_pipeline,
             painter_audio_bgl, painter_audio_buffer, painter_audio_bind_group,
             painter_audio_paint_pipeline, painter_print_head_pipeline,
@@ -3693,6 +3929,8 @@ impl GpuState {
             transform_buffer, transform_bind_group,
             shape_pipeline, shape_bind_group,
             shape_effects_buffer, shape_effects_bind_group,
+            shape_post_texture, shape_post_view,
+            shape_effects_post_bgl, shape_effects_post_bind_group, shape_effects_pipeline,
             distortion_plus_texture, distortion_plus_view,
             distortion_plus_uniforms_buffer, distortion_plus_bgl, distortion_plus_bind_group, distortion_plus_pipeline,
             kaleido_texture, kaleido_view,
@@ -3731,6 +3969,7 @@ impl GpuState {
             export_feedback: None,
             export_spin: None,
             bezold,
+            micro_swirl,
             phantom,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
@@ -3781,6 +4020,8 @@ impl GpuState {
             myocyte_last_logged: false,
             myocyte_debug_timer: 0.0,
             myocyte_renderer,
+            prime_helix_grid:       None,
+            prime_helix_influencer: Box::new(influencer::NoOpInfluencer),
         }
     }
 
@@ -3804,13 +4045,47 @@ impl GpuState {
         self.shape_texture = sc; self.shape_view = sv;
         self.shape_depth = sd;   self.shape_depth_view = sdv;
 
+        let sp_post_t = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shape post FBO"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sp_post_v = sp_post_t.create_view(&wgpu::TextureViewDescriptor::default());
+        self.shape_post_texture = sp_post_t;
+        self.shape_post_view = sp_post_v;
+
+        // Effects post BG reads shape_view → recreate.
+        self.shape_effects_post_bind_group =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shape effects post BG"),
+                layout: &self.shape_effects_post_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.shape_effects_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.shape_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
+
         let (kc, kv) = Self::create_kaleido_fbo(&self.device, w, h);
         self.kaleido_texture = kc;
         self.kaleido_view = kv;
 
         self.myocyte_renderer.resize(w, h);
 
-        // DP FBO references shape_view → recreate.
+        // DP FBO references shape_post_view → recreate.
         let (dpc, dpv) = Self::create_dp_fbo(&self.device, w, h);
         self.distortion_plus_texture = dpc;
         self.distortion_plus_view = dpv;
@@ -3825,7 +4100,7 @@ impl GpuState {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.shape_view),
+                        resource: wgpu::BindingResource::TextureView(&self.shape_post_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -3834,7 +4109,7 @@ impl GpuState {
                 ],
             });
 
-        // Kaleido BG references shape_view → recreate.
+        // Kaleido BG references shape_post_view → recreate.
         // Kaleido BG distorted references dp_view → recreate.
         self.kaleido_bind_group =
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3847,7 +4122,7 @@ impl GpuState {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.shape_view),
+                        resource: wgpu::BindingResource::TextureView(&self.shape_post_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -3976,6 +4251,7 @@ impl GpuState {
         self.scene_view = new_scene_tex.create_view(&wgpu::TextureViewDescriptor::default());
         self.scene_texture = new_scene_tex;
         self.bezold.resize(&self.device, w, h, self.config.format);
+        self.micro_swirl.resize(&self.device, w, h, self.config.format);
 
         self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Blit BG"),
@@ -4119,6 +4395,87 @@ impl GpuState {
                     self.render_export_frame(menu);
                     return Ok(());
                 }
+                ExportPhase::EchoComposite => {
+                    let is_done = self.export_state.as_ref()
+                        .and_then(|e| e.composite_thread.as_ref())
+                        .map(|h| h.is_finished())
+                        .unwrap_or(false);
+                    if is_done {
+                        let handle = self.export_state.as_mut().unwrap().composite_thread.take().unwrap();
+                        match handle.join() {
+                            Ok(Ok(composite_dir)) => {
+                                log::info!("[echo] composite done — prompting save location");
+                                let default_name = format!(
+                                    "abstrakt-deck-echo-{}.mp4",
+                                    chrono::Local::now().format("%Y%m%d-%H%M%S")
+                                );
+                                let chosen_path = rfd::FileDialog::new()
+                                    .set_title("Save Echo MP4 export")
+                                    .add_filter("MP4 video", &["mp4"])
+                                    .set_file_name(&default_name)
+                                    .save_file();
+                                let output_path = match chosen_path {
+                                    Some(p) => p,
+                                    None => {
+                                        log::warn!("[echo] Save canceled — cleaning up temp dirs");
+                                        let renders_dir_opt = self.export_state.as_ref()
+                                            .and_then(|e| e.renders_dir.clone());
+                                        if let Some(rdir) = renders_dir_opt {
+                                            let _ = std::fs::remove_dir_all(&rdir);
+                                        }
+                                        let _ = std::fs::remove_dir_all(&composite_dir);
+                                        self.export_state = None;
+                                        self.export_ribbon = None;
+                                        self.export_feedback = None;
+                                        return Ok(());
+                                    }
+                                };
+                                let audio_path = self.export_state.as_ref().unwrap().audio_source_path.clone();
+                                let fps = self.export_state.as_ref().unwrap().fps;
+                                let renders_dir_opt = self.export_state.as_ref().and_then(|e| e.renders_dir.clone());
+                                let mux_handle = std::thread::spawn(move || {
+                                    let result = run_ffmpeg_mux(&composite_dir, &audio_path, &output_path, fps);
+                                    // Clean up temp dirs regardless of mux outcome.
+                                    if let Some(rdir) = renders_dir_opt {
+                                        if let Err(e) = std::fs::remove_dir_all(&rdir) {
+                                            log::warn!("[echo] cleanup renders/ failed: {e}");
+                                        } else {
+                                            log::info!("[echo] cleaned up renders/");
+                                        }
+                                    }
+                                    if let Err(e) = std::fs::remove_dir_all(&composite_dir) {
+                                        log::warn!("[echo] cleanup composite/ failed: {e}");
+                                    } else {
+                                        log::info!("[echo] cleaned up composite/");
+                                    }
+                                    result
+                                });
+                                let exp = self.export_state.as_mut().unwrap();
+                                exp.phase = ExportPhase::Muxing;
+                                exp.mux_thread = Some(mux_handle);
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("[echo] composite failed: {e}");
+                                // Clean up renders/ on error.
+                                if let Some(rdir) = self.export_state.as_ref().and_then(|e| e.renders_dir.clone()) {
+                                    let _ = std::fs::remove_dir_all(&rdir);
+                                }
+                                self.export_state = None;
+                                self.export_ribbon = None;
+                                self.export_feedback = None;
+                            }
+                            Err(_) => {
+                                log::error!("[echo] composite thread panicked");
+                                self.export_state = None;
+                                self.export_ribbon = None;
+                                self.export_feedback = None;
+                            }
+                        }
+                    } else {
+                        self.render_mux_phase_preview(menu);
+                        return Ok(());
+                    }
+                }
                 ExportPhase::Muxing => {
                     let is_done = self.export_state.as_ref()
                         .and_then(|e| e.mux_thread.as_ref())
@@ -4203,7 +4560,9 @@ impl GpuState {
                 painter_scroll_phase: self.painter_scroll_phase,
                 contrast:        self.params.contrast,
                 saturation:      self.params.saturation,
-                contrast_passes: self.params.contrast_passes as f32,
+                contrast_passes: if matches!(self.params.current_shape,
+                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix) { 1.0 }
+                                 else { self.params.contrast_passes as f32 },
             }]),
         );
 
@@ -4231,6 +4590,7 @@ impl GpuState {
         // Previously hardcoded to 1/60; now frame-rate-accurate.
         let dt = self.last_frame_time.elapsed().as_secs_f32().clamp(0.001, 0.1);
         self.last_frame_time = Instant::now();
+
         let stiffness = 30.0_f32;
         let damping = 8.0_f32;
         let force = -stiffness * self.shake_offset - damping * self.shake_velocity;
@@ -4513,7 +4873,7 @@ impl GpuState {
                     mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::Extent3d {
-                    width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+                    width: self.painter_w, height: self.painter_h, depth_or_array_layers: 1,
                 },
             );
         }
@@ -4528,9 +4888,9 @@ impl GpuState {
                 self.myocyte_grid = Some(grid);
                 log::info!("[myocyte] allocated 16³ cell grid");
                 self.myocyte_influencer = Box::new(
-                    influencer::audio_cells::AudioCells::new()
+                    influencer::audio_wheel::AudioWheel::new()
                 );
-                log::info!("[myocyte] AudioCells active");
+                log::info!("[myocyte] AudioWheel active");
             }
             if !self.myocyte_last_logged {
                 log::info!("[myocyte] mode active");
@@ -4566,6 +4926,34 @@ impl GpuState {
             self.myocyte_last_logged = false;
         }
 
+        // PrimeHelix: lazy grid allocation + camera rotation + influencer step
+        if self.params.current_shape == ShapeKind::PrimeHelix {
+            self.myocyte_renderer.camera.tick_auto_rotation(dt);
+            if self.prime_helix_grid.is_none() {
+                let grid = prime_helix::build_prime_helix_grid();
+                self.prime_helix_grid = Some(grid);
+                log::info!("[prime_helix] allocated semiprime cylinder grid");
+                self.prime_helix_influencer = Box::new(
+                    influencer::prime_activation::PrimeActivation::new()
+                );
+                log::info!("[prime_helix] PrimeActivation influencer active");
+            }
+            if let Some(grid) = self.prime_helix_grid.as_mut() {
+                let audio = influencer::AudioSnapshot {
+                    bands:                self.bands_smoothed,
+                    beat_decay_low:       self.shader_beat_decay_low,
+                    beat_decay_mid:       self.shader_beat_decay_mid,
+                    beat_decay_high:      self.shader_beat_decay_high,
+                    beat_decay_broadband: self.shader_beat_decay_broadband,
+                    beat_decay_max:       self.shader_beat_decay,
+                    beat_phase:           self.shader_beat_phase,
+                    bpm:                  self.shader_bpm,
+                    bpm_confidence:       self.shader_bpm_confidence,
+                };
+                self.prime_helix_influencer.step_with_audio(grid, &audio, dt);
+            }
+        }
+
         // Pass 2: shape → shape FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4587,22 +4975,48 @@ impl GpuState {
                 }),
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            if self.params.current_shape == ShapeKind::Myocyte {
-                if let Some(grid) = self.myocyte_grid.as_ref() {
-                    let aspect = self.size.width as f32 / self.size.height as f32;
-                    self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+            let aspect = self.size.width as f32 / self.size.height as f32;
+            match self.params.current_shape {
+                ShapeKind::Myocyte => {
+                    if let Some(grid) = self.myocyte_grid.as_ref() {
+                        self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                    }
                 }
-                // No grid yet: tolerate as no-op (grid allocated in the per-frame block above).
-            } else {
-                pass.set_pipeline(&self.shape_pipeline);
-                pass.set_bind_group(0, &self.transform_bind_group, &[]);
-                pass.set_bind_group(1, &self.shape_bind_group, &[]);
-                pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
-                let buffers = &self.shape_buffers[&self.params.current_shape];
-                pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
-                pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+                ShapeKind::PrimeHelix => {
+                    if let Some(grid) = self.prime_helix_grid.as_ref() {
+                        self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                    }
+                }
+                _ => {
+                    pass.set_pipeline(&self.shape_pipeline);
+                    pass.set_bind_group(0, &self.transform_bind_group, &[]);
+                    pass.set_bind_group(1, &self.shape_bind_group, &[]);
+                    pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
+                    let buffers = &self.shape_buffers[&self.params.current_shape];
+                    pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                    pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+                }
             }
+        }
+
+        // Pass 2b: shape effects (contrast/saturation/invert/colorize/distortion → shape_post FBO)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shape effects pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.shape_post_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.shape_effects_pipeline);
+            pass.set_bind_group(0, &self.shape_effects_post_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         // Pass 2.5: distortion plus (optional equirectangular rotation → dp FBO)
@@ -4746,10 +5160,50 @@ impl GpuState {
             }
         }
 
-        // Choose the source for Pass 5: bezold when enabled, scene otherwise.
-        // We must own a TextureView for the scene case; bezold.view is a field ref.
+        // Pass 4.6: Micro swirl distortion (optional). Reads bezold output when bezold on.
+        if self.params.micro_swirl_enabled {
+            self.micro_swirl.write_uniforms(&self.queue, micro_swirl::MicroSwirlUniforms {
+                density:   self.params.micro_swirl_density,
+                amplitude: self.params.micro_swirl_amplitude,
+                speed:     self.params.micro_swirl_speed,
+                time:      self.start_time.elapsed().as_secs_f32(),
+            });
+            let ms_source_owned;
+            let ms_source: &wgpu::TextureView = if self.params.bezold_enabled {
+                &self.bezold.view
+            } else {
+                ms_source_owned = self.scene_texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                &ms_source_owned
+            };
+            let ms_bg = self.micro_swirl.make_bind_group(&self.device, ms_source);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("MicroSwirl pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.micro_swirl.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.micro_swirl.pipeline);
+                pass.set_bind_group(0, &ms_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Choose the source for Pass 5: micro_swirl > bezold > scene (priority order).
+        // We must own a TextureView for the scene case; .view fields are references.
         let pass5_scene_view_owned;
-        let pass5_source_view: &wgpu::TextureView = if self.params.bezold_enabled {
+        let pass5_source_view: &wgpu::TextureView = if self.params.micro_swirl_enabled {
+            &self.micro_swirl.view
+        } else if self.params.bezold_enabled {
             &self.bezold.view
         } else {
             pass5_scene_view_owned = self.scene_texture
@@ -4857,43 +5311,21 @@ impl GpuState {
             );
             self.blackhole_was_enabled = false;
         } else {
-            // Build a blit bind group from the chosen source (bezold or scene).
-            let blit_bg = if self.params.bezold_enabled {
-                let blit_sampler_view = &self.bezold.view;
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Blit BG (Bezold)"),
-                    layout: &self.blit_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(blit_sampler_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(
-                                // Reuse the shape_sampler which is a simple clamp linear sampler
-                                &self.shape_sampler,
-                            ),
-                        },
-                    ],
-                })
-            } else {
-                // Recreate the standard blit bind group from scene_view.
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Blit BG"),
-                    layout: &self.blit_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.scene_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
-                        },
-                    ],
-                })
-            };
+            // Build a blit bind group from the chosen post-process source.
+            let blit_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Blit BG"),
+                layout: &self.blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(pass5_source_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                    },
+                ],
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Blit pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -5139,9 +5571,10 @@ impl GpuState {
         if self.export_state.is_some() {
             return Err("export already in progress".into());
         }
-        let duration = self.loaded_audio.as_ref()
-            .ok_or_else(|| "no audio loaded — File → Open Audio first".to_string())?
-            .duration_seconds;
+        let loaded = self.loaded_audio.as_ref()
+            .ok_or_else(|| "no audio loaded — File → Open Audio first".to_string())?;
+        let duration = loaded.duration_seconds;
+        let audio_source_path = loaded.source_path.clone();
         let (off_w, off_h) = self.offline_target.as_ref()
             .map(|t| (t.width, t.height))
             .ok_or_else(|| "no offline target".to_string())?;
@@ -5164,11 +5597,24 @@ impl GpuState {
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| format!("create export dir failed: {}", e))?;
 
+        // In echo mode, frames go to output_dir/renders/ so the composite step can
+        // read them back with different time offsets. In normal mode, renders_dir is None
+        // and frames go directly to output_dir.
+        let renders_dir = if self.params.echo_mode_enabled {
+            let rdir = output_dir.join("renders");
+            std::fs::create_dir_all(&rdir)
+                .map_err(|e| format!("create renders dir failed: {e}"))?;
+            Some(rdir)
+        } else {
+            None
+        };
+
         let (frame_save_sender, frame_save_thread) = spawn_frame_save_worker();
 
         log::info!(
-            "Export started: {} frames at {}fps, {}×{}, output → {}",
-            total_frames, fps, off_w, off_h, output_dir.display()
+            "Export started: {} frames at {}fps, {}×{}, output → {}{}",
+            total_frames, fps, off_w, off_h, output_dir.display(),
+            if self.params.echo_mode_enabled { " [echo mode]" } else { "" }
         );
 
         self.shake_offset   = glam::Vec3::ZERO;
@@ -5184,6 +5630,7 @@ impl GpuState {
             output_dir,
             fps,
             start_time: Instant::now(),
+            audio_source_path,
             frame_save_sender: Some(frame_save_sender),
             frame_save_thread: Some(frame_save_thread),
             mux_thread: None,
@@ -5194,6 +5641,8 @@ impl GpuState {
             export_random_elapsed:   0.0,
             export_reactive_elapsed: 0.0,
             export_party_elapsed:    0.0,
+            renders_dir,
+            composite_thread: None,
         });
 
         // Initialize export ribbon FBOs, cleared to transparent black
@@ -5410,14 +5859,45 @@ impl GpuState {
 
     fn render_export_frame(&mut self, menu: Option<(&mut MenuBar, &winit::window::Window)>) {
         // ── Phase 1: snapshot state, check completion ─────────────────────────
-        let (frame_index, total, fps, output_dir, sender) = {
+        let (frame_index, total, fps, output_dir, renders_dir, sender) = {
             let e = self.export_state.as_ref().unwrap();
             (e.current_frame, e.total_frames, e.fps,
-             e.output_dir.clone(), e.frame_save_sender.as_ref().unwrap().clone())
+             e.output_dir.clone(), e.renders_dir.clone(),
+             e.frame_save_sender.as_ref().unwrap().clone())
         };
 
         if frame_index >= total {
             let render_elapsed = self.export_state.as_ref().unwrap().start_time.elapsed().as_secs_f32();
+
+            // Drop sender to signal PNG worker to drain and exit.
+            let worker_handle = {
+                let exp = self.export_state.as_mut().unwrap();
+                drop(exp.frame_save_sender.take());
+                exp.frame_save_thread.take()
+            };
+
+            if self.params.echo_mode_enabled {
+                // Echo mode: composite the renders/ frames with time offsets, then mux.
+                // The save dialog is shown AFTER the composite completes (in the
+                // EchoComposite handler in render()), so the user doesn't wait during composite.
+                log::info!(
+                    "[echo] render pass complete: {} frames in {:.1}s — starting composite",
+                    total, render_elapsed
+                );
+                let rdir = renders_dir.unwrap(); // guaranteed Some in echo mode
+                let comp_dir = output_dir.join("composite");
+                let dw = (self.params.echo_delay_white_s * fps as f32).round() as u32;
+                let dc = (self.params.echo_delay_color_s * fps as f32).round() as u32;
+                let composite_handle = std::thread::spawn(move || -> Result<PathBuf, String> {
+                    if let Some(h) = worker_handle { let _ = h.join(); }
+                    echo_composite::run_echo_composite(&rdir, &comp_dir, total, dw, dc)
+                });
+                let exp = self.export_state.as_mut().unwrap();
+                exp.phase = ExportPhase::EchoComposite;
+                exp.composite_thread = Some(composite_handle);
+                return;
+            }
+
             log::info!(
                 "Render complete: {} frames in {:.1}s — starting mux",
                 total, render_elapsed
@@ -5444,15 +5924,8 @@ impl GpuState {
                 }
             };
 
-            // Drop sender to signal PNG worker to drain and exit
-            let worker_handle = {
-                let exp = self.export_state.as_mut().unwrap();
-                drop(exp.frame_save_sender.take());
-                exp.frame_save_thread.take()
-            };
-
             let png_dir = output_dir.clone();
-            let audio_path = self.loaded_audio.as_ref().unwrap().source_path.clone();
+            let audio_path = self.export_state.as_ref().unwrap().audio_source_path.clone();
             let mux_handle = std::thread::spawn(move || {
                 // Wait for all PNG frames to be written before muxing
                 if let Some(h) = worker_handle { let _ = h.join(); }
@@ -5581,7 +6054,9 @@ impl GpuState {
                 painter_scroll_phase: self.painter_scroll_phase,
                 contrast:        self.params.contrast,
                 saturation:      self.params.saturation,
-                contrast_passes: self.params.contrast_passes as f32,
+                contrast_passes: if matches!(self.params.current_shape,
+                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix) { 1.0 }
+                                 else { self.params.contrast_passes as f32 },
             }]));
         let (fr, fg, fb) = hsv_to_rgb(self.params.frame_color_hue, 0.85, 1.0);
         self.queue.write_buffer(&self.frame_uniforms_buffer, 0,
@@ -5600,6 +6075,18 @@ impl GpuState {
         let (_exp_kaleido_tex, exp_kaleido_view) =
             Self::create_kaleido_fbo(&self.device, off_w, off_h);
 
+        // Shape post FBO (export resolution — receives effects pass output).
+        let _exp_shape_post_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Export shape post FBO"),
+            size: wgpu::Extent3d { width: off_w, height: off_h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let exp_shape_post_view = _exp_shape_post_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         // Per-frame dp FBO (must be at export resolution, not screen resolution).
         let (_exp_dp_tex, exp_dp_view) = if self.params.distortion_plus_enabled {
             let (t, v) = Self::create_dp_fbo(&self.device, off_w, off_h);
@@ -5608,7 +6095,7 @@ impl GpuState {
             (None, None)
         };
 
-        let kaleido_input_view = exp_dp_view.as_ref().unwrap_or(&exp_shape_view);
+        let kaleido_input_view = exp_dp_view.as_ref().unwrap_or(&exp_shape_post_view);
         let exp_kaleido_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Export Kaleido BG"),
             layout: &self.kaleido_bgl,
@@ -5849,7 +6336,7 @@ impl GpuState {
                     mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::Extent3d {
-                    width: PAINTER_TEXTURE_WIDTH, height: PAINTER_TEXTURE_HEIGHT, depth_or_array_layers: 1,
+                    width: self.painter_w, height: self.painter_h, depth_or_array_layers: 1,
                 },
             );
         }
@@ -5875,21 +6362,60 @@ impl GpuState {
                 }),
                 occlusion_query_set: None, timestamp_writes: None,
             });
-            if self.params.current_shape == ShapeKind::Myocyte {
-                if let Some(grid) = self.myocyte_grid.as_ref() {
-                    let aspect = off_w as f32 / off_h as f32;
-                    self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+            let aspect = off_w as f32 / off_h as f32;
+            match self.params.current_shape {
+                ShapeKind::Myocyte => {
+                    if let Some(grid) = self.myocyte_grid.as_ref() {
+                        self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                    }
                 }
-            } else {
-                pass.set_pipeline(&self.shape_pipeline);
-                pass.set_bind_group(0, &self.transform_bind_group, &[]);
-                pass.set_bind_group(1, &self.shape_bind_group, &[]);
-                pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
-                let bufs = &self.shape_buffers[&self.params.current_shape];
-                pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
-                pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+                ShapeKind::PrimeHelix => {
+                    if let Some(grid) = self.prime_helix_grid.as_ref() {
+                        self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                    }
+                }
+                _ => {
+                    pass.set_pipeline(&self.shape_pipeline);
+                    pass.set_bind_group(0, &self.transform_bind_group, &[]);
+                    pass.set_bind_group(1, &self.shape_bind_group, &[]);
+                    pass.set_bind_group(2, &self.shape_effects_bind_group, &[]);
+                    let bufs = &self.shape_buffers[&self.params.current_shape];
+                    pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
+                    pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+                }
             }
+        }
+
+        // Pass 2b: shape effects → export-res shape_post view
+        {
+            let exp_effects_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Export shape effects BG"),
+                layout: &self.shape_effects_post_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0,
+                        resource: self.shape_effects_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&exp_shape_view) },
+                    wgpu::BindGroupEntry { binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                ],
+            });
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Export shape effects pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &exp_shape_post_view, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None, timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.shape_effects_pipeline);
+            pass.set_bind_group(0, &exp_effects_bg, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         // Pass 2.5: distortion plus → export-res dp view (optional)
@@ -5901,7 +6427,7 @@ impl GpuState {
                     wgpu::BindGroupEntry { binding: 0,
                         resource: self.distortion_plus_uniforms_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&exp_shape_view) },
+                        resource: wgpu::BindingResource::TextureView(&exp_shape_post_view) },
                     wgpu::BindGroupEntry { binding: 2,
                         resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
                 ],
@@ -6108,7 +6634,93 @@ impl GpuState {
             }
         }
 
-        // Readback: copy offline_target → staging buffer
+        // Export Pass 4.5: Bezold (optional) — temporarily resize to export dims.
+        if self.params.bezold_enabled {
+            self.bezold.resize(&self.device, off_w, off_h, self.config.format);
+            self.bezold.write_uniforms(&self.queue, bezold::BezoldUniforms {
+                strength: self.params.bezold_strength,
+                radius:   self.params.bezold_radius,
+                texel_x:  1.0 / off_w as f32,
+                texel_y:  1.0 / off_h as f32,
+            });
+            let offline_view_bz = self.offline_target.as_ref().unwrap().texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let bz_bg = self.bezold.make_bind_group(&self.device, &offline_view_bz);
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Export Bezold pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.bezold.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.bezold.pipeline);
+                pass.set_bind_group(0, &bz_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Export Pass 4.6: Micro swirl (optional) — temporarily resize to export dims.
+        if self.params.micro_swirl_enabled {
+            self.micro_swirl.resize(&self.device, off_w, off_h, self.config.format);
+            self.micro_swirl.write_uniforms(&self.queue, micro_swirl::MicroSwirlUniforms {
+                density:   self.params.micro_swirl_density,
+                amplitude: self.params.micro_swirl_amplitude,
+                speed:     self.params.micro_swirl_speed,
+                time:      self.start_time.elapsed().as_secs_f32(),
+            });
+            let ms_source_owned;
+            let ms_source: &wgpu::TextureView = if self.params.bezold_enabled {
+                &self.bezold.view
+            } else {
+                ms_source_owned = self.offline_target.as_ref().unwrap().texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                &ms_source_owned
+            };
+            let ms_bg = self.micro_swirl.make_bind_group(&self.device, ms_source);
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Export MicroSwirl pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.micro_swirl.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None, timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.micro_swirl.pipeline);
+                pass.set_bind_group(0, &ms_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Resize bezold/micro_swirl back to live window dimensions after export passes.
+        if self.params.bezold_enabled {
+            self.bezold.resize(&self.device, self.size.width, self.size.height, self.config.format);
+        }
+        if self.params.micro_swirl_enabled {
+            self.micro_swirl.resize(&self.device, self.size.width, self.size.height, self.config.format);
+        }
+
+        // Readback: copy final post-process output → staging buffer.
+        // Source priority: micro_swirl > bezold > offline_target.
+        let readback_texture: &wgpu::Texture = if self.params.micro_swirl_enabled {
+            &self.micro_swirl.texture
+        } else if self.params.bezold_enabled {
+            &self.bezold.texture
+        } else {
+            &self.offline_target.as_ref().unwrap().texture
+        };
         let aligned_bpr = (off_w * 4).div_ceil(256) * 256;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Export readback"),
@@ -6118,7 +6730,7 @@ impl GpuState {
         });
         enc.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &self.offline_target.as_ref().unwrap().texture,
+                texture: readback_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -6161,7 +6773,8 @@ impl GpuState {
             frame_index,
             width: off_w, height: off_h,
             rgba_bytes: pixels,
-            output_path: output_dir.join(format!("frame_{:05}.png", frame_index)),
+            output_path: renders_dir.as_ref().unwrap_or(&output_dir)
+                .join(format!("frame_{:05}.png", frame_index)),
         });
 
         // ── Phase 8: preview — blit offline target to swapchain ───────────────
@@ -6248,7 +6861,7 @@ impl GpuState {
             };
         }
         if !self.params.locks.current_shape {
-            self.params.current_shape = match rng.gen_range(0u8..8) {
+            self.params.current_shape = match rng.gen_range(0u8..9) {
                 0 => ShapeKind::Cylinder,
                 1 => ShapeKind::Sphere,
                 2 => ShapeKind::Cube,
@@ -6256,7 +6869,8 @@ impl GpuState {
                 4 => ShapeKind::Icosahedron,
                 5 => ShapeKind::Urchin,
                 6 => ShapeKind::Caltrop,
-                _ => ShapeKind::Myocyte,
+                7 => ShapeKind::Myocyte,
+                _ => ShapeKind::PrimeHelix,
             };
         }
         if !self.params.locks.frame_shape {
@@ -6483,17 +7097,90 @@ impl GpuState {
         if !self.params.locks.bezold_radius && self.params.bezold_enabled {
             self.params.bezold_radius = rng.gen_range(2.0_f32..=5.0);
         }
+        if !self.params.locks.micro_swirl_enabled {
+            self.params.micro_swirl_enabled = rng.gen_bool(0.30);
+        }
+        if !self.params.locks.micro_swirl_density && self.params.micro_swirl_enabled {
+            self.params.micro_swirl_density = rng.gen_range(6.0_f32..=16.0);
+        }
+        if !self.params.locks.micro_swirl_amplitude && self.params.micro_swirl_enabled {
+            self.params.micro_swirl_amplitude = rng.gen_range(0.5_f32..=1.2);
+        }
+        if !self.params.locks.micro_swirl_speed && self.params.micro_swirl_enabled {
+            self.params.micro_swirl_speed = rng.gen_range(0.2_f32..=0.6);
+        }
+    }
+
+    fn rebuild_painter_fbo(&mut self, w: u32, h: u32) {
+        let painter_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Painter texture"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let painter_view = painter_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let palette_scratch_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Palette scratch"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PAINTER_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let palette_scratch_view = palette_scratch_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let shape_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shape BG (samples painter)"),
+            layout: &self.shape_painter_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&painter_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.painter_sampler) },
+            ],
+        });
+
+        let palette_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Palette BG"),
+            layout: &self.palette_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.palette_uniforms_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&painter_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.painter_sampler) },
+            ],
+        });
+
+        self.painter_texture = painter_texture;
+        self.painter_view = painter_view;
+        self.palette_scratch_texture = palette_scratch_texture;
+        self.palette_scratch_view = palette_scratch_view;
+        self.shape_bind_group = shape_bind_group;
+        self.palette_bind_group = palette_bind_group;
+        self.painter_w = w;
+        self.painter_h = h;
+        self.skin_mips = skin_mip_levels(w);
+        log::info!("[hd_skin] painter FBO rebuilt to {w}×{h} ({} mip levels)", self.skin_mips);
     }
 
     pub fn load_skin(&mut self, rgba: Vec<u8>) {
+        let target_w = if self.params.hd_skin_enabled { PAINTER_HD_WIDTH } else { PAINTER_TEXTURE_WIDTH };
+        let target_h = if self.params.hd_skin_enabled { PAINTER_HD_HEIGHT } else { PAINTER_TEXTURE_HEIGHT };
+        if target_w != self.painter_w || target_h != self.painter_h {
+            self.rebuild_painter_fbo(target_w, target_h);
+        }
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Skin texture"),
             size: wgpu::Extent3d {
-                width: PAINTER_TEXTURE_WIDTH,
-                height: PAINTER_TEXTURE_HEIGHT,
+                width: self.painter_w,
+                height: self.painter_h,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: SKIN_MIP_LEVELS,
+            mip_level_count: self.skin_mips,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
@@ -6510,16 +7197,16 @@ impl GpuState {
             &rgba,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(PAINTER_TEXTURE_WIDTH * 4),
-                rows_per_image: Some(PAINTER_TEXTURE_HEIGHT),
+                bytes_per_row: Some(self.painter_w * 4),
+                rows_per_image: Some(self.painter_h),
             },
             wgpu::Extent3d {
-                width: PAINTER_TEXTURE_WIDTH,
-                height: PAINTER_TEXTURE_HEIGHT,
+                width: self.painter_w,
+                height: self.painter_h,
                 depth_or_array_layers: 1,
             },
         );
-        generate_skin_mipmaps(&self.device, &self.queue, &tex, SKIN_MIP_LEVELS);
+        generate_skin_mipmaps(&self.device, &self.queue, &tex, self.skin_mips);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Skin BG"),
@@ -6549,16 +7236,16 @@ impl GpuState {
             rgba,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(PAINTER_TEXTURE_WIDTH * 4),
-                rows_per_image: Some(PAINTER_TEXTURE_HEIGHT),
+                bytes_per_row: Some(self.painter_w * 4),
+                rows_per_image: Some(self.painter_h),
             },
             wgpu::Extent3d {
-                width: PAINTER_TEXTURE_WIDTH,
-                height: PAINTER_TEXTURE_HEIGHT,
+                width: self.painter_w,
+                height: self.painter_h,
                 depth_or_array_layers: 1,
             },
         );
-        generate_skin_mipmaps(&self.device, &self.queue, &self.skin_tex, SKIN_MIP_LEVELS);
+        generate_skin_mipmaps(&self.device, &self.queue, &self.skin_tex, self.skin_mips);
     }
 
     pub fn toggle_recording(&mut self) {
@@ -6709,6 +7396,8 @@ struct App {
     is_fullscreen: bool,
     menu_bar: Option<MenuBar>,
     prev_audio_source_mode: AudioSourceMode,
+    /// Background qbist generation: Some while a render+save is in flight.
+    qbist_pending: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
 }
 
 impl App {
@@ -6723,6 +7412,7 @@ impl App {
             is_fullscreen: false,
             menu_bar: None,
             prev_audio_source_mode: AudioSourceMode::File,
+            qbist_pending: None,
         }
     }
 }
@@ -6912,6 +7602,13 @@ impl ApplicationHandler for App {
                     KeyCode::KeyV => {
                         log::info!("Bezold contrast: LOCKED");
                     }
+                    KeyCode::KeyU if !gpu.params.locks.micro_swirl_enabled => {
+                        gpu.params.micro_swirl_enabled = !gpu.params.micro_swirl_enabled;
+                        log::info!("Micro swirl: {}", if gpu.params.micro_swirl_enabled { "ON" } else { "OFF" });
+                    }
+                    KeyCode::KeyU => {
+                        log::info!("Micro swirl: LOCKED");
+                    }
                     KeyCode::KeyN if !ctrl => {
                         gpu.params.random_mode_enabled = !gpu.params.random_mode_enabled;
                         if gpu.params.random_mode_enabled {
@@ -7043,9 +7740,10 @@ impl ApplicationHandler for App {
                     }
                     // Snapshot export progress before render (render may advance current_frame).
                     let progress_snap = gpu.export_state.as_ref().map(|e| ExportProgress {
-                        current_frame: e.current_frame,
-                        total_frames:  e.total_frames,
-                        is_muxing:     e.phase == ExportPhase::Muxing,
+                        current_frame:   e.current_frame,
+                        total_frames:    e.total_frames,
+                        is_muxing:       e.phase == ExportPhase::Muxing,
+                        is_compositing:  e.phase == ExportPhase::EchoComposite,
                     });
                     if let Some(menu) = self.menu_bar.as_mut() {
                         menu.export_progress = progress_snap;
@@ -7069,6 +7767,9 @@ impl ApplicationHandler for App {
                                     exp.current_frame as f32 / exp.total_frames as f32 * 100.0,
                                     headless, fps_val,
                                 )
+                            }
+                            Some(ExportPhase::EchoComposite) => {
+                                "abstrakt-deck — slice 24s — COMPOSITING echo layers...".to_string()
                             }
                             Some(ExportPhase::Muxing) => {
                                 "abstrakt-deck — slice 24s — MUXING (ffmpeg)...".to_string()
@@ -7340,6 +8041,40 @@ impl ApplicationHandler for App {
                         log::warn!("Surface error: {:?}", e);
                     }
                 }
+                // Poll background qbist generation; auto-load when the thread finishes.
+                if let Some(rx) = self.qbist_pending.as_ref() {
+                    if let Ok(result) = rx.try_recv() {
+                        self.qbist_pending = None;
+                        match result {
+                            Ok(path) => {
+                                log::info!("[qbist] poll received: {}", path.display());
+                                match decode_and_validate_skin(&path) {
+                                    Ok(img) => {
+                                        use image::GenericImageView;
+                                        let (dw, dh) = img.dimensions();
+                                        log::info!("[qbist] decoded skin ok, dims={dw}x{dh}");
+                                        let (tw, th) = painter_target_dims(&gpu.params);
+                                        let rgba = crop_skin_image(&img, 0.5, tw, th);
+                                        gpu.load_skin(rgba);
+                                        log::info!("[qbist] load_skin done");
+                                        gpu.params.painter_kind = PainterKind::Skin;
+                                        log::info!("[qbist] painter switched to Skin, current_painter={:?}",
+                                            gpu.params.painter_kind);
+                                        gpu.crop_y_offset = 0.5;
+                                        if let Some(menu) = self.menu_bar.as_mut() {
+                                            menu.set_skin_thumbnail(&img);
+                                            menu.current_crop_y_offset = 0.5;
+                                        }
+                                        gpu.skin_source_image = Some(img);
+                                    }
+                                    Err(e) => log::error!("[qbist] decode FAILED: {e}"),
+                                }
+                            }
+                            Err(e) => log::error!("[qbist] generation failed: {e}"),
+                        }
+                    }
+                }
+
                 // Drain and dispatch menu actions accumulated during this frame's render.
                 let actions = self.menu_bar.as_mut()
                     .map_or_else(Vec::new, |m| m.take_actions());
@@ -7359,7 +8094,8 @@ impl ApplicationHandler for App {
                                 log::info!("Selected file: {}", path.display());
                                 match decode_and_validate_skin(&path) {
                                     Ok(img) => {
-                                        let rgba = crop_skin_image(&img, 0.5);
+                                        let (tw, th) = painter_target_dims(&gpu.params);
+                                        let rgba = crop_skin_image(&img, 0.5, tw, th);
                                         gpu.load_skin(rgba);
                                         gpu.params.painter_kind = PainterKind::Skin;
                                         gpu.crop_y_offset = 0.5;
@@ -7436,6 +8172,17 @@ impl ApplicationHandler for App {
                                 menu.toggle_params_panel();
                             }
                         }
+                        MenuAction::GenerateQbist(detail) => {
+                            use rand::Rng;
+                            let seed: u64 = rand::thread_rng().gen();
+                            log::info!("[qbist] button pressed, spawning generation, seed={seed:016x}, detail={detail:.2}");
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = generate_qbist_to_file(seed, detail, 4096, 4096);
+                                let _ = tx.send(result);
+                            });
+                            self.qbist_pending = Some(rx);
+                        }
                     }
                 }
 
@@ -7481,10 +8228,21 @@ impl ApplicationHandler for App {
                         ParamChange::PainterKind(v)          => gpu.params.painter_kind = v,
                         ParamChange::SkinCropOffset(v) => {
                             gpu.crop_y_offset = v;
+                            let (tw, th) = painter_target_dims(&gpu.params);
                             let rgba = gpu.skin_source_image.as_ref()
-                                .map(|src| crop_skin_image(src, v));
+                                .map(|src| crop_skin_image(src, v, tw, th));
                             if let Some(rgba) = rgba {
                                 gpu.upload_skin_bytes(&rgba);
+                            }
+                        }
+                        ParamChange::HdSkinEnabled(v) => {
+                            gpu.params.hd_skin_enabled = v;
+                            let (tw, th) = painter_target_dims(&gpu.params);
+                            let crop = gpu.crop_y_offset;
+                            let rgba = gpu.skin_source_image.as_ref()
+                                .map(|src| crop_skin_image(src, crop, tw, th));
+                            if let Some(rgba) = rgba {
+                                gpu.load_skin(rgba);
                             }
                         }
                         ParamChange::Contrast(v)        => gpu.params.contrast        = v,
@@ -7589,6 +8347,10 @@ impl ApplicationHandler for App {
                                 LockTarget::BezoldEnabled        => gpu.params.locks.bezold_enabled        = !gpu.params.locks.bezold_enabled,
                                 LockTarget::BezoldStrength       => gpu.params.locks.bezold_strength       = !gpu.params.locks.bezold_strength,
                                 LockTarget::BezoldRadius         => gpu.params.locks.bezold_radius         = !gpu.params.locks.bezold_radius,
+                                LockTarget::MicroSwirlEnabled    => gpu.params.locks.micro_swirl_enabled   = !gpu.params.locks.micro_swirl_enabled,
+                                LockTarget::MicroSwirlDensity    => gpu.params.locks.micro_swirl_density   = !gpu.params.locks.micro_swirl_density,
+                                LockTarget::MicroSwirlAmplitude  => gpu.params.locks.micro_swirl_amplitude = !gpu.params.locks.micro_swirl_amplitude,
+                                LockTarget::MicroSwirlSpeed      => gpu.params.locks.micro_swirl_speed     = !gpu.params.locks.micro_swirl_speed,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -7605,6 +8367,9 @@ impl ApplicationHandler for App {
                         ParamChange::SetExportLivePreview(v) => {
                             gpu.params.export_live_preview = v;
                         }
+                        ParamChange::EchoModeEnabled(v)  => gpu.params.echo_mode_enabled  = v,
+                        ParamChange::EchoDelayWhite(v)   => gpu.params.echo_delay_white_s = v,
+                        ParamChange::EchoDelayColor(v)   => gpu.params.echo_delay_color_s = v,
                         ParamChange::TriggerExport => {
                             match gpu.start_export() {
                                 Ok(()) => log::info!("Export started via Export button"),
@@ -7653,6 +8418,10 @@ impl ApplicationHandler for App {
                         ParamChange::BezoldEnabled(v)        => gpu.params.bezold_enabled        = v,
                         ParamChange::BezoldStrength(v)       => gpu.params.bezold_strength       = v,
                         ParamChange::BezoldRadius(v)         => gpu.params.bezold_radius         = v,
+                        ParamChange::MicroSwirlEnabled(v)    => gpu.params.micro_swirl_enabled   = v,
+                        ParamChange::MicroSwirlDensity(v)    => gpu.params.micro_swirl_density   = v,
+                        ParamChange::MicroSwirlAmplitude(v)  => gpu.params.micro_swirl_amplitude = v,
+                        ParamChange::MicroSwirlSpeed(v)      => gpu.params.micro_swirl_speed     = v,
                         ParamChange::ApplyBundle(bundle)     => {
                             let locks = gpu.params.locks;
                             bundle.apply(&mut gpu.params, &locks);
@@ -7722,10 +8491,11 @@ fn main() {
     println!("  R      cycle frame color hue (+30°)");
     println!("  G      toggle Phantom Alpha overlay");
     println!("  V      toggle Bezold simultaneous-contrast (color pop)");
+    println!("  U      toggle Micro Swirl screen-space distortion");
     println!("  H      cycle color harmony (Mono/Analogous/Comp/Split/Triad/Tetra)");
     println!("  J      toggle applied harmony (recolor Skin/Image/PrintHead via Color Theory)");
     println!("  space  toggle MIDI shake");
-    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop → Myocyte)");
+    println!("  Shift+Tab  cycle shape (Cylinder → Sphere → Cube → Tetrahedron → Icosahedron → Urchin → Caltrop → Myocyte → PrimeHelix)");
     println!("  / '   bass-zoom intensity (0 to 1)");
     println!("  I      toggle color invert");
     println!("  T      toggle colorize tint");
@@ -7836,6 +8606,9 @@ mod tests {
             export_resolution: ResolutionPreset::FullHD,
             export_framerate:  FramerateChoice::Fps30,
             export_live_preview: false,
+            echo_mode_enabled:  true,
+            echo_delay_white_s: 1.5,
+            echo_delay_color_s: 3.0,
             audio_source_mode: AudioSourceMode::Mic,
             palette_mode:     PaletteMode::Cool,
             palette_tint:     0.7,
@@ -7868,11 +8641,16 @@ mod tests {
             bezold_enabled:  true,
             bezold_strength: 0.65,
             bezold_radius:   4.0,
+            micro_swirl_enabled:   true,
+            micro_swirl_density:   12.0,
+            micro_swirl_amplitude: 0.9,
+            micro_swirl_speed:     0.4,
             spin_enabled:     true,
             spin_speed:       0.5,
             spin_audio_react: true,
             trail_decay:      0.7,
             pitch_to_hue:     true,
+            hd_skin_enabled:  true,
         }
     }
 
@@ -7936,6 +8714,9 @@ mod tests {
         assert_eq!(restored.export_resolution,   original.export_resolution,   "export_resolution failed");
         assert_eq!(restored.export_framerate,    original.export_framerate,    "export_framerate failed");
         assert_eq!(restored.export_live_preview, original.export_live_preview, "export_live_preview failed");
+        assert_eq!(restored.echo_mode_enabled,   original.echo_mode_enabled,   "echo_mode_enabled failed");
+        assert_eq!(restored.echo_delay_white_s,  original.echo_delay_white_s,  "echo_delay_white_s failed");
+        assert_eq!(restored.echo_delay_color_s,  original.echo_delay_color_s,  "echo_delay_color_s failed");
         assert_eq!(restored.audio_source_mode,   original.audio_source_mode,   "audio_source_mode failed");
         assert_eq!(restored.palette_mode,     original.palette_mode,     "palette_mode failed");
         assert_eq!(restored.palette_tint,     original.palette_tint,     "palette_tint failed");
@@ -7968,11 +8749,16 @@ mod tests {
         assert_eq!(restored.bezold_enabled,  original.bezold_enabled,  "bezold_enabled failed");
         assert_eq!(restored.bezold_strength, original.bezold_strength, "bezold_strength failed");
         assert_eq!(restored.bezold_radius,   original.bezold_radius,   "bezold_radius failed");
+        assert_eq!(restored.micro_swirl_enabled,   original.micro_swirl_enabled,   "micro_swirl_enabled failed");
+        assert_eq!(restored.micro_swirl_density,   original.micro_swirl_density,   "micro_swirl_density failed");
+        assert_eq!(restored.micro_swirl_amplitude, original.micro_swirl_amplitude, "micro_swirl_amplitude failed");
+        assert_eq!(restored.micro_swirl_speed,     original.micro_swirl_speed,     "micro_swirl_speed failed");
         assert_eq!(restored.spin_enabled,     original.spin_enabled,     "spin_enabled failed");
         assert_eq!(restored.spin_speed,       original.spin_speed,       "spin_speed failed");
         assert_eq!(restored.spin_audio_react, original.spin_audio_react, "spin_audio_react failed");
         assert_eq!(restored.trail_decay,      original.trail_decay,      "trail_decay failed");
         assert_eq!(restored.pitch_to_hue,     original.pitch_to_hue,     "pitch_to_hue failed");
+        assert_eq!(restored.hd_skin_enabled,  original.hd_skin_enabled,  "hd_skin_enabled failed");
     }
 
     #[test]
@@ -7980,6 +8766,7 @@ mod tests {
         for kind in [
             ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron,
             ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop, ShapeKind::Myocyte,
+            ShapeKind::PrimeHelix,
         ] {
             let name = kind.name();
             let parsed = match name {
@@ -7990,6 +8777,7 @@ mod tests {
                 "Urchin"      => ShapeKind::Urchin,
                 "Caltrop"     => ShapeKind::Caltrop,
                 "Myocyte"     => ShapeKind::Myocyte,
+                "PrimeHelix"  => ShapeKind::PrimeHelix,
                 _             => ShapeKind::Cylinder,
             };
             assert_eq!(parsed, kind, "ShapeKind {:?} did not round-trip via name()", kind);
@@ -8023,6 +8811,7 @@ mod tests {
         for shape in [
             ShapeKind::Cylinder, ShapeKind::Sphere, ShapeKind::Cube, ShapeKind::Tetrahedron,
             ShapeKind::Icosahedron, ShapeKind::Urchin, ShapeKind::Caltrop, ShapeKind::Myocyte,
+            ShapeKind::PrimeHelix,
         ] {
             let [x, y, z] = shape.rotation_axis();
             let length_sq = x * x + y * y + z * z;

@@ -28,10 +28,12 @@ pub struct MyocyteRenderer {
 impl MyocyteRenderer {
     pub fn new(device: &wgpu::Device, shape_fbo_format: wgpu::TextureFormat) -> Self {
         // ---- Camera -------------------------------------------------------
-        let mut camera = OrbitCamera::default();
         // Distance 18.0 gives a comfortable view of the 16³ grid (±7.5 wu).
-        camera.distance = 18.0;
-        camera.auto_rotation_rate_rad_per_s = std::f32::consts::TAU / 10.0;
+        let camera = OrbitCamera {
+            distance: 18.0,
+            auto_rotation_rate_rad_per_s: std::f32::consts::TAU / 10.0,
+            ..Default::default()
+        };
 
         // ---- GPU buffers --------------------------------------------------
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {

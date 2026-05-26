@@ -21,7 +21,7 @@ pub fn chromagram(magnitudes: &[f32], sample_rate: u32, fft_size: usize) -> [f32
     let mut chroma = [0.0f32; 12];
     for (bin, &mag) in magnitudes.iter().enumerate() {
         let freq = bin as f32 * bin_hz;
-        if freq < 27.5 || freq > 4186.0 {
+        if !(27.5..=4186.0).contains(&freq) {
             continue;
         }
         let midi = 69.0 + 12.0 * (freq / 440.0).log2();

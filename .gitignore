@@ -1,1 +1,8 @@
 /target
+
+# Concatenated code-dump files — never commit these
+abstrakt-deck-allcode.txt
+abstrakt-deck-code.txt
+abstrakt_code.txt
+/*-allcode.txt
+/*_code.txt

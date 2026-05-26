@@ -74,6 +74,10 @@ pub enum LockTarget {
     BezoldEnabled,
     BezoldStrength,
     BezoldRadius,
+    MicroSwirlEnabled,
+    MicroSwirlDensity,
+    MicroSwirlAmplitude,
+    MicroSwirlSpeed,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +99,7 @@ pub enum MenuAction {
     ToggleCheatSheet,
     ToggleRecording,
     TogglePanels,
+    GenerateQbist(f32),
 }
 
 #[derive(Debug)]
@@ -135,6 +140,7 @@ pub enum ParamChange {
     FrameShape(crate::FrameShape),
     PainterKind(crate::PainterKind),
     SkinCropOffset(f32),
+    HdSkinEnabled(bool),
     Contrast(f32),
     Saturation(f32),
     ContrastPasses(u32),
@@ -151,6 +157,9 @@ pub enum ParamChange {
     ExportResolution(crate::ResolutionPreset),
     ExportFramerate(crate::FramerateChoice),
     SetExportLivePreview(bool),
+    EchoModeEnabled(bool),
+    EchoDelayWhite(f32),
+    EchoDelayColor(f32),
     TriggerExport,
     SetAudioSourceMode(crate::AudioSourceMode),
     SetPaletteMode(crate::PaletteMode),
@@ -184,15 +193,20 @@ pub enum ParamChange {
     BezoldEnabled(bool),
     BezoldStrength(f32),
     BezoldRadius(f32),
+    MicroSwirlEnabled(bool),
+    MicroSwirlDensity(f32),
+    MicroSwirlAmplitude(f32),
+    MicroSwirlSpeed(f32),
     ApplyBundle(crate::bundles::BundleId),
     ApplyRandomBundle,
 }
 
 #[derive(Clone, Copy)]
 pub struct ExportProgress {
-    pub current_frame: u32,
-    pub total_frames: u32,
-    pub is_muxing: bool,
+    pub current_frame:  u32,
+    pub total_frames:   u32,
+    pub is_muxing:      bool,
+    pub is_compositing: bool,
 }
 
 pub struct MenuBar {
@@ -205,6 +219,7 @@ pub struct MenuBar {
     pub skin_thumbnail: Option<egui::TextureHandle>,
     skin_thumbnail_aspect: f32,
     pub current_crop_y_offset: f32,
+    pub qbist_detail: f32,
     pub player_info: Option<PlayerInfo>,
     pub export_progress: Option<ExportProgress>,
 }
@@ -235,6 +250,7 @@ impl MenuBar {
             skin_thumbnail: None,
             skin_thumbnail_aspect: 1.0,
             current_crop_y_offset: 0.5,
+            qbist_detail: 0.5,
             player_info: None,
             export_progress: None,
         }
@@ -335,6 +351,7 @@ impl MenuBar {
         let skin_thumb = self.skin_thumbnail.clone();
         let skin_aspect = self.skin_thumbnail_aspect;
         let mut current_crop = self.current_crop_y_offset;
+        let mut current_qbist_detail = self.qbist_detail;
         let player_info_snap = self.player_info.clone();
         let export_progress_snap = self.export_progress;
         let mut frame_actions: Vec<MenuAction> = Vec::new();
@@ -435,7 +452,10 @@ impl MenuBar {
                                 skin_thumb.as_ref(),
                                 skin_aspect,
                                 &mut current_crop,
+                                &mut current_qbist_detail,
+                                current_params.hd_skin_enabled,
                                 &mut frame_changes,
+                                &mut frame_actions,
                             );
                             ui.separator();
                             Self::audio_player_section(
@@ -464,6 +484,8 @@ impl MenuBar {
                             ui.separator();
                             Self::bezold_section(ui, current_params, &mut frame_changes);
                             ui.separator();
+                            Self::micro_swirl_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
                             Self::color_theory_section(ui, current_params, &mut frame_changes);
                         });
                     });
@@ -471,6 +493,7 @@ impl MenuBar {
         });
 
         self.current_crop_y_offset = current_crop;
+        self.qbist_detail = current_qbist_detail;
         self.pending_actions.append(&mut frame_actions);
         self.pending_param_changes.append(&mut frame_changes);
 
@@ -595,6 +618,7 @@ impl MenuBar {
                                 crate::ShapeKind::Urchin,
                                 crate::ShapeKind::Caltrop,
                                 crate::ShapeKind::Myocyte,
+                                crate::ShapeKind::PrimeHelix,
                             ] {
                                 ui.selectable_value(&mut shape, v, v.name());
                             }
@@ -1585,6 +1609,84 @@ impl MenuBar {
         });
     }
 
+    fn micro_swirl_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Micro Swirl", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Screen-space swirl distortion — each cell twists independently in a continuous loop. (U)"
+                ).small().weak()
+            );
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.micro_swirl_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::MicroSwirlEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.micro_swirl_enabled, |ui| {
+                    let mut v = params.micro_swirl_enabled;
+                    if ui.checkbox(&mut v, "Enable (U)").changed() {
+                        changes.push(ParamChange::MicroSwirlEnabled(v));
+                    }
+                });
+            });
+
+            ui.add_enabled_ui(params.micro_swirl_enabled, |ui| {
+                ui.indent("micro_swirl_indent", |ui| {
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.micro_swirl_density).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::MicroSwirlDensity));
+                        }
+                        ui.add_enabled_ui(!params.locks.micro_swirl_density, |ui| {
+                            let mut v = params.micro_swirl_density;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 2.0..=24.0)
+                                    .text("Density")
+                                    .step_by(0.5)
+                            ).changed() {
+                                changes.push(ParamChange::MicroSwirlDensity(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.micro_swirl_amplitude).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::MicroSwirlAmplitude));
+                        }
+                        ui.add_enabled_ui(!params.locks.micro_swirl_amplitude, |ui| {
+                            let mut v = params.micro_swirl_amplitude;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.0..=2.0)
+                                    .text("Amplitude (rad)")
+                                    .step_by(0.05)
+                            ).changed() {
+                                changes.push(ParamChange::MicroSwirlAmplitude(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.micro_swirl_speed).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::MicroSwirlSpeed));
+                        }
+                        ui.add_enabled_ui(!params.locks.micro_swirl_speed, |ui| {
+                            let mut v = params.micro_swirl_speed;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.05..=1.0)
+                                    .text("Speed (cyc/s)")
+                                    .step_by(0.05)
+                            ).changed() {
+                                changes.push(ParamChange::MicroSwirlSpeed(v));
+                            }
+                        });
+                    });
+                });
+            });
+        });
+    }
+
     fn color_theory_section(
         ui: &mut egui::Ui,
         params: &crate::VisualParams,
@@ -2096,6 +2198,55 @@ impl MenuBar {
 
             ui.separator();
 
+            // ── Staggered Luminance Echo ─────────────────────────────────────
+            ui.collapsing("Staggered Luminance Echo", |ui| {
+                let mut echo_on = params.echo_mode_enabled;
+                if ui.checkbox(&mut echo_on, "Enable (export only)")
+                    .on_hover_text(
+                        "Composites three time-offset copies of the scene: \
+                         dark echo (leads) → bright echo → full-color base (trails). \
+                         Export takes ~3× longer; output plays at normal speed."
+                    )
+                    .changed()
+                {
+                    changes.push(ParamChange::EchoModeEnabled(echo_on));
+                }
+                ui.add_enabled_ui(echo_on, |ui| {
+                    let mut dw = params.echo_delay_white_s;
+                    if ui.add(
+                        egui::Slider::new(&mut dw, 0.5..=10.0)
+                            .text("Echo delay 1 (white)")
+                            .suffix(" s")
+                            .step_by(0.1),
+                    )
+                    .on_hover_text("Delay of the bright echo layer relative to the color base.")
+                    .changed()
+                    {
+                        changes.push(ParamChange::EchoDelayWhite(dw));
+                    }
+                    let mut dc = params.echo_delay_color_s;
+                    if ui.add(
+                        egui::Slider::new(&mut dc, 0.5..=15.0)
+                            .text("Echo delay 2 (color)")
+                            .suffix(" s")
+                            .step_by(0.1),
+                    )
+                    .on_hover_text("Delay of the full-color base layer. Must be ≥ Echo delay 1.")
+                    .changed()
+                    {
+                        changes.push(ParamChange::EchoDelayColor(dc));
+                    }
+                    if params.echo_delay_color_s < params.echo_delay_white_s {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "⚠ Echo delay 2 should be ≥ Echo delay 1",
+                        );
+                    }
+                });
+            });
+
+            ui.separator();
+
             let audio_loaded = player_info.is_some();
             let is_exporting = export_progress.is_some();
             ui.add_enabled_ui(audio_loaded && !is_exporting, |ui| {
@@ -2107,7 +2258,13 @@ impl MenuBar {
                 ui.label("⚠ Load audio first (File → Open Audio...)");
             }
             if let Some(p) = export_progress {
-                if p.is_muxing {
+                if p.is_compositing {
+                    ui.add(
+                        egui::ProgressBar::new(1.0)
+                            .text("Compositing echo layers…")
+                            .animate(true),
+                    );
+                } else if p.is_muxing {
                     ui.add(
                         egui::ProgressBar::new(1.0)
                             .text("Muxing (ffmpeg)…")
@@ -2129,12 +2286,16 @@ impl MenuBar {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn skin_section_static(
         ui: &mut egui::Ui,
         thumbnail: Option<&egui::TextureHandle>,
         thumbnail_aspect: f32,
         crop_y_offset: &mut f32,
+        qbist_detail: &mut f32,
+        hd_skin_enabled: bool,
         changes: &mut Vec<ParamChange>,
+        frame_actions: &mut Vec<MenuAction>,
     ) {
         ui.collapsing("Skin", |ui| {
             if let Some(thumb) = thumbnail {
@@ -2221,6 +2382,26 @@ impl MenuBar {
                 ui.label("No skin loaded.");
                 ui.label("Use File \u{2192} Open Skin\u{2026} to load.");
             }
+            ui.separator();
+            let mut hd = hd_skin_enabled;
+            if ui.checkbox(&mut hd, "HD Skin (8192×512)")
+                .on_hover_text("Load skins at 8192×512 instead of 4096×256 for more detail. Rebuilds painter immediately if a skin is loaded.")
+                .changed()
+            {
+                changes.push(ParamChange::HdSkinEnabled(hd));
+            }
+            ui.separator();
+            ui.add(
+                egui::Slider::new(qbist_detail, 0.0..=1.0)
+                    .text("Detail")
+                    .step_by(0.01),
+            )
+            .on_hover_text("Higher = denser, more intricate patterns (slower to generate)");
+            if ui.button("Generate Qbist Skin").clicked() {
+                frame_actions.push(MenuAction::GenerateQbist(*qbist_detail));
+            }
+            ui.label(egui::RichText::new("Renders a random abstract pattern and auto-loads it.")
+                .small().weak());
         });
     }
 }

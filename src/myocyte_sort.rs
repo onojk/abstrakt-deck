@@ -7,7 +7,7 @@
 use crate::myocyte_preprocess::{SplatGpuData, SplatWithDepth};
 
 /// Sort splats back-to-front and return the GPU data slice in draw order.
-pub fn sort_back_to_front(splats: &mut Vec<SplatWithDepth>) -> Vec<SplatGpuData> {
+pub fn sort_back_to_front(splats: &mut [SplatWithDepth]) -> Vec<SplatGpuData> {
     // Ascending sort: most-negative depth first = farthest cell first.
     splats.sort_unstable_by(|a, b| {
         a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal)
