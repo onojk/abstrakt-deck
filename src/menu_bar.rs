@@ -78,6 +78,13 @@ pub enum LockTarget {
     MicroSwirlDensity,
     MicroSwirlAmplitude,
     MicroSwirlSpeed,
+    ExplosionEnabled,
+    ExplosionIntervalMin,
+    ExplosionIntervalMax,
+    ExplosionChunkCount,
+    ExplosionChunkSize,
+    ExplosionTrembleDur,
+    ExplosionFlyoutDur,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +204,13 @@ pub enum ParamChange {
     MicroSwirlDensity(f32),
     MicroSwirlAmplitude(f32),
     MicroSwirlSpeed(f32),
+    ExplosionEnabled(bool),
+    ExplosionIntervalMin(f32),
+    ExplosionIntervalMax(f32),
+    ExplosionChunkCount(u32),
+    ExplosionChunkSize(f32),
+    ExplosionTrembleDur(f32),
+    ExplosionFlyoutDur(f32),
     ApplyBundle(crate::bundles::BundleId),
     ApplyRandomBundle,
 }
@@ -485,6 +499,8 @@ impl MenuBar {
                             Self::bezold_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::micro_swirl_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::explosion_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::color_theory_section(ui, current_params, &mut frame_changes);
                         });
@@ -1679,6 +1695,131 @@ impl MenuBar {
                                     .step_by(0.05)
                             ).changed() {
                                 changes.push(ParamChange::MicroSwirlSpeed(v));
+                            }
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    fn explosion_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Explosions", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Particle bursts sample the scene additively — live texture sparks. (A)"
+                ).small().weak()
+            );
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.explosion_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::ExplosionEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.explosion_enabled, |ui| {
+                    let mut v = params.explosion_enabled;
+                    if ui.checkbox(&mut v, "Enable (A)").changed() {
+                        changes.push(ParamChange::ExplosionEnabled(v));
+                    }
+                });
+            });
+
+            ui.add_enabled_ui(params.explosion_enabled, |ui| {
+                ui.indent("explosion_indent", |ui| {
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.explosion_interval_min).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::ExplosionIntervalMin));
+                        }
+                        ui.add_enabled_ui(!params.locks.explosion_interval_min, |ui| {
+                            let mut v = params.explosion_interval_min;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.5..=10.0)
+                                    .text("Interval min (s)")
+                                    .step_by(0.5)
+                            ).changed() {
+                                changes.push(ParamChange::ExplosionIntervalMin(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.explosion_interval_max).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::ExplosionIntervalMax));
+                        }
+                        ui.add_enabled_ui(!params.locks.explosion_interval_max, |ui| {
+                            let mut v = params.explosion_interval_max;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 1.0..=15.0)
+                                    .text("Interval max (s)")
+                                    .step_by(0.5)
+                            ).changed() {
+                                changes.push(ParamChange::ExplosionIntervalMax(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.explosion_chunk_count).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::ExplosionChunkCount));
+                        }
+                        ui.add_enabled_ui(!params.locks.explosion_chunk_count, |ui| {
+                            let mut v = params.explosion_chunk_count;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 5_u32..=80)
+                                    .text("Chunks per burst")
+                            ).changed() {
+                                changes.push(ParamChange::ExplosionChunkCount(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.explosion_chunk_size).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::ExplosionChunkSize));
+                        }
+                        ui.add_enabled_ui(!params.locks.explosion_chunk_size, |ui| {
+                            let mut v = params.explosion_chunk_size;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.01..=0.15)
+                                    .text("Chunk size")
+                                    .step_by(0.005)
+                            ).changed() {
+                                changes.push(ParamChange::ExplosionChunkSize(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.explosion_tremble_dur).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::ExplosionTrembleDur));
+                        }
+                        ui.add_enabled_ui(!params.locks.explosion_tremble_dur, |ui| {
+                            let mut v = params.explosion_tremble_dur;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.05..=1.5)
+                                    .text("Tremble dur (s)")
+                                    .step_by(0.05)
+                            ).changed() {
+                                changes.push(ParamChange::ExplosionTrembleDur(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.explosion_flyout_dur).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::ExplosionFlyoutDur));
+                        }
+                        ui.add_enabled_ui(!params.locks.explosion_flyout_dur, |ui| {
+                            let mut v = params.explosion_flyout_dur;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.3..=4.0)
+                                    .text("Flyout dur (s)")
+                                    .step_by(0.1)
+                            ).changed() {
+                                changes.push(ParamChange::ExplosionFlyoutDur(v));
                             }
                         });
                     });

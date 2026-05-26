@@ -1,6 +1,8 @@
 mod audio;
 mod bezold;
 mod micro_swirl;
+mod explosions;
+mod explosion_overlay;
 mod echo_composite;
 mod bundles;
 mod cell;
@@ -412,6 +414,14 @@ pub struct ParamLocks {
     pub micro_swirl_density:   bool,
     pub micro_swirl_amplitude: bool,
     pub micro_swirl_speed:     bool,
+    // Explosions burst effect
+    pub explosion_enabled:      bool,
+    pub explosion_interval_min: bool,
+    pub explosion_interval_max: bool,
+    pub explosion_chunk_count:  bool,
+    pub explosion_chunk_size:   bool,
+    pub explosion_tremble_dur:  bool,
+    pub explosion_flyout_dur:   bool,
     // Spin & Trails
     pub spin_enabled:     bool,
     pub spin_speed:       bool,
@@ -578,6 +588,14 @@ pub struct VisualParams {
     pub micro_swirl_density:   f32,
     pub micro_swirl_amplitude: f32,
     pub micro_swirl_speed:     f32,
+    // Explosions burst effect
+    pub explosion_enabled:      bool,
+    pub explosion_interval_min: f32,   // seconds between bursts (min)
+    pub explosion_interval_max: f32,   // seconds between bursts (max)
+    pub explosion_chunk_count:  u32,   // chunks per burst
+    pub explosion_chunk_size:   f32,   // half-extent in screen-height UV
+    pub explosion_tremble_dur:  f32,   // tremble phase duration (s)
+    pub explosion_flyout_dur:   f32,   // flyout + fade duration (s)
     // Spin & Trails
     pub spin_enabled:     bool,
     pub spin_speed:       f32,   // revolutions per second, signed; -2.0..+2.0
@@ -679,6 +697,13 @@ impl Default for VisualParams {
             micro_swirl_density:   10.0,
             micro_swirl_amplitude: 0.8,
             micro_swirl_speed:     0.35,
+            explosion_enabled:      false,
+            explosion_interval_min: 3.0,
+            explosion_interval_max: 8.0,
+            explosion_chunk_count:  40,
+            explosion_chunk_size:   0.04,
+            explosion_tremble_dur:  0.4,
+            explosion_flyout_dur:   1.2,
             spin_enabled:     false,
             spin_speed:       0.0,
             spin_audio_react: false,
@@ -845,6 +870,20 @@ struct Preset {
     #[serde(default = "default_micro_swirl_speed")]
     micro_swirl_speed: f32,
     #[serde(default)]
+    explosion_enabled: bool,
+    #[serde(default = "default_explosion_interval_min")]
+    explosion_interval_min: f32,
+    #[serde(default = "default_explosion_interval_max")]
+    explosion_interval_max: f32,
+    #[serde(default = "default_explosion_chunk_count")]
+    explosion_chunk_count: u32,
+    #[serde(default = "default_explosion_chunk_size")]
+    explosion_chunk_size: f32,
+    #[serde(default = "default_explosion_tremble_dur")]
+    explosion_tremble_dur: f32,
+    #[serde(default = "default_explosion_flyout_dur")]
+    explosion_flyout_dur: f32,
+    #[serde(default)]
     spin_enabled: bool,
     #[serde(default = "default_spin_speed")]
     spin_speed: f32,
@@ -907,6 +946,12 @@ fn default_bezold_radius()           -> f32  { 3.0  }
 fn default_micro_swirl_density()     -> f32  { 10.0 }
 fn default_micro_swirl_amplitude()   -> f32  { 0.8  }
 fn default_micro_swirl_speed()       -> f32  { 0.35 }
+fn default_explosion_interval_min()  -> f32  { 3.0  }
+fn default_explosion_interval_max()  -> f32  { 8.0  }
+fn default_explosion_chunk_count()   -> u32  { 40   }
+fn default_explosion_chunk_size()    -> f32  { 0.04 }
+fn default_explosion_tremble_dur()   -> f32  { 0.4  }
+fn default_explosion_flyout_dur()    -> f32  { 1.2  }
 fn default_spin_speed()              -> f32  { 0.0  }
 fn default_trail_decay()             -> f32  { 0.0  }
 fn default_color_harmony()           -> color::ColorHarmony    { color::ColorHarmony::Analogous }
@@ -1011,6 +1056,13 @@ impl Preset {
             micro_swirl_density:   params.micro_swirl_density,
             micro_swirl_amplitude: params.micro_swirl_amplitude,
             micro_swirl_speed:     params.micro_swirl_speed,
+            explosion_enabled:      params.explosion_enabled,
+            explosion_interval_min: params.explosion_interval_min,
+            explosion_interval_max: params.explosion_interval_max,
+            explosion_chunk_count:  params.explosion_chunk_count,
+            explosion_chunk_size:   params.explosion_chunk_size,
+            explosion_tremble_dur:  params.explosion_tremble_dur,
+            explosion_flyout_dur:   params.explosion_flyout_dur,
             spin_enabled:     params.spin_enabled,
             spin_speed:       params.spin_speed,
             spin_audio_react: params.spin_audio_react,
@@ -1148,6 +1200,13 @@ impl Preset {
         params.micro_swirl_density   = self.micro_swirl_density;
         params.micro_swirl_amplitude = self.micro_swirl_amplitude;
         params.micro_swirl_speed     = self.micro_swirl_speed;
+        params.explosion_enabled      = self.explosion_enabled;
+        params.explosion_interval_min = self.explosion_interval_min;
+        params.explosion_interval_max = self.explosion_interval_max;
+        params.explosion_chunk_count  = self.explosion_chunk_count;
+        params.explosion_chunk_size   = self.explosion_chunk_size;
+        params.explosion_tremble_dur  = self.explosion_tremble_dur;
+        params.explosion_flyout_dur   = self.explosion_flyout_dur;
         params.spin_enabled     = self.spin_enabled;
         params.spin_speed       = self.spin_speed;
         params.spin_audio_react = self.spin_audio_react;
@@ -2133,6 +2192,14 @@ struct GpuState {
 
     // Micro swirl screen-space distortion post-process
     micro_swirl: micro_swirl::MicroSwirl,
+
+    // Explosions burst effect
+    explosion_system:     explosions::ExplosionSystem,
+    explosion_overlay:    explosion_overlay::ExplosionOverlay,
+    export_explosion:     Option<explosions::ExplosionSystem>,
+    // Dedicated export-resolution overlay texture (created at export start, None otherwise).
+    // Kept separate from explosion_overlay so the live overlay is never resized for export.
+    export_explosion_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
 
     // Phantom Alpha: chroma-keyed delayed-frame overlay
     phantom: phantom::PhantomAlpha,
@@ -3904,8 +3971,10 @@ impl GpuState {
             multiview: None, cache: None,
         });
 
-        let bezold       = bezold::Bezold::new(&device, w, h, surface_format);
-        let micro_swirl  = micro_swirl::MicroSwirl::new(&device, w, h, surface_format);
+        let bezold            = bezold::Bezold::new(&device, w, h, surface_format);
+        let micro_swirl       = micro_swirl::MicroSwirl::new(&device, w, h, surface_format);
+        let explosion_system  = explosions::ExplosionSystem::new();
+        let explosion_overlay = explosion_overlay::ExplosionOverlay::new(&device, w, h, surface_format);
         let phantom = phantom::PhantomAlpha::new(&device, surface_format);
         let myocyte_renderer = myocyte_render::MyocyteRenderer::new(
             &device,
@@ -3970,6 +4039,10 @@ impl GpuState {
             export_spin: None,
             bezold,
             micro_swirl,
+            explosion_system,
+            explosion_overlay,
+            export_explosion: None,
+            export_explosion_tex: None,
             phantom,
             readback_buffer, readback_padded_bytes_per_row,
             recorder: None,
@@ -4252,6 +4325,7 @@ impl GpuState {
         self.scene_texture = new_scene_tex;
         self.bezold.resize(&self.device, w, h, self.config.format);
         self.micro_swirl.resize(&self.device, w, h, self.config.format);
+        self.explosion_overlay.resize(&self.device, w, h, self.config.format);
 
         self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Blit BG"),
@@ -4427,6 +4501,7 @@ impl GpuState {
                                         self.export_state = None;
                                         self.export_ribbon = None;
                                         self.export_feedback = None;
+                                        self.export_explosion_tex = None;
                                         return Ok(());
                                     }
                                 };
@@ -4463,12 +4538,14 @@ impl GpuState {
                                 self.export_state = None;
                                 self.export_ribbon = None;
                                 self.export_feedback = None;
+                                self.export_explosion_tex = None;
                             }
                             Err(_) => {
                                 log::error!("[echo] composite thread panicked");
                                 self.export_state = None;
                                 self.export_ribbon = None;
                                 self.export_feedback = None;
+                                self.export_explosion_tex = None;
                             }
                         }
                     } else {
@@ -4495,6 +4572,7 @@ impl GpuState {
                         self.export_state = None;
                         self.export_ribbon = None;
                         self.export_feedback = None;
+                        self.export_explosion_tex = None;
                         // fall through to live render below
                     } else {
                         self.render_mux_phase_preview(menu);
@@ -4505,6 +4583,7 @@ impl GpuState {
                     self.export_state = None;
                     self.export_ribbon = None;
                     self.export_feedback = None;
+                    self.export_explosion_tex = None;
                     // fall through to live render below
                 }
             }
@@ -4607,6 +4686,23 @@ impl GpuState {
             };
             self.spin_angle = (self.spin_angle + base_speed * (1.0 + audio_boost) * dt)
                 .rem_euclid(std::f32::consts::TAU);
+        }
+        // Tick explosion system (live path).
+        {
+            let mut rng = rand::thread_rng();
+            self.explosion_system.set_interval(
+                self.params.explosion_interval_min,
+                self.params.explosion_interval_max,
+            );
+            self.explosion_system.tick(
+                dt, &mut rng,
+                self.params.explosion_enabled,
+                self.params.explosion_chunk_count as usize,
+                self.params.explosion_chunk_size,
+                self.params.explosion_tremble_dur,
+                self.params.explosion_flyout_dur,
+                self.size.width as f32 / self.size.height as f32,
+            );
         }
         let effective_spin_angle = if self.params.spin_enabled { self.spin_angle } else { 0.0 };
         let effective_trail_decay = if self.params.spin_enabled { self.params.trail_decay.min(0.98) } else { 0.0 };
@@ -5344,6 +5440,36 @@ impl GpuState {
             self.blackhole_was_enabled = false;
         }
 
+        // Pass 5.5: Explosions burst overlay (additive on top of swapchain).
+        if self.params.explosion_enabled {
+            let frames = self.explosion_system.collect_chunks();
+            if !frames.is_empty() {
+                let aspect = self.size.width as f32 / self.size.height as f32;
+                let verts = explosion_overlay::make_chunk_quads(&frames, aspect);
+                let n = self.explosion_overlay.upload_verts(&self.queue, &verts);
+                if n > 0 {
+                    let scene_bg = self.explosion_overlay.make_scene_bind_group(
+                        &self.device, pass5_source_view,
+                    );
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Explosion overlay pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view:           &screen_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load:  wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+                    self.explosion_overlay.render(&mut pass, &scene_bg, n as u32);
+                }
+            }
+        }
+
         // Pass 6: help overlay (animated slide-in, drawn on top of swapchain)
         self.help_overlay.update_animation();
         if self.help_overlay.should_render() {
@@ -5854,6 +5980,31 @@ impl GpuState {
                 spin_angle: 0.0,
             });
         }
+        // Fresh explosion system for the export timeline (deterministic, dt = 1/fps).
+        let mut exp_expl = explosions::ExplosionSystem::new();
+        exp_expl.set_interval(
+            self.params.explosion_interval_min,
+            self.params.explosion_interval_max,
+        );
+        self.export_explosion = Some(exp_expl);
+        // Dedicated export-sized overlay texture — separate from the live explosion_overlay so
+        // the live texture is never resized during export.
+        {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Export explosion overlay"),
+                size: wgpu::Extent3d { width: off_w, height: off_h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count:    1,
+                dimension:       wgpu::TextureDimension::D2,
+                format:          self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.export_explosion_tex = Some((tex, view));
+        }
         Ok(())
     }
 
@@ -6005,6 +6156,27 @@ impl GpuState {
         let force = -30.0 * self.shake_offset - 8.0 * self.shake_velocity;
         self.shake_velocity += force * dt;
         self.shake_offset   += self.shake_velocity * dt;
+        // Tick explosion system with deterministic export dt.
+        if let Some(exp_expl) = self.export_explosion.as_mut() {
+            let mut rng = rand::thread_rng();
+            exp_expl.set_interval(
+                self.params.explosion_interval_min,
+                self.params.explosion_interval_max,
+            );
+            let exp_aspect = {
+                let t = self.offline_target.as_ref().unwrap();
+                t.width as f32 / t.height as f32
+            };
+            exp_expl.tick(
+                dt, &mut rng,
+                self.params.explosion_enabled,
+                self.params.explosion_chunk_count as usize,
+                self.params.explosion_chunk_size,
+                self.params.explosion_tremble_dur,
+                self.params.explosion_flyout_dur,
+                exp_aspect,
+            );
+        }
 
         // ── Phase 4: uniforms with export resolution + frame_time ─────────────
         let (off_w, off_h) = {
@@ -6704,17 +6876,98 @@ impl GpuState {
             }
         }
 
-        // Resize bezold/micro_swirl back to live window dimensions after export passes.
-        if self.params.bezold_enabled {
-            self.bezold.resize(&self.device, self.size.width, self.size.height, self.config.format);
-        }
-        if self.params.micro_swirl_enabled {
-            self.micro_swirl.resize(&self.device, self.size.width, self.size.height, self.config.format);
-        }
+        // Export Pass 5.5: Explosions overlay bake.
+        // Renders into export_explosion_tex (created at export start, sized to off_w×off_h).
+        // The live explosion_overlay texture is never resized for export.
+        let use_explosion_overlay = if self.params.explosion_enabled {
+            let frames = self.export_explosion.as_ref()
+                .map(|s| s.collect_chunks())
+                .unwrap_or_default();
+            if !frames.is_empty() {
+                let exp_aspect = off_w as f32 / off_h as f32;
+                let verts = explosion_overlay::make_chunk_quads(&frames, exp_aspect);
+                let n = self.explosion_overlay.upload_verts(&self.queue, &verts);
+                if n > 0 {
+                    if let Some((ref exp_tex, _)) = self.export_explosion_tex {
+                        // Owned view — Arc-backed, no lifetime tie to export_explosion_tex borrow.
+                        let exp_dst_view = exp_tex
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+
+                        // Determine base frame texture (same priority as the readback chain).
+                        let base_tex: &wgpu::Texture = if self.params.micro_swirl_enabled {
+                            &self.micro_swirl.texture
+                        } else if self.params.bezold_enabled {
+                            &self.bezold.texture
+                        } else {
+                            &self.offline_target.as_ref().unwrap().texture
+                        };
+                        let base_view = base_tex
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+
+                        // Step 1: blit base frame → export_explosion_tex (Clear/replace).
+                        {
+                            let blit_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("Explosion export blit BG"),
+                                layout: &self.blit_bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(&base_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                                    },
+                                ],
+                            });
+                            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Explosion export blit pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &exp_dst_view, resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load:  wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                occlusion_query_set: None, timestamp_writes: None,
+                            });
+                            pass.set_pipeline(&self.blit_pipeline);
+                            pass.set_bind_group(0, &blit_bg, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+
+                        // Step 2: draw chunks additively into export_explosion_tex (Load/accumulate).
+                        {
+                            let scene_bg = self.explosion_overlay.make_scene_bind_group(
+                                &self.device, &base_view,
+                            );
+                            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Explosion export additive pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &exp_dst_view, resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load:  wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                occlusion_query_set: None, timestamp_writes: None,
+                            });
+                            self.explosion_overlay.render(&mut pass, &scene_bg, n as u32);
+                        }
+
+                        true
+                    } else { false }
+                } else { false }
+            } else { false }
+        } else { false };
 
         // Readback: copy final post-process output → staging buffer.
-        // Source priority: micro_swirl > bezold > offline_target.
-        let readback_texture: &wgpu::Texture = if self.params.micro_swirl_enabled {
+        // Source priority: export_explosion_tex > micro_swirl > bezold > offline_target.
+        let readback_texture: &wgpu::Texture = if use_explosion_overlay {
+            &self.export_explosion_tex.as_ref().unwrap().0
+        } else if self.params.micro_swirl_enabled {
             &self.micro_swirl.texture
         } else if self.params.bezold_enabled {
             &self.bezold.texture
@@ -6746,6 +6999,15 @@ impl GpuState {
             wgpu::Extent3d { width: off_w, height: off_h, depth_or_array_layers: 1 },
         );
         self.queue.submit(std::iter::once(enc.finish()));
+
+        // Restore bezold/micro_swirl to live window dimensions now that the readback copy
+        // has been submitted — the textures must not be resized before the GPU copy executes.
+        if self.params.bezold_enabled {
+            self.bezold.resize(&self.device, self.size.width, self.size.height, self.config.format);
+        }
+        if self.params.micro_swirl_enabled {
+            self.micro_swirl.resize(&self.device, self.size.width, self.size.height, self.config.format);
+        }
 
         // ── Phase 7: map, de-pad, BGRA→RGBA, send to worker ──────────────────
         let mut pixels = {
@@ -7108,6 +7370,22 @@ impl GpuState {
         }
         if !self.params.locks.micro_swirl_speed && self.params.micro_swirl_enabled {
             self.params.micro_swirl_speed = rng.gen_range(0.2_f32..=0.6);
+        }
+        if !self.params.locks.explosion_enabled {
+            self.params.explosion_enabled = rng.gen_bool(0.20);
+        }
+        if !self.params.locks.explosion_interval_min && self.params.explosion_enabled {
+            self.params.explosion_interval_min = rng.gen_range(1.5_f32..=5.0);
+        }
+        if !self.params.locks.explosion_interval_max && self.params.explosion_enabled {
+            self.params.explosion_interval_max =
+                (self.params.explosion_interval_min + rng.gen_range(2.0_f32..=6.0)).min(12.0);
+        }
+        if !self.params.locks.explosion_chunk_count && self.params.explosion_enabled {
+            self.params.explosion_chunk_count = rng.gen_range(20_u32..=60);
+        }
+        if !self.params.locks.explosion_chunk_size && self.params.explosion_enabled {
+            self.params.explosion_chunk_size = rng.gen_range(0.025_f32..=0.07);
         }
     }
 
@@ -7608,6 +7886,13 @@ impl ApplicationHandler for App {
                     }
                     KeyCode::KeyU => {
                         log::info!("Micro swirl: LOCKED");
+                    }
+                    KeyCode::KeyA if !gpu.params.locks.explosion_enabled => {
+                        gpu.params.explosion_enabled = !gpu.params.explosion_enabled;
+                        log::info!("Explosions: {}", if gpu.params.explosion_enabled { "ON" } else { "OFF" });
+                    }
+                    KeyCode::KeyA => {
+                        log::info!("Explosions: LOCKED");
                     }
                     KeyCode::KeyN if !ctrl => {
                         gpu.params.random_mode_enabled = !gpu.params.random_mode_enabled;
@@ -8351,6 +8636,13 @@ impl ApplicationHandler for App {
                                 LockTarget::MicroSwirlDensity    => gpu.params.locks.micro_swirl_density   = !gpu.params.locks.micro_swirl_density,
                                 LockTarget::MicroSwirlAmplitude  => gpu.params.locks.micro_swirl_amplitude = !gpu.params.locks.micro_swirl_amplitude,
                                 LockTarget::MicroSwirlSpeed      => gpu.params.locks.micro_swirl_speed     = !gpu.params.locks.micro_swirl_speed,
+                                LockTarget::ExplosionEnabled     => gpu.params.locks.explosion_enabled      = !gpu.params.locks.explosion_enabled,
+                                LockTarget::ExplosionIntervalMin => gpu.params.locks.explosion_interval_min = !gpu.params.locks.explosion_interval_min,
+                                LockTarget::ExplosionIntervalMax => gpu.params.locks.explosion_interval_max = !gpu.params.locks.explosion_interval_max,
+                                LockTarget::ExplosionChunkCount  => gpu.params.locks.explosion_chunk_count  = !gpu.params.locks.explosion_chunk_count,
+                                LockTarget::ExplosionChunkSize   => gpu.params.locks.explosion_chunk_size   = !gpu.params.locks.explosion_chunk_size,
+                                LockTarget::ExplosionTrembleDur  => gpu.params.locks.explosion_tremble_dur  = !gpu.params.locks.explosion_tremble_dur,
+                                LockTarget::ExplosionFlyoutDur   => gpu.params.locks.explosion_flyout_dur   = !gpu.params.locks.explosion_flyout_dur,
                             }
                             log::info!("Lock toggled: {:?}", target);
                         }
@@ -8422,6 +8714,13 @@ impl ApplicationHandler for App {
                         ParamChange::MicroSwirlDensity(v)    => gpu.params.micro_swirl_density   = v,
                         ParamChange::MicroSwirlAmplitude(v)  => gpu.params.micro_swirl_amplitude = v,
                         ParamChange::MicroSwirlSpeed(v)      => gpu.params.micro_swirl_speed     = v,
+                        ParamChange::ExplosionEnabled(v)     => gpu.params.explosion_enabled      = v,
+                        ParamChange::ExplosionIntervalMin(v) => gpu.params.explosion_interval_min = v,
+                        ParamChange::ExplosionIntervalMax(v) => gpu.params.explosion_interval_max = v,
+                        ParamChange::ExplosionChunkCount(v)  => gpu.params.explosion_chunk_count  = v,
+                        ParamChange::ExplosionChunkSize(v)   => gpu.params.explosion_chunk_size   = v,
+                        ParamChange::ExplosionTrembleDur(v)  => gpu.params.explosion_tremble_dur  = v,
+                        ParamChange::ExplosionFlyoutDur(v)   => gpu.params.explosion_flyout_dur   = v,
                         ParamChange::ApplyBundle(bundle)     => {
                             let locks = gpu.params.locks;
                             bundle.apply(&mut gpu.params, &locks);
@@ -8492,6 +8791,7 @@ fn main() {
     println!("  G      toggle Phantom Alpha overlay");
     println!("  V      toggle Bezold simultaneous-contrast (color pop)");
     println!("  U      toggle Micro Swirl screen-space distortion");
+    println!("  A      toggle Explosions burst effect");
     println!("  H      cycle color harmony (Mono/Analogous/Comp/Split/Triad/Tetra)");
     println!("  J      toggle applied harmony (recolor Skin/Image/PrintHead via Color Theory)");
     println!("  space  toggle MIDI shake");
@@ -8645,6 +8945,13 @@ mod tests {
             micro_swirl_density:   12.0,
             micro_swirl_amplitude: 0.9,
             micro_swirl_speed:     0.4,
+            explosion_enabled:      true,
+            explosion_interval_min: 2.0,
+            explosion_interval_max: 6.0,
+            explosion_chunk_count:  50,
+            explosion_chunk_size:   0.05,
+            explosion_tremble_dur:  0.5,
+            explosion_flyout_dur:   1.5,
             spin_enabled:     true,
             spin_speed:       0.5,
             spin_audio_react: true,
@@ -8753,6 +9060,13 @@ mod tests {
         assert_eq!(restored.micro_swirl_density,   original.micro_swirl_density,   "micro_swirl_density failed");
         assert_eq!(restored.micro_swirl_amplitude, original.micro_swirl_amplitude, "micro_swirl_amplitude failed");
         assert_eq!(restored.micro_swirl_speed,     original.micro_swirl_speed,     "micro_swirl_speed failed");
+        assert_eq!(restored.explosion_enabled,      original.explosion_enabled,      "explosion_enabled failed");
+        assert_eq!(restored.explosion_interval_min, original.explosion_interval_min, "explosion_interval_min failed");
+        assert_eq!(restored.explosion_interval_max, original.explosion_interval_max, "explosion_interval_max failed");
+        assert_eq!(restored.explosion_chunk_count,  original.explosion_chunk_count,  "explosion_chunk_count failed");
+        assert_eq!(restored.explosion_chunk_size,   original.explosion_chunk_size,   "explosion_chunk_size failed");
+        assert_eq!(restored.explosion_tremble_dur,  original.explosion_tremble_dur,  "explosion_tremble_dur failed");
+        assert_eq!(restored.explosion_flyout_dur,   original.explosion_flyout_dur,   "explosion_flyout_dur failed");
         assert_eq!(restored.spin_enabled,     original.spin_enabled,     "spin_enabled failed");
         assert_eq!(restored.spin_speed,       original.spin_speed,       "spin_speed failed");
         assert_eq!(restored.spin_audio_react, original.spin_audio_react, "spin_audio_react failed");

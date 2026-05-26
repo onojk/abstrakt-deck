@@ -147,6 +147,13 @@ fn apply_defaults(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      def.micro_swirl_density);
     set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    def.micro_swirl_amplitude);
     set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        def.micro_swirl_speed);
+    set_if!(p, locks, explosion_enabled,        explosion_enabled,        def.explosion_enabled);
+    set_if!(p, locks, explosion_interval_min,   explosion_interval_min,   def.explosion_interval_min);
+    set_if!(p, locks, explosion_interval_max,   explosion_interval_max,   def.explosion_interval_max);
+    set_if!(p, locks, explosion_chunk_count,    explosion_chunk_count,    def.explosion_chunk_count);
+    set_if!(p, locks, explosion_chunk_size,     explosion_chunk_size,     def.explosion_chunk_size);
+    set_if!(p, locks, explosion_tremble_dur,    explosion_tremble_dur,    def.explosion_tremble_dur);
+    set_if!(p, locks, explosion_flyout_dur,     explosion_flyout_dur,     def.explosion_flyout_dur);
     set_if!(p, locks, audio_route_shape,        audio_route_shape,        def.audio_route_shape);
     set_if!(p, locks, audio_route_kaleido,      audio_route_kaleido,      def.audio_route_kaleido);
     set_if!(p, locks, audio_route_shake,        audio_route_shake,        def.audio_route_shake);
@@ -207,6 +214,13 @@ fn apply_prism(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      12.0);
     set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    0.9);
     set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.4);
+    set_if!(p, locks, explosion_enabled,        explosion_enabled,        true);
+    set_if!(p, locks, explosion_interval_min,   explosion_interval_min,   4.0);
+    set_if!(p, locks, explosion_interval_max,   explosion_interval_max,   10.0);
+    set_if!(p, locks, explosion_chunk_count,    explosion_chunk_count,    45);
+    set_if!(p, locks, explosion_chunk_size,     explosion_chunk_size,     0.045);
+    set_if!(p, locks, explosion_tremble_dur,    explosion_tremble_dur,    0.35);
+    set_if!(p, locks, explosion_flyout_dur,     explosion_flyout_dur,     1.3);
 }
 
 fn apply_organic(p: &mut VisualParams, locks: &crate::ParamLocks) {
@@ -263,6 +277,13 @@ fn apply_neon(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      8.0);
     set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    1.0);
     set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.5);
+    set_if!(p, locks, explosion_enabled,        explosion_enabled,        true);
+    set_if!(p, locks, explosion_interval_min,   explosion_interval_min,   2.0);
+    set_if!(p, locks, explosion_interval_max,   explosion_interval_max,   5.0);
+    set_if!(p, locks, explosion_chunk_count,    explosion_chunk_count,    55);
+    set_if!(p, locks, explosion_chunk_size,     explosion_chunk_size,     0.05);
+    set_if!(p, locks, explosion_tremble_dur,    explosion_tremble_dur,    0.3);
+    set_if!(p, locks, explosion_flyout_dur,     explosion_flyout_dur,     1.0);
 }
 
 fn apply_frost(p: &mut VisualParams, locks: &crate::ParamLocks) {
@@ -407,6 +428,13 @@ fn apply_carnival(p: &mut VisualParams, locks: &crate::ParamLocks) {
     set_if!(p, locks, micro_swirl_density,      micro_swirl_density,      10.0);
     set_if!(p, locks, micro_swirl_amplitude,    micro_swirl_amplitude,    0.85);
     set_if!(p, locks, micro_swirl_speed,        micro_swirl_speed,        0.45);
+    set_if!(p, locks, explosion_enabled,        explosion_enabled,        true);
+    set_if!(p, locks, explosion_interval_min,   explosion_interval_min,   1.5);
+    set_if!(p, locks, explosion_interval_max,   explosion_interval_max,   4.0);
+    set_if!(p, locks, explosion_chunk_count,    explosion_chunk_count,    60);
+    set_if!(p, locks, explosion_chunk_size,     explosion_chunk_size,     0.055);
+    set_if!(p, locks, explosion_tremble_dur,    explosion_tremble_dur,    0.4);
+    set_if!(p, locks, explosion_flyout_dur,     explosion_flyout_dur,     1.4);
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
