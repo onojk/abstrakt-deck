@@ -170,28 +170,31 @@ impl TextAtlas {
     }
 }
 
-/// Try each path in `candidates` until a readable TTF/OTF is found.
-/// Returns the raw file bytes.
+/// Project-bundled alien-script font (AbstraktGlyphs-Regular.ttf).
+/// Embedded at compile time so the binary is self-contained regardless of
+/// what fonts are installed on the host.
+static BUNDLED_FONT: &[u8] =
+    include_bytes!("../../assets/fonts/AbstraktGlyphs-Regular.ttf");
+
+/// Return font bytes for the text atlas.
+///
+/// Priority:
+///   1. `ABSTRAKT_FONT_PATH` env var (override for development/testing)
+///   2. Bundled `AbstraktGlyphs-Regular.ttf` (default)
 pub fn load_font_bytes(path_hint: Option<&str>) -> Result<Vec<u8>, String> {
-    let candidates: &[&str] = &[
-        // caller-supplied hint takes priority
-        path_hint.unwrap_or(""),
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",           // Arch Linux
-        "/usr/share/fonts/fonts-go/Go-Regular.ttf",
-        "/usr/share/fonts/opentype/inter/Inter-Regular.otf",
-    ];
-    for &path in candidates {
-        if path.is_empty() { continue; }
-        if let Ok(bytes) = std::fs::read(path) {
-            log::info!("TextAtlas: loaded font from {}", path);
-            return Ok(bytes);
+    if let Some(hint) = path_hint {
+        if !hint.is_empty() {
+            match std::fs::read(hint) {
+                Ok(bytes) => {
+                    log::info!("TextAtlas: loaded font override from {}", hint);
+                    return Ok(bytes);
+                }
+                Err(e) => log::warn!("TextAtlas: ABSTRAKT_FONT_PATH {:?} unreadable: {}", hint, e),
+            }
         }
     }
-    Err("No system font found for text atlas. Set ABSTRAKT_FONT_PATH or install DejaVuSans.".into())
+    log::info!("TextAtlas: using bundled AbstraktGlyphs-Regular.ttf");
+    Ok(BUNDLED_FONT.to_vec())
 }
 
 /// Brute-force Euclidean signed distance field.
