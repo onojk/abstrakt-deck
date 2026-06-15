@@ -2015,6 +2015,9 @@ pub struct ExportState {
     pub grid_panel_count:  Option<usize>,
     pub panel_resources:   Vec<PanelExportResources>,
     pub grid_count_elapsed: f32,
+    // Slice 2: lyric corpus + sampler (alive for the duration of the export)
+    pub lyric_corpus:  Option<text::corpus::LyricCorpus>,
+    pub lyric_sampler: Option<text::corpus::LyricSampler>,
 }
 
 fn spawn_frame_save_worker() -> (SyncSender<FrameSaveJob>, std::thread::JoinHandle<()>) {
@@ -5991,14 +5994,15 @@ impl GpuState {
             grid_panel_count,
             panel_resources,
             grid_count_elapsed: 0.0,
+            lyric_corpus:  None,
+            lyric_sampler: None,
         });
 
-        // Build text pass + set lyric text for this export run.
+        // Build text pipeline (once) and initialise corpus + sampler for this export run.
         {
             let lyric = std::env::var("ABSTRAKT_LYRIC_TEXT")
                 .unwrap_or_else(|_| "abstrakt".to_string());
             if let Some(atlas) = &self.text_atlas {
-                // Build the pipeline the first time (format may vary by GPU).
                 if self.text_pass.is_none() {
                     let pass = text::pass::TextPass::new(
                         &self.device,
@@ -6008,23 +6012,15 @@ impl GpuState {
                     pass.write_default_uniforms(&self.queue);
                     self.text_pass = Some(pass);
                 }
-                if let Some(pass) = &mut self.text_pass {
-                    let corpus = text::corpus::LyricCorpus::from_text(&lyric);
-                    let fragment = corpus.fragment(0).to_string();
-                    let (off_w, off_h) = self.params.export_resolution.dimensions();
-                    // Font size: roughly 1/12th of the export height for subtitle weight.
-                    let font_px = off_h as f32 / 12.0;
-                    pass.set_text(
-                        &self.queue, atlas,
-                        &fragment,
-                        font_px,
-                        off_w, off_h,
-                        -0.75, // baseline near bottom of frame
-                    );
-                    // White text with slight transparency.
-                    pass.set_color(&self.queue, 1.0, 1.0, 1.0, 0.92);
-                    log::info!("TextPass: rendering {:?} at {}px over {}×{}", fragment, font_px, off_w, off_h);
+            }
+            // Build corpus + sampler; fragments are spawned reactively per frame.
+            if let Some(exp) = self.export_state.as_mut() {
+                let corpus = text::corpus::LyricCorpus::from_text(&lyric);
+                if !corpus.is_empty() {
+                    log::info!("LyricCorpus: loaded for reactive surfacing");
+                    exp.lyric_sampler = Some(text::corpus::LyricSampler::new());
                 }
+                exp.lyric_corpus = Some(corpus);
             }
         }
 
@@ -7827,25 +7823,73 @@ impl GpuState {
             } else { false }
         } else { false };
 
-        // Export Pass 5.6: SDF lyric-text overlay — renders text quads over the
-        // final frame with alpha-over blending (LoadOp::Load, no extra texture).
-        // All three candidate targets have RENDER_ATTACHMENT so this is safe.
-        if let Some(pass) = &self.text_pass {
-            if pass.has_text() {
-                // Mirror the readback priority to find the current final view.
-                let exp_text_view;
-                let text_target: &wgpu::TextureView = if use_explosion_overlay {
-                    exp_text_view = self.export_explosion_tex.as_ref().unwrap().0
-                        .create_view(&wgpu::TextureViewDescriptor::default());
-                    &exp_text_view
-                } else if self.params.micro_swirl_enabled {
-                    &self.micro_swirl.view
-                } else if self.params.bezold_enabled {
-                    &self.bezold.view
-                } else {
-                    &self.offline_target.as_ref().unwrap().view
-                };
-                pass.render(&mut enc, text_target);
+        // Export Pass 5.6: audio-reactive SDF lyric-text overlay.
+        //
+        // Step 1 — advance the sampler (spawns/expires fragments on beat edges).
+        {
+            let beat_decay = self.export_state.as_ref()
+                .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
+            let bands = self.export_state.as_ref()
+                .map(|e| e.export_bands_smoothed).unwrap_or([0.0; 8]);
+            let dt = 1.0 / fps as f32;
+            if let Some(exp) = self.export_state.as_mut() {
+                if let (Some(sampler), Some(corpus)) =
+                    (exp.lyric_sampler.as_mut(), exp.lyric_corpus.as_ref())
+                {
+                    sampler.update(frame_time, beat_decay, bands, dt, corpus);
+                }
+            }
+        }
+
+        // Step 2 — snapshot fragment draw data into an owned Vec (releases all borrows).
+        let beat_for_leg = self.export_state.as_ref()
+            .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
+        let frag_draws: Vec<(String, f32, f32, f32, [f32; 4], u32, f32)> =
+            self.export_state.as_ref()
+                .and_then(|e| e.lyric_sampler.as_ref())
+                .map(|s| {
+                    s.fragments(frame_time, beat_for_leg)
+                        .map(|(f, leg)| (
+                            f.text.clone(), f.base_x, f.base_y,
+                            f.scale, f.color, f.seed, leg,
+                        ))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+        // Step 3 — render each fragment additively over the final composite target.
+        if !frag_draws.is_empty() {
+            let exp_text_view;
+            let text_target: &wgpu::TextureView = if use_explosion_overlay {
+                exp_text_view = self.export_explosion_tex.as_ref().unwrap().0
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                &exp_text_view
+            } else if self.params.micro_swirl_enabled {
+                &self.micro_swirl.view
+            } else if self.params.bezold_enabled {
+                &self.bezold.view
+            } else {
+                &self.offline_target.as_ref().unwrap().view
+            };
+
+            if let (Some(pass), Some(atlas)) =
+                (self.text_pass.as_mut(), self.text_atlas.as_ref())
+            {
+                for (text, cx, by, scale, color, seed, leg) in &frag_draws {
+                    let font_px = off_h as f32 * scale;
+                    pass.render_fragment(
+                        &mut enc, text_target, &self.queue, atlas,
+                        text, font_px, off_w, off_h, *cx, *by,
+                        text::pass::TextUniforms {
+                            color_r: color[0], color_g: color[1],
+                            color_b: color[2], color_a: color[3],
+                            legibility: *leg,
+                            seed:       *seed as f32,
+                            warp_time:  frame_time,
+                            _pad2:      0.0,
+                        },
+                    );
+                }
             }
         }
 

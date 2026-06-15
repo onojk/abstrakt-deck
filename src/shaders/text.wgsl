@@ -1,17 +1,17 @@
-// SDF lyric-text overlay shader.
+// SDF lyric-text overlay shader — Slice 2: legibility-driven UV warp.
 //
 // Uniform layout uses flat f32 fields (no vec2 in uniform block — CLAUDE.md rule 1).
-// The `legibility` field is stubbed for Slice 2's shape↔word morph warp.
+// All eight fields pack into two vec4 slots (32 bytes total).
 
 struct TextUniforms {
     color_r:    f32,  // offset  0
     color_g:    f32,  // offset  4
     color_b:    f32,  // offset  8
     color_a:    f32,  // offset 12
-    legibility: f32,  // offset 16  — Slice 2 hook; 1.0 = full text in Slice 1
-    _pad0:      f32,  // offset 20
-    _pad1:      f32,  // offset 24
-    _pad2:      f32,  // offset 28  — total 32 bytes, two vec4 slots
+    legibility: f32,  // offset 16  — 0=abstract blob, 1=crisp letterform
+    seed:       f32,  // offset 20  — per-fragment seed for warp variation
+    warp_time:  f32,  // offset 24  — frame_time in seconds (animated swirl)
+    _pad2:      f32,  // offset 28
 };
 
 @group(0) @binding(0) var atlas_tex: texture_2d<f32>;
@@ -38,21 +38,54 @@ fn vs_main(
     return out;
 }
 
+// ── Noise helpers ─────────────────────────────────────────────────────────────
+
+// 2D gradient hash: maps a lattice point to a random unit-ish vector in [−1,1]².
+fn hash22(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)),
+                      dot(p, vec2<f32>(269.5, 183.3)));
+    return -1.0 + 2.0 * fract(sin(q) * 43758.5453123);
+}
+
+// Smooth gradient noise over a 2D domain; returns a 2D offset in [−1, 1]².
+// Uses quintic interpolation so the result has C² continuity.
+fn noise2(p: vec2<f32>) -> vec2<f32> {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    return mix(
+        mix(hash22(i),                        hash22(i + vec2<f32>(1.0, 0.0)), u.x),
+        mix(hash22(i + vec2<f32>(0.0, 1.0)), hash22(i + vec2<f32>(1.0, 1.0)), u.x),
+        u.y,
+    );
+}
+
+// ── Fragment shader ───────────────────────────────────────────────────────────
+
 @fragment
 fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
-    let dist = textureSample(atlas_tex, atlas_smp, vec2<f32>(in.uv_x, in.uv_y)).r;
+    var sample_uv = vec2<f32>(in.uv_x, in.uv_y);
 
-    // Slice 2 warp hook: shape↔word morph driven by legibility.
-    // At legibility == 1.0 (Slice 1) this branch is never taken.
-    if (u.legibility < 1.0) {
-        // TODO Slice 2: apply SDF warp / dissolve here.
-        // The fragment can sample a noise field or morph UVs using legibility.
+    // When legibility < 1, displace the SDF sample UV by a smooth animated noise
+    // field.  Warp strength ∝ (1 − legibility): at legibility=0 the glyph is
+    // smeared into an abstract blob; at legibility=1 it is pixel-crisp.
+    let warp_str = (1.0 - clamp(u.legibility, 0.0, 1.0)) * 0.28;
+    if (warp_str > 0.0005) {
+        // Unique phase per fragment via seed; slow drift via warp_time.
+        let seed_off = u.seed * 0.00013;
+        let time_off = u.warp_time * 0.35;
+        let noise_uv = sample_uv * 5.5
+                     + vec2<f32>(seed_off + time_off, seed_off - time_off * 0.6);
+        let warp     = noise2(noise_uv);
+        sample_uv    = clamp(sample_uv + warp * warp_str,
+                             vec2<f32>(0.0001), vec2<f32>(0.9999));
     }
 
-    // Crisp SDF edge with a narrow smoothstep band.
-    // Edge width of 0.04 gives ~2px of antialiasing at 64-cell resolution.
+    let dist = textureSample(atlas_tex, atlas_smp, sample_uv).r;
+
+    // Crisp SDF edge — narrow smoothstep gives ~2 px AA at 64-cell atlas resolution.
     let edge_half = 0.04;
-    let alpha = smoothstep(0.5 - edge_half, 0.5 + edge_half, dist) * u.color_a;
+    let alpha     = smoothstep(0.5 - edge_half, 0.5 + edge_half, dist) * u.color_a;
 
     return vec4<f32>(u.color_r, u.color_g, u.color_b, alpha);
 }

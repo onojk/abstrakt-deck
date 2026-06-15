@@ -117,6 +117,19 @@ impl TextAtlas {
             });
         }
 
+        // Debug: save atlas to disk so the SDF can be eyeballed before testing on-device.
+        // Reads the CPU-side buffer; no GPU readback needed.
+        {
+            let debug_path = "/tmp/abstrakt_text_atlas_debug.png";
+            if let Some(img) = image::GrayImage::from_raw(atlas_w, atlas_h, atlas_bytes.clone()) {
+                if let Err(e) = img.save(debug_path) {
+                    log::warn!("TextAtlas: could not save debug PNG: {}", e);
+                } else {
+                    log::info!("TextAtlas: SDF debug atlas saved to {}", debug_path);
+                }
+            }
+        }
+
         // Upload atlas texture.
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("TextAtlas"),
@@ -219,10 +232,11 @@ fn compute_sdf(coverage: &[u8], w: usize, h: usize, spread: f32) -> Vec<u8> {
             }
             let min_dist = (min_dist_sq as f32).sqrt().min(spread);
             // Encode: inside → > 0.5, outside → < 0.5, boundary → 0.5.
+            // Deep inside (min_dist=spread) → 1.0; far outside → 0.0.
             let sdf = if inside {
-                0.5 + 0.5 * (1.0 - min_dist / spread)
+                0.5 + 0.5 * (min_dist / spread)
             } else {
-                0.5 - 0.5 * (1.0 - min_dist / spread)
+                0.5 - 0.5 * (min_dist / spread)
             };
             out[py * w + px] = (sdf.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
