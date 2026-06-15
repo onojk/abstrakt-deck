@@ -43,6 +43,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rfd = "0.15"
 rand = "0.8"
 symphonia = { version = "0.5", features = ["all"] }
+fontdue = "0.9"
 
 # GUI menu bar
 egui = "0.30"

@@ -1,6 +1,7 @@
 mod audio;
 mod bezold;
 mod micro_swirl;
+mod depth_shade;
 mod explosions;
 mod explosion_overlay;
 mod echo_composite;
@@ -23,6 +24,10 @@ mod phantom;
 mod pitch;
 mod recorder;
 mod shape;
+mod frame_metric;
+mod degenerate_detector;
+mod blocklist;
+mod text;
 use audio::{AudioCapture, AudioEvent};
 use help_overlay::HelpOverlay;
 use menu_bar::{ExportProgress, MenuAction, MenuBar, ParamChange};
@@ -414,6 +419,14 @@ pub struct ParamLocks {
     pub micro_swirl_density:   bool,
     pub micro_swirl_amplitude: bool,
     pub micro_swirl_speed:     bool,
+    // Depth shade lit-bump overlay
+    pub depth_shade_enabled:   bool,
+    pub depth_shade_intensity: bool,
+    pub depth_shade_light_x:   bool,
+    pub depth_shade_light_y:   bool,
+    pub depth_shade_light_z:   bool,
+    pub depth_shade_softness:  bool,
+    pub depth_shade_flatness:  bool,
     // Explosions burst effect
     pub explosion_enabled:      bool,
     pub explosion_interval_min: bool,
@@ -490,6 +503,8 @@ impl AudioSourceMode {
 pub struct VisualParams {
     pub current_shape: ShapeKind,
     pub fold_count: f32,
+    /// Grid-export panel-count re-roll interval in seconds. 0.0 = off (count fixed at export start).
+    pub grid_random_interval_s: f32,
     pub zoom: f32,
     pub rotation_speed_scale: f32,
     pub frame_shape: FrameShape,
@@ -588,6 +603,14 @@ pub struct VisualParams {
     pub micro_swirl_density:   f32,
     pub micro_swirl_amplitude: f32,
     pub micro_swirl_speed:     f32,
+    // Depth shade lit-bump overlay (gated on micro_swirl_enabled)
+    pub depth_shade_enabled:   bool,
+    pub depth_shade_intensity: f32,
+    pub depth_shade_light_x:   f32,
+    pub depth_shade_light_y:   f32,
+    pub depth_shade_light_z:   f32,
+    pub depth_shade_softness:  f32,
+    pub depth_shade_flatness:  f32,
     // Explosions burst effect
     pub explosion_enabled:      bool,
     pub explosion_interval_min: f32,   // seconds between bursts (min)
@@ -612,6 +635,7 @@ impl Default for VisualParams {
         Self {
             current_shape: ShapeKind::Cylinder,
             fold_count: 12.0,
+            grid_random_interval_s: 0.0,
             zoom: 1.0,
             rotation_speed_scale: 1.0,
             frame_shape: FrameShape::Hexagon,
@@ -697,6 +721,13 @@ impl Default for VisualParams {
             micro_swirl_density:   10.0,
             micro_swirl_amplitude: 0.8,
             micro_swirl_speed:     0.35,
+            depth_shade_enabled:   false,
+            depth_shade_intensity: 0.55,
+            depth_shade_light_x:   0.6,
+            depth_shade_light_y:  -0.6,
+            depth_shade_light_z:   0.5,
+            depth_shade_softness:  0.25,
+            depth_shade_flatness:  1.0,
             explosion_enabled:      false,
             explosion_interval_min: 3.0,
             explosion_interval_max: 8.0,
@@ -870,6 +901,20 @@ struct Preset {
     #[serde(default = "default_micro_swirl_speed")]
     micro_swirl_speed: f32,
     #[serde(default)]
+    depth_shade_enabled: bool,
+    #[serde(default = "default_depth_shade_intensity")]
+    depth_shade_intensity: f32,
+    #[serde(default = "default_depth_shade_light_x")]
+    depth_shade_light_x: f32,
+    #[serde(default = "default_depth_shade_light_y")]
+    depth_shade_light_y: f32,
+    #[serde(default = "default_depth_shade_light_z")]
+    depth_shade_light_z: f32,
+    #[serde(default = "default_depth_shade_softness")]
+    depth_shade_softness: f32,
+    #[serde(default = "default_depth_shade_flatness")]
+    depth_shade_flatness: f32,
+    #[serde(default)]
     explosion_enabled: bool,
     #[serde(default = "default_explosion_interval_min")]
     explosion_interval_min: f32,
@@ -921,6 +966,8 @@ struct Preset {
     color_phase_cycle_locked:  bool,
     #[serde(default)]
     applied_harmony_enabled: bool,
+    #[serde(default)]
+    grid_random_interval_s: f32,
 }
 
 fn default_one_f32()          -> f32    { 1.0 }
@@ -946,6 +993,12 @@ fn default_bezold_radius()           -> f32  { 3.0  }
 fn default_micro_swirl_density()     -> f32  { 10.0 }
 fn default_micro_swirl_amplitude()   -> f32  { 0.8  }
 fn default_micro_swirl_speed()       -> f32  { 0.35 }
+fn default_depth_shade_intensity()   -> f32  { 0.55 }
+fn default_depth_shade_light_x()     -> f32  { 0.6  }
+fn default_depth_shade_light_y()     -> f32  { -0.6 }
+fn default_depth_shade_light_z()     -> f32  { 0.5  }
+fn default_depth_shade_softness()    -> f32  { 0.25 }
+fn default_depth_shade_flatness()    -> f32  { 1.0  }
 fn default_explosion_interval_min()  -> f32  { 3.0  }
 fn default_explosion_interval_max()  -> f32  { 8.0  }
 fn default_explosion_chunk_count()   -> u32  { 40   }
@@ -1056,6 +1109,13 @@ impl Preset {
             micro_swirl_density:   params.micro_swirl_density,
             micro_swirl_amplitude: params.micro_swirl_amplitude,
             micro_swirl_speed:     params.micro_swirl_speed,
+            depth_shade_enabled:   params.depth_shade_enabled,
+            depth_shade_intensity: params.depth_shade_intensity,
+            depth_shade_light_x:   params.depth_shade_light_x,
+            depth_shade_light_y:   params.depth_shade_light_y,
+            depth_shade_light_z:   params.depth_shade_light_z,
+            depth_shade_softness:  params.depth_shade_softness,
+            depth_shade_flatness:  params.depth_shade_flatness,
             explosion_enabled:      params.explosion_enabled,
             explosion_interval_min: params.explosion_interval_min,
             explosion_interval_max: params.explosion_interval_max,
@@ -1082,6 +1142,7 @@ impl Preset {
             color_phase_cycle_degrees: params.color_phase_cycle_degrees,
             color_phase_cycle_locked:  params.color_phase_cycle_locked,
             applied_harmony_enabled: params.applied_harmony_enabled,
+            grid_random_interval_s:  params.grid_random_interval_s,
         }
     }
 
@@ -1200,6 +1261,13 @@ impl Preset {
         params.micro_swirl_density   = self.micro_swirl_density;
         params.micro_swirl_amplitude = self.micro_swirl_amplitude;
         params.micro_swirl_speed     = self.micro_swirl_speed;
+        params.depth_shade_enabled   = self.depth_shade_enabled;
+        params.depth_shade_intensity = self.depth_shade_intensity;
+        params.depth_shade_light_x   = self.depth_shade_light_x;
+        params.depth_shade_light_y   = self.depth_shade_light_y;
+        params.depth_shade_light_z   = self.depth_shade_light_z;
+        params.depth_shade_softness  = self.depth_shade_softness;
+        params.depth_shade_flatness  = self.depth_shade_flatness;
         params.explosion_enabled      = self.explosion_enabled;
         params.explosion_interval_min = self.explosion_interval_min;
         params.explosion_interval_max = self.explosion_interval_max;
@@ -1225,7 +1293,8 @@ impl Preset {
         params.color_phase_cycle_enabled  = self.color_phase_cycle_enabled;
         params.color_phase_cycle_degrees  = self.color_phase_cycle_degrees;
         params.color_phase_cycle_locked   = self.color_phase_cycle_locked;
-        params.applied_harmony_enabled = self.applied_harmony_enabled;
+        params.applied_harmony_enabled  = self.applied_harmony_enabled;
+        params.grid_random_interval_s   = self.grid_random_interval_s;
     }
 }
 
@@ -1900,6 +1969,21 @@ struct ExportSpinState {
     spin_angle: f32,
 }
 
+pub struct PanelExportResources {
+    pub params:            VisualParams,
+    pub kaleido_buf:       wgpu::Buffer,
+    pub shape_effects_buf: wgpu::Buffer,
+    pub frame_buf:         wgpu::Buffer,
+    pub transform_buf:     wgpu::Buffer,
+    // Per-panel chaos-mode state.  Each panel evolves on its own timer and RNG
+    // so panels diverge over time.  Seeded deterministically from panel_idx so
+    // re-exporting the same grid produces the same per-panel sequence.
+    pub random_elapsed:    f32,
+    pub reactive_elapsed:  f32,
+    pub party_elapsed:     f32,
+    pub rng:               rand::rngs::StdRng,
+}
+
 pub struct ExportState {
     pub phase: ExportPhase,
     pub current_frame: u32,
@@ -1927,6 +2011,10 @@ pub struct ExportState {
     // Echo-mode state (None when echo mode is off)
     pub renders_dir:       Option<PathBuf>,
     pub composite_thread:  Option<std::thread::JoinHandle<Result<PathBuf, String>>>,
+    // Grid export state (None when single-panel export)
+    pub grid_panel_count:  Option<usize>,
+    pub panel_resources:   Vec<PanelExportResources>,
+    pub grid_count_elapsed: f32,
 }
 
 fn spawn_frame_save_worker() -> (SyncSender<FrameSaveJob>, std::thread::JoinHandle<()>) {
@@ -2193,6 +2281,9 @@ struct GpuState {
     // Micro swirl screen-space distortion post-process
     micro_swirl: micro_swirl::MicroSwirl,
 
+    // Depth shade lit-bump overlay (reads micro_swirl output)
+    depth_shade: depth_shade::DepthShade,
+
     // Explosions burst effect
     explosion_system:     explosions::ExplosionSystem,
     explosion_overlay:    explosion_overlay::ExplosionOverlay,
@@ -2212,6 +2303,7 @@ struct GpuState {
     // Offline render target for export
     pub offline_target: Option<OfflineTarget>,
     pub export_state: Option<ExportState>,
+    pub grid_export_n: Option<usize>,   // None = single-panel; Some(n) = n-panel grid export
 
     help_overlay: HelpOverlay,
 
@@ -2277,6 +2369,10 @@ struct GpuState {
     // PrimeHelix: lazily allocated semiprime cylinder grid + beat-driven influencer.
     prime_helix_grid:       Option<cell::CellGrid>,
     prime_helix_influencer: Box<dyn influencer::Influencer>,
+
+    // SDF lyric-text overlay (Slice 1).
+    text_atlas: Option<text::atlas::TextAtlas>,
+    text_pass:  Option<text::pass::TextPass>,
 }
 
 impl GpuState {
@@ -3973,6 +4069,7 @@ impl GpuState {
 
         let bezold            = bezold::Bezold::new(&device, w, h, surface_format);
         let micro_swirl       = micro_swirl::MicroSwirl::new(&device, w, h, surface_format);
+        let depth_shade       = depth_shade::DepthShade::new(&device, w, h, surface_format);
         let explosion_system  = explosions::ExplosionSystem::new();
         let explosion_overlay = explosion_overlay::ExplosionOverlay::new(&device, w, h, surface_format);
         let phantom = phantom::PhantomAlpha::new(&device, surface_format);
@@ -3980,6 +4077,14 @@ impl GpuState {
             &device,
             wgpu::TextureFormat::Rgba8Unorm,
         );
+
+        let text_atlas: Option<text::atlas::TextAtlas> = {
+            let font_path = std::env::var("ABSTRAKT_FONT_PATH").ok();
+            match text::atlas::load_font_bytes(font_path.as_deref()) {
+                Ok(bytes) => Some(text::atlas::TextAtlas::new(&device, &queue, &bytes)),
+                Err(e)    => { log::warn!("Text overlay disabled: {}", e); None }
+            }
+        };
 
         Self {
             surface, device, queue, config, size,
@@ -4039,6 +4144,7 @@ impl GpuState {
             export_spin: None,
             bezold,
             micro_swirl,
+            depth_shade,
             explosion_system,
             explosion_overlay,
             export_explosion: None,
@@ -4048,6 +4154,7 @@ impl GpuState {
             recorder: None,
             offline_target: None,
             export_state: None,
+            grid_export_n: None,
             help_overlay,
             start_time: Instant::now(),
             last_frame_time: Instant::now(),
@@ -4095,6 +4202,9 @@ impl GpuState {
             myocyte_renderer,
             prime_helix_grid:       None,
             prime_helix_influencer: Box::new(influencer::NoOpInfluencer),
+
+            text_atlas,
+            text_pass: None, // built lazily at first export start
         }
     }
 
@@ -4325,6 +4435,7 @@ impl GpuState {
         self.scene_texture = new_scene_tex;
         self.bezold.resize(&self.device, w, h, self.config.format);
         self.micro_swirl.resize(&self.device, w, h, self.config.format);
+        self.depth_shade.resize(&self.device, w, h, self.config.format);
         self.explosion_overlay.resize(&self.device, w, h, self.config.format);
 
         self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4452,7 +4563,7 @@ impl GpuState {
                         &self.device, &self.queue, &mut enc, window,
                         &swap_view, self.size.width, self.size.height, &self.params,
                         self.shader_bpm, self.shader_beat_phase, self.shader_bpm_confidence,
-                        self.last_bundle_applied,
+                        self.last_bundle_applied, self.grid_export_n,
                     );
                 }
                 self.queue.submit(std::iter::once(enc.finish()));
@@ -5294,18 +5405,60 @@ impl GpuState {
             }
         }
 
-        // Choose the source for Pass 5: micro_swirl > bezold > scene (priority order).
+        // Pass 4.7: Depth shade lit-bump overlay (requires micro_swirl to be on).
+        if self.params.depth_shade_enabled && self.params.micro_swirl_enabled {
+            self.depth_shade.write_uniforms(&self.queue, depth_shade::DepthShadeUniforms {
+                enabled:         1.0,
+                intensity:       self.params.depth_shade_intensity,
+                light_x:         self.params.depth_shade_light_x,
+                light_y:         self.params.depth_shade_light_y,
+                light_z:         self.params.depth_shade_light_z,
+                softness:        self.params.depth_shade_softness,
+                flatness:        self.params.depth_shade_flatness,
+                time:            self.start_time.elapsed().as_secs_f32(),
+                swirl_density:   self.params.micro_swirl_density,
+                swirl_amplitude: self.params.micro_swirl_amplitude,
+                swirl_speed:     self.params.micro_swirl_speed,
+                aspect:          self.config.width as f32 / self.config.height as f32,
+                _pad0: 0.0, _pad1: 0.0, _pad2: 0.0, _pad3: 0.0,
+            });
+            let ds_bg = self.depth_shade.make_bind_group(&self.device, &self.micro_swirl.view);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("DepthShade pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.depth_shade.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.depth_shade.pipeline);
+                pass.set_bind_group(0, &ds_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Choose the source for Pass 5: depth_shade > micro_swirl > bezold > scene.
         // We must own a TextureView for the scene case; .view fields are references.
         let pass5_scene_view_owned;
-        let pass5_source_view: &wgpu::TextureView = if self.params.micro_swirl_enabled {
-            &self.micro_swirl.view
-        } else if self.params.bezold_enabled {
-            &self.bezold.view
-        } else {
-            pass5_scene_view_owned = self.scene_texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            &pass5_scene_view_owned
-        };
+        let pass5_source_view: &wgpu::TextureView =
+            if self.params.depth_shade_enabled && self.params.micro_swirl_enabled {
+                &self.depth_shade.view
+            } else if self.params.micro_swirl_enabled {
+                &self.micro_swirl.view
+            } else if self.params.bezold_enabled {
+                &self.bezold.view
+            } else {
+                pass5_scene_view_owned = self.scene_texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                &pass5_scene_view_owned
+            };
 
         // Pass 5: blit scene FBO → swapchain.
         // Priority: blackhole > phantom > plain blit. Blackhole and phantom are mutually exclusive.
@@ -5508,6 +5661,7 @@ impl GpuState {
                 self.shader_beat_phase,
                 self.shader_bpm_confidence,
                 self.last_bundle_applied,
+                self.grid_export_n,
             );
         }
 
@@ -5610,47 +5764,103 @@ impl GpuState {
             Some(dt) => {
                 // Export path: f32 accumulators instead of Instant for deterministic replay.
                 if self.export_state.is_none() { return; }
-                if self.params.random_mode_enabled {
-                    let interval = 5.0 - 4.8 * self.params.random_mode_aggressiveness;
-                    let elapsed = {
-                        let exp = self.export_state.as_mut().unwrap();
-                        exp.export_random_elapsed += dt;
-                        exp.export_random_elapsed
-                    };
-                    if elapsed >= interval {
-                        self.export_state.as_mut().unwrap().export_random_elapsed = 0.0;
-                        self.randomize_all_params();
-                        log::info!("Random Mode: full reroll (interval {:.1}s)", interval);
+                let is_grid = self.export_state.as_ref()
+                    .map(|e| e.grid_panel_count.is_some()).unwrap_or(false);
+
+                if is_grid {
+                    // Per-panel chaos: each panel has its own elapsed timers and RNG,
+                    // so panels drift apart over time even though they share the global
+                    // toggle and aggressiveness settings.
+                    let r_enabled  = self.params.random_mode_enabled;
+                    let r_agg      = self.params.random_mode_aggressiveness;
+                    let rx_enabled = self.params.reactive_mode_enabled;
+                    let rx_agg     = self.params.reactive_mode_aggressiveness;
+                    let p_enabled  = self.params.party_mode_enabled;
+                    let p_agg      = self.params.party_mode_aggressiveness;
+                    let bass_baseline = self.bass_mid_baseline;
+                    let bass_smoothed = self.bass_mid_smoothed;
+
+                    let exp = self.export_state.as_mut().unwrap();
+                    for panel in exp.panel_resources.iter_mut() {
+                        if r_enabled {
+                            let interval = 5.0 - 4.8 * r_agg;
+                            panel.random_elapsed += dt;
+                            if panel.random_elapsed >= interval {
+                                panel.random_elapsed = 0.0;
+                                randomize_params(&mut panel.params, &mut panel.rng);
+                            }
+                        }
+                        if rx_enabled {
+                            let threshold_mult = lerp(2.5, 1.05, rx_agg);
+                            let cooldown       = lerp(8.0, 0.5,  rx_agg);
+                            panel.reactive_elapsed += dt;
+                            let trigger_level = bass_baseline * threshold_mult;
+                            if panel.reactive_elapsed >= cooldown
+                                && bass_smoothed > trigger_level
+                                && bass_baseline > 0.001
+                            {
+                                panel.reactive_elapsed = 0.0;
+                                panel.params.painter_kind = panel.params.painter_kind.next();
+                            }
+                        }
+                        if p_enabled {
+                            let threshold_mult = lerp(2.0, 1.0, p_agg);
+                            let cooldown       = lerp(4.0, 0.3, p_agg);
+                            panel.party_elapsed += dt;
+                            let trigger_level = bass_baseline * threshold_mult;
+                            if panel.party_elapsed >= cooldown
+                                && bass_smoothed > trigger_level
+                                && bass_baseline > 0.001
+                            {
+                                panel.party_elapsed = 0.0;
+                                randomize_params(&mut panel.params, &mut panel.rng);
+                            }
+                        }
                     }
-                }
-                if self.params.reactive_mode_enabled {
-                    let threshold_mult = lerp(2.5, 1.05, self.params.reactive_mode_aggressiveness);
-                    let cooldown       = lerp(8.0, 0.5,  self.params.reactive_mode_aggressiveness);
-                    let elapsed = {
-                        let exp = self.export_state.as_mut().unwrap();
-                        exp.export_reactive_elapsed += dt;
-                        exp.export_reactive_elapsed
-                    };
-                    let trigger_level = self.bass_mid_baseline * threshold_mult;
-                    if elapsed >= cooldown && self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
-                        self.export_state.as_mut().unwrap().export_reactive_elapsed = 0.0;
-                        self.params.painter_kind = self.params.painter_kind.next();
-                        log::info!("Reactive Mode: painter -> {}", self.params.painter_kind.name());
+                } else {
+                    // Single-panel export path — runs against self.params as before.
+                    if self.params.random_mode_enabled {
+                        let interval = 5.0 - 4.8 * self.params.random_mode_aggressiveness;
+                        let elapsed = {
+                            let exp = self.export_state.as_mut().unwrap();
+                            exp.export_random_elapsed += dt;
+                            exp.export_random_elapsed
+                        };
+                        if elapsed >= interval {
+                            self.export_state.as_mut().unwrap().export_random_elapsed = 0.0;
+                            self.randomize_all_params();
+                            log::info!("Random Mode: full reroll (interval {:.1}s)", interval);
+                        }
                     }
-                }
-                if self.params.party_mode_enabled {
-                    let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
-                    let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
-                    let elapsed = {
-                        let exp = self.export_state.as_mut().unwrap();
-                        exp.export_party_elapsed += dt;
-                        exp.export_party_elapsed
-                    };
-                    let trigger_level = self.bass_mid_baseline * threshold_mult;
-                    if elapsed >= cooldown && self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
-                        self.export_state.as_mut().unwrap().export_party_elapsed = 0.0;
-                        self.randomize_all_params();
-                        log::info!("Party Mode: full reroll on beat");
+                    if self.params.reactive_mode_enabled {
+                        let threshold_mult = lerp(2.5, 1.05, self.params.reactive_mode_aggressiveness);
+                        let cooldown       = lerp(8.0, 0.5,  self.params.reactive_mode_aggressiveness);
+                        let elapsed = {
+                            let exp = self.export_state.as_mut().unwrap();
+                            exp.export_reactive_elapsed += dt;
+                            exp.export_reactive_elapsed
+                        };
+                        let trigger_level = self.bass_mid_baseline * threshold_mult;
+                        if elapsed >= cooldown && self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                            self.export_state.as_mut().unwrap().export_reactive_elapsed = 0.0;
+                            self.params.painter_kind = self.params.painter_kind.next();
+                            log::info!("Reactive Mode: painter -> {}", self.params.painter_kind.name());
+                        }
+                    }
+                    if self.params.party_mode_enabled {
+                        let threshold_mult = lerp(2.0, 1.0, self.params.party_mode_aggressiveness);
+                        let cooldown       = lerp(4.0, 0.3, self.params.party_mode_aggressiveness);
+                        let elapsed = {
+                            let exp = self.export_state.as_mut().unwrap();
+                            exp.export_party_elapsed += dt;
+                            exp.export_party_elapsed
+                        };
+                        let trigger_level = self.bass_mid_baseline * threshold_mult;
+                        if elapsed >= cooldown && self.bass_mid_smoothed > trigger_level && self.bass_mid_baseline > 0.001 {
+                            self.export_state.as_mut().unwrap().export_party_elapsed = 0.0;
+                            self.randomize_all_params();
+                            log::info!("Party Mode: full reroll on beat");
+                        }
                     }
                 }
             }
@@ -5749,6 +5959,15 @@ impl GpuState {
         self.file_tempo_tracker = None;
         self.file_band_flux.reset();
 
+        // Build per-panel uniform buffer sets when grid mode is active.
+        let (grid_panel_count, panel_resources) = if let Some(n) = self.grid_export_n {
+            let resources = self.build_panel_resources(n);
+            log::info!("Grid export: {} panels with per-panel chaos modes", n);
+            (Some(n), resources)
+        } else {
+            (None, vec![])
+        };
+
         self.export_state = Some(ExportState {
             phase: ExportPhase::Rendering,
             current_frame: 0,
@@ -5769,7 +5988,45 @@ impl GpuState {
             export_party_elapsed:    0.0,
             renders_dir,
             composite_thread: None,
+            grid_panel_count,
+            panel_resources,
+            grid_count_elapsed: 0.0,
         });
+
+        // Build text pass + set lyric text for this export run.
+        {
+            let lyric = std::env::var("ABSTRAKT_LYRIC_TEXT")
+                .unwrap_or_else(|_| "abstrakt".to_string());
+            if let Some(atlas) = &self.text_atlas {
+                // Build the pipeline the first time (format may vary by GPU).
+                if self.text_pass.is_none() {
+                    let pass = text::pass::TextPass::new(
+                        &self.device,
+                        self.config.format,
+                        atlas,
+                    );
+                    pass.write_default_uniforms(&self.queue);
+                    self.text_pass = Some(pass);
+                }
+                if let Some(pass) = &mut self.text_pass {
+                    let corpus = text::corpus::LyricCorpus::from_text(&lyric);
+                    let fragment = corpus.fragment(0).to_string();
+                    let (off_w, off_h) = self.params.export_resolution.dimensions();
+                    // Font size: roughly 1/12th of the export height for subtitle weight.
+                    let font_px = off_h as f32 / 12.0;
+                    pass.set_text(
+                        &self.queue, atlas,
+                        &fragment,
+                        font_px,
+                        off_w, off_h,
+                        -0.75, // baseline near bottom of frame
+                    );
+                    // White text with slight transparency.
+                    pass.set_color(&self.queue, 1.0, 1.0, 1.0, 0.92);
+                    log::info!("TextPass: rendering {:?} at {}px over {}×{}", fragment, font_px, off_w, off_h);
+                }
+            }
+        }
 
         // Initialize export ribbon FBOs, cleared to transparent black
         {
@@ -6177,6 +6434,613 @@ impl GpuState {
                 exp_aspect,
             );
         }
+
+        // ── Grid export: N-panel loop (runs instead of Phase 4+ when grid mode is active) ──
+        {
+            let is_grid = self.export_state.as_ref()
+                .map(|e| e.grid_panel_count.is_some())
+                .unwrap_or(false);
+
+            if is_grid {
+                let (off_w, off_h) = {
+                    let t = self.offline_target.as_ref().unwrap();
+                    (t.width, t.height)
+                };
+                let shader_time = frame_time.rem_euclid(600.0);
+
+                // Global uniforms — once, shared by all panels.
+                self.queue.write_buffer(&self.uniforms_buffer, 0,
+                    bytemuck::cast_slice(&[GlobalUniforms {
+                        time_seconds: shader_time,
+                        resolution_x: off_w as f32, resolution_y: off_h as f32, _pad: 0.0,
+                    }]));
+
+                // Painter audio uniforms — once, audio is global across panels.
+                {
+                    let (eb, bd) = {
+                        let exp = self.export_state.as_ref().unwrap();
+                        (exp.export_bands_smoothed, exp.offline_analyzer.beat_decay)
+                    };
+                    let beat_r = self.params.beat_reactivity * 4.0;
+                    self.queue.write_buffer(&self.painter_audio_buffer, 0,
+                        bytemuck::cast_slice(&[PainterAudioUniforms {
+                            time_seconds: shader_time,
+                            bass:         eb[0],
+                            mid:          eb[3],
+                            beat_decay:   (bd * beat_r).min(1.0),
+                            bands:        eb,
+                        }]));
+                }
+
+                // Applied harmony uniforms — once, from locked baseline params.
+                let export_anchor_hue = {
+                    let export_temperature = self.params.color_temperature_bias.clamp(-1.0, 1.0);
+                    let export_temp_biased = color::apply_temperature_bias(
+                        self.params.color_anchor_hue,
+                        export_temperature,
+                    );
+                    let phase_offset = if self.params.color_phase_cycle_enabled {
+                        let cycle_secs = 60.0 / 120.0 * self.params.phase_lock_beats.max(1) as f32;
+                        let t = self.start_time.elapsed().as_secs_f32();
+                        (t / cycle_secs).fract() * self.params.color_phase_cycle_degrees
+                    } else { 0.0 };
+                    let offsets_slice = self.params.color_harmony.hue_offsets();
+                    let mut offsets = [0.0f32; 8];
+                    for (i, &o) in offsets_slice.iter().enumerate().take(8) { offsets[i] = o; }
+                    let anchor = ((export_temp_biased + phase_offset) % 360.0 + 360.0) % 360.0;
+                    self.queue.write_buffer(&self.applied_harmony_buffer, 0,
+                        bytemuck::cast_slice(&[AppliedHarmonyUniforms {
+                            enabled:      if self.params.applied_harmony_enabled { 1 } else { 0 },
+                            anchor_hue:   anchor,
+                            saturation:   self.params.color_saturation,
+                            value:        self.params.color_value,
+                            strength:     self.params.color_harmony_strength,
+                            offset_count: offsets_slice.len() as u32,
+                            _pad0: 0.0, _pad1: 0.0,
+                            offsets,
+                        }]));
+                    anchor
+                };
+
+                // Panel-count re-roll: if interval > 0, pick a new N and rebuild resources.
+                {
+                    let interval = self.params.grid_random_interval_s;
+                    if interval > 0.0 {
+                        let elapsed = {
+                            let exp = self.export_state.as_mut().unwrap();
+                            exp.grid_count_elapsed += dt;
+                            exp.grid_count_elapsed
+                        };
+                        if elapsed >= interval {
+                            use rand::Rng;
+                            const CHOICES: [usize; 7] = [1, 2, 3, 4, 6, 9, 12];
+                            let new_n = CHOICES[rand::thread_rng().gen_range(0..CHOICES.len())];
+                            let new_resources = self.build_panel_resources(new_n);
+                            let exp = self.export_state.as_mut().unwrap();
+                            exp.grid_count_elapsed = 0.0;
+                            exp.grid_panel_count   = Some(new_n);
+                            exp.panel_resources    = new_resources;
+                            log::info!("Grid export: panel count re-rolled to {new_n}");
+                        }
+                    }
+                }
+
+                // Panel layout + per-panel params snapshot (no live export_state borrow in loop).
+                let n = self.export_state.as_ref().unwrap().grid_panel_count.unwrap();
+                let layout = grid_layout(n, off_w, off_h);
+                let panel_params_snapshot: Vec<VisualParams> = self.export_state.as_ref()
+                    .unwrap().panel_resources.iter().map(|r| r.params.clone()).collect();
+                let palette_mode = self.params.palette_mode;
+
+                let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Grid export frame encoder"),
+                });
+
+                for (pi, p_params) in panel_params_snapshot.iter().enumerate() {
+                    let rect = layout[pi];
+                    let panel_aspect = rect.w as f32 / rect.h as f32;
+
+                    // Per-panel rotation/transform.
+                    let shape = p_params.current_shape;
+                    let ang_vel = std::f32::consts::TAU / shape.rotation_period_seconds();
+                    let rot_rad = frame_time * ang_vel * p_params.rotation_speed_scale;
+                    let scroll_phase = (rot_rad / std::f32::consts::TAU * 0.25).fract();
+                    let axis  = glam::Vec3::from_array(shape.rotation_axis()).normalize();
+                    let model = glam::Mat4::from_translation(self.shake_offset)
+                        * glam::Mat4::from_axis_angle(axis, rot_rad)
+                        * glam::Mat4::from_scale(glam::Vec3::splat(shape.model_scale()));
+                    let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), panel_aspect, 0.1, 100.0);
+                    let cam  = glam::Mat4::look_at_rh(
+                        glam::Vec3::new(0.0, 0.5, 3.0), glam::Vec3::ZERO, glam::Vec3::Y,
+                    );
+                    let (fr, fg, fb) = hsv_to_rgb(p_params.frame_color_hue, 0.85, 1.0);
+
+                    // Write this panel's 4 uniform buffers (each panel owns its own set).
+                    {
+                        let exp = self.export_state.as_ref().unwrap();
+                        let pbuf = &exp.panel_resources[pi];
+                        self.queue.write_buffer(&pbuf.kaleido_buf, 0,
+                            bytemuck::cast_slice(&[KaleidoUniforms {
+                                resolution_x: rect.w as f32, resolution_y: rect.h as f32,
+                                fold_count: p_params.fold_count,
+                                zoom: p_params.zoom * shape.kaleido_zoom()
+                                    + self.bass_zoom_smoothed * p_params.bass_zoom_strength,
+                            }]));
+                        self.queue.write_buffer(&pbuf.shape_effects_buf, 0,
+                            bytemuck::cast_slice(&[ShapeEffects {
+                                invert:               if p_params.invert_enabled   { 1.0 } else { 0.0 },
+                                colorize_enabled:     if p_params.colorize_enabled { 1.0 } else { 0.0 },
+                                colorize_hue:         p_params.colorize_hue,
+                                colorize_intensity:   p_params.colorize_intensity,
+                                distortion_enabled:   if p_params.distortion_enabled { 1.0 } else { 0.0 },
+                                distortion_amplitude: p_params.distortion_amplitude,
+                                distortion_frequency: p_params.distortion_frequency,
+                                time_seconds:         shader_time,
+                                painter_scroll_phase: scroll_phase,
+                                contrast:        p_params.contrast,
+                                saturation:      p_params.saturation,
+                                contrast_passes: if matches!(shape,
+                                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix)
+                                                 { 1.0 } else { p_params.contrast_passes as f32 },
+                            }]));
+                        self.queue.write_buffer(&pbuf.frame_buf, 0,
+                            bytemuck::cast_slice(&[FrameUniforms {
+                                resolution_x: rect.w as f32, resolution_y: rect.h as f32,
+                                frame_color_r: fr, frame_color_g: fg,
+                                frame_color_b: fb, frame_color_a: 1.0,
+                                frame_shape: p_params.frame_shape.as_f32(),
+                                frame_size:  p_params.frame_size,
+                            }]));
+                        self.queue.write_buffer(&pbuf.transform_buf, 0,
+                            bytemuck::cast_slice(&[Transform {
+                                mvp: (proj * cam * model).to_cols_array_2d(),
+                            }]));
+                    }
+
+                    // Panel-sized intermediate FBOs.
+                    let (_exp_shape_tex, exp_shape_view, _exp_depth_tex, exp_depth_view) =
+                        Self::create_shape_fbo(&self.device, rect.w, rect.h);
+                    let (_exp_kaleido_tex, exp_kaleido_view) =
+                        Self::create_kaleido_fbo(&self.device, rect.w, rect.h);
+                    let _exp_shape_post_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Grid panel shape post FBO"),
+                        size: wgpu::Extent3d { width: rect.w, height: rect.h, depth_or_array_layers: 1 },
+                        mip_level_count: 1, sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    let exp_shape_post_view =
+                        _exp_shape_post_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                    let (_exp_dp_tex, exp_dp_view) = if p_params.distortion_plus_enabled {
+                        let (t, v) = Self::create_dp_fbo(&self.device, rect.w, rect.h);
+                        (Some(t), Some(v))
+                    } else {
+                        (None, None)
+                    };
+                    let kaleido_input_view = exp_dp_view.as_ref().unwrap_or(&exp_shape_post_view);
+
+                    // Per-panel bind groups (refs to panel buffers + panel FBO views).
+                    let (panel_transform_bg,
+                         panel_shape_effects_bg,
+                         panel_effects_post_bg,
+                         panel_kaleido_bg,
+                         panel_frame_bg) = {
+                        let exp = self.export_state.as_ref().unwrap();
+                        let pbuf = &exp.panel_resources[pi];
+                        let tbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Panel transform BG"),
+                            layout: &self.shape_pipeline.get_bind_group_layout(0),
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0, resource: pbuf.transform_buf.as_entire_binding(),
+                            }],
+                        });
+                        let sebg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Panel shape effects BG"),
+                            layout: &self.shape_pipeline.get_bind_group_layout(2),
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0, resource: pbuf.shape_effects_buf.as_entire_binding(),
+                            }],
+                        });
+                        let epbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Panel effects post BG"),
+                            layout: &self.shape_effects_post_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: pbuf.shape_effects_buf.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&exp_shape_view) },
+                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                            ],
+                        });
+                        let kbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Panel kaleido BG"),
+                            layout: &self.kaleido_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: pbuf.kaleido_buf.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(kaleido_input_view) },
+                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                            ],
+                        });
+                        let fbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Panel frame BG"),
+                            layout: &self.frame_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: pbuf.frame_buf.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&exp_kaleido_view) },
+                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                            ],
+                        });
+                        (tbg, sebg, epbg, kbg, fbg)
+                    };
+
+                    // Pass 1: painter → painter_view (reused sequentially — valid in one encoder).
+                    {
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Grid painter pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &self.painter_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        if p_params.painter_kind == PainterKind::Skin {
+                            pass.set_pipeline(&self.painter_skin_pipeline);
+                            pass.set_bind_group(0, &self.skin_bind_group, &[]);
+                            pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
+                        } else if p_params.painter_kind == PainterKind::AudioPaint {
+                            pass.set_pipeline(&self.painter_audio_paint_pipeline);
+                            pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+                        } else if p_params.painter_kind == PainterKind::PrintHead {
+                            pass.set_pipeline(&self.painter_print_head_pipeline);
+                            pass.set_bind_group(0, &self.painter_audio_bind_group, &[]);
+                            pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
+                        } else if p_params.painter_kind == PainterKind::Image {
+                            pass.set_pipeline(&self.painter_image_pipeline);
+                            pass.set_bind_group(0, &self.painter_image_bind_group, &[]);
+                            pass.set_bind_group(1, &self.applied_harmony_bind_group, &[]);
+                        } else {
+                            let p = &self.painter_pipelines[&p_params.painter_kind];
+                            pass.set_pipeline(p);
+                            pass.set_bind_group(0, &self.painter_uniforms_bind_group, &[]);
+                        }
+                        pass.draw(0..3, 0..1);
+                    }
+
+                    // Pass 1a/1b (ribbons): TODO grid v1 — needs per-panel ribbon FBO sets.
+
+                    // Pass 1c: palette clamp (locked baseline palette — same for all panels).
+                    if palette_mode != PaletteMode::Off {
+                        let h_offsets = self.params.color_harmony.hue_offsets();
+                        let mut ho = [0.0f32; 8];
+                        for (i, &off) in h_offsets.iter().enumerate().take(8) {
+                            ho[i] = color::wrap_hue(export_anchor_hue + off);
+                        }
+                        self.queue.write_buffer(&self.palette_uniforms_buffer, 0,
+                            bytemuck::cast_slice(&[PaletteUniforms {
+                                mode:                self.params.palette_mode.to_u32(),
+                                tint:                self.params.palette_tint,
+                                mono_hue:            self.params.palette_mono_hue,
+                                harmony_num_offsets: h_offsets.len().min(8) as u32,
+                                harmony_anchor_hue:  export_anchor_hue,
+                                harmony_saturation:  self.params.color_saturation,
+                                harmony_value:       self.params.color_value,
+                                harmony_strength:    self.params.color_harmony_strength,
+                                harmony_offsets:     ho,
+                            }]));
+                        {
+                            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Grid palette pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &self.palette_scratch_view, resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                occlusion_query_set: None, timestamp_writes: None,
+                            });
+                            pass.set_pipeline(&self.palette_pipeline);
+                            pass.set_bind_group(0, &self.palette_bind_group, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+                        enc.copy_texture_to_texture(
+                            wgpu::ImageCopyTexture {
+                                texture: &self.palette_scratch_texture,
+                                mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::ImageCopyTexture {
+                                texture: &self.painter_texture,
+                                mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d {
+                                width: self.painter_w, height: self.painter_h,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+
+                    // Pass 2: shape → panel-sized shape_view.
+                    {
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Grid shape pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &exp_shape_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: &exp_depth_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0),
+                                    store: wgpu::StoreOp::Discard,
+                                }),
+                                stencil_ops: None,
+                            }),
+                            occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        match shape {
+                            ShapeKind::Myocyte => {
+                                // TODO grid v1: myocyte_renderer has singleton uniforms — multiple
+                                // Myocyte panels in one grid frame will share the last panel's values.
+                                if let Some(g) = self.myocyte_grid.as_ref() {
+                                    self.myocyte_renderer.render(g, &self.queue, &mut pass, panel_aspect);
+                                }
+                            }
+                            ShapeKind::PrimeHelix => {
+                                // TODO grid v1: same singleton issue as Myocyte above.
+                                if let Some(g) = self.prime_helix_grid.as_ref() {
+                                    self.myocyte_renderer.render(g, &self.queue, &mut pass, panel_aspect);
+                                }
+                            }
+                            _ => {
+                                pass.set_pipeline(&self.shape_pipeline);
+                                pass.set_bind_group(0, &panel_transform_bg, &[]);
+                                pass.set_bind_group(1, &self.shape_bind_group, &[]);
+                                pass.set_bind_group(2, &panel_shape_effects_bg, &[]);
+                                let bufs = &self.shape_buffers[&shape];
+                                pass.set_vertex_buffer(0, bufs.vertex_buffer.slice(..));
+                                pass.set_index_buffer(bufs.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                                pass.draw_indexed(0..bufs.index_count, 0, 0..1);
+                            }
+                        }
+                    }
+
+                    // Pass 2b: effects post → panel-sized shape_post_view.
+                    {
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Grid shape effects pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &exp_shape_post_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.shape_effects_pipeline);
+                        pass.set_bind_group(0, &panel_effects_post_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+
+                    // Pass 2.5: distortion+ → panel-sized dp_view (if enabled on this panel).
+                    if let Some(ref dp_view) = exp_dp_view {
+                        let dp_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Grid DP BG"),
+                            layout: &self.distortion_plus_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: self.distortion_plus_uniforms_buffer.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&exp_shape_post_view) },
+                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.shape_sampler) },
+                            ],
+                        });
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Grid DP pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: dp_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.distortion_plus_pipeline);
+                        pass.set_bind_group(0, &dp_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+
+                    // Pass 3: kaleido → panel-sized kaleido_view.
+                    {
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Grid kaleido pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &exp_kaleido_view, resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.kaleido_pipeline);
+                        pass.set_bind_group(0, &panel_kaleido_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+
+                    // Pass 3.5 (spin/trails): TODO grid v1 — needs per-panel spin FBO sets.
+
+                    // Pass 4: frame overlay → offline_target, positioned by viewport.
+                    // Panel 0: Clear (sets background); panels 1..N: Load (preserve earlier panels).
+                    {
+                        let offline_view = &self.offline_target.as_ref().unwrap().view;
+                        let load_op = if pi == 0 {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        } else {
+                            wgpu::LoadOp::Load
+                        };
+                        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Grid frame pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: offline_view, resolve_target: None,
+                                ops: wgpu::Operations { load: load_op, store: wgpu::StoreOp::Store },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None, timestamp_writes: None,
+                        });
+                        pass.set_viewport(
+                            rect.x as f32, rect.y as f32,
+                            rect.w as f32, rect.h as f32,
+                            0.0, 1.0,
+                        );
+                        pass.set_pipeline(&self.frame_pipeline);
+                        pass.set_bind_group(0, &panel_frame_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+
+                    // Pass 5 (blackhole/feedback): TODO grid v1 — needs per-panel feedback FBO sets.
+                    // Pass 4.5 (Bezold): TODO grid v1 — needs full-frame post over tiled output.
+                    // Pass 4.6 (MicroSwirl): TODO grid v1 — same as Bezold.
+                    // Pass 5.5 (Explosions): TODO grid v1 — needs per-panel explosion state.
+                }
+
+                // Readback from offline_target (Bezold/MicroSwirl skipped in grid v1).
+                let aligned_bpr = (off_w * 4).div_ceil(256) * 256;
+                let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Grid export readback"),
+                    size: (aligned_bpr * off_h) as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                enc.copy_texture_to_buffer(
+                    wgpu::ImageCopyTexture {
+                        texture: &self.offline_target.as_ref().unwrap().texture,
+                        mip_level: 0, origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::ImageCopyBuffer {
+                        buffer: &readback,
+                        layout: wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(aligned_bpr),
+                            rows_per_image: Some(off_h),
+                        },
+                    },
+                    wgpu::Extent3d { width: off_w, height: off_h, depth_or_array_layers: 1 },
+                );
+                self.queue.submit(std::iter::once(enc.finish()));
+
+                let mut pixels = {
+                    let slice = readback.slice(..);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+                    self.device.poll(wgpu::Maintain::Wait);
+                    rx.recv().expect("map channel closed").expect("buffer map failed");
+                    let data = slice.get_mapped_range();
+                    let mut packed = Vec::with_capacity((off_w * off_h * 4) as usize);
+                    for row in 0..off_h {
+                        let s = (row * aligned_bpr) as usize;
+                        packed.extend_from_slice(&data[s..s + (off_w * 4) as usize]);
+                    }
+                    packed
+                };
+                readback.unmap();
+
+                let fmt = self.offline_target.as_ref().unwrap().format;
+                if matches!(fmt, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm) {
+                    for px in pixels.chunks_exact_mut(4) { px.swap(0, 2); }
+                }
+                let _ = sender.send(FrameSaveJob {
+                    frame_index, width: off_w, height: off_h,
+                    rgba_bytes: pixels,
+                    output_path: renders_dir.as_ref().unwrap_or(&output_dir)
+                        .join(format!("frame_{:05}.png", frame_index)),
+                });
+
+                // Live preview blit (grid export).
+                if self.params.export_live_preview {
+                    if let Ok(swap_frame) = self.surface.get_current_texture() {
+                        let swap_view = swap_frame.texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        let preview_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Grid preview BG"),
+                            layout: &self.blit_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.offline_target.as_ref().unwrap().view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry { binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.shape_sampler),
+                                },
+                            ],
+                        });
+                        let mut blit_enc = self.device.create_command_encoder(
+                            &wgpu::CommandEncoderDescriptor { label: Some("Grid preview blit") },
+                        );
+                        {
+                            let mut pass = blit_enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Grid preview pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &swap_view, resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                occlusion_query_set: None, timestamp_writes: None,
+                            });
+                            pass.set_pipeline(&self.blit_pipeline);
+                            pass.set_bind_group(0, &preview_bg, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+                        if let Some((menu_bar, window)) = menu {
+                            menu_bar.render(
+                                &self.device, &self.queue, &mut blit_enc, window,
+                                &swap_view, self.size.width, self.size.height, &self.params,
+                                self.shader_bpm, self.shader_beat_phase,
+                                self.shader_bpm_confidence, self.last_bundle_applied,
+                                self.grid_export_n,
+                            );
+                        }
+                        self.queue.submit(std::iter::once(blit_enc.finish()));
+                        swap_frame.present();
+                    }
+                }
+
+                // Advance frame counter + progress log.
+                if let Some(exp) = self.export_state.as_mut() {
+                    exp.current_frame += 1;
+                    let log_interval = (total / 10).max(30);
+                    if exp.current_frame % log_interval == 0 || exp.current_frame == total {
+                        let elapsed = exp.start_time.elapsed().as_secs_f32();
+                        let pct = exp.current_frame as f32 / total as f32 * 100.0;
+                        let render_fps = exp.current_frame as f32 / elapsed.max(0.001);
+                        let eta = (total - exp.current_frame) as f32 / render_fps;
+                        log::info!(
+                            "Grid export: {}/{} ({:.1}%) — {:.1} fps, ~{:.0}s remaining",
+                            exp.current_frame, total, pct, render_fps, eta
+                        );
+                    }
+                }
+                return; // single-panel Phase 4+ is skipped
+            }
+        }
+        // ── Single-panel path: Phases 4+ follow unchanged ────────────────────────
 
         // ── Phase 4: uniforms with export resolution + frame_time ─────────────
         let (off_w, off_h) = {
@@ -6963,6 +7827,28 @@ impl GpuState {
             } else { false }
         } else { false };
 
+        // Export Pass 5.6: SDF lyric-text overlay — renders text quads over the
+        // final frame with alpha-over blending (LoadOp::Load, no extra texture).
+        // All three candidate targets have RENDER_ATTACHMENT so this is safe.
+        if let Some(pass) = &self.text_pass {
+            if pass.has_text() {
+                // Mirror the readback priority to find the current final view.
+                let exp_text_view;
+                let text_target: &wgpu::TextureView = if use_explosion_overlay {
+                    exp_text_view = self.export_explosion_tex.as_ref().unwrap().0
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    &exp_text_view
+                } else if self.params.micro_swirl_enabled {
+                    &self.micro_swirl.view
+                } else if self.params.bezold_enabled {
+                    &self.bezold.view
+                } else {
+                    &self.offline_target.as_ref().unwrap().view
+                };
+                pass.render(&mut enc, text_target);
+            }
+        }
+
         // Readback: copy final post-process output → staging buffer.
         // Source priority: export_explosion_tex > micro_swirl > bezold > offline_target.
         let readback_texture: &wgpu::Texture = if use_explosion_overlay {
@@ -7082,7 +7968,7 @@ impl GpuState {
                         &self.device, &self.queue, &mut blit_enc, window,
                         &swap_view, self.size.width, self.size.height, &self.params,
                         self.shader_bpm, self.shader_beat_phase, self.shader_bpm_confidence,
-                        self.last_bundle_applied,
+                        self.last_bundle_applied, self.grid_export_n,
                     );
                 }
                 self.queue.submit(std::iter::once(blit_enc.finish()));
@@ -7108,285 +7994,48 @@ impl GpuState {
     }
 
     fn randomize_all_params(&mut self) {
-        use rand::Rng;
         let mut rng = rand::thread_rng();
+        randomize_params(&mut self.params, &mut rng);
+    }
 
-        if !self.params.locks.painter_kind {
-            self.params.painter_kind = match rng.gen_range(0u8..7) {
-                0 => PainterKind::HueStripe,
-                1 => PainterKind::Spiral,
-                2 => PainterKind::Plasma,
-                3 => PainterKind::Skin,
-                4 => PainterKind::AudioPaint,
-                5 => PainterKind::PrintHead,
-                _ => PainterKind::Image,
-            };
-        }
-        if !self.params.locks.current_shape {
-            self.params.current_shape = match rng.gen_range(0u8..9) {
-                0 => ShapeKind::Cylinder,
-                1 => ShapeKind::Sphere,
-                2 => ShapeKind::Cube,
-                3 => ShapeKind::Tetrahedron,
-                4 => ShapeKind::Icosahedron,
-                5 => ShapeKind::Urchin,
-                6 => ShapeKind::Caltrop,
-                7 => ShapeKind::Myocyte,
-                _ => ShapeKind::PrimeHelix,
-            };
-        }
-        if !self.params.locks.frame_shape {
-            self.params.frame_shape = match rng.gen_range(0u8..8) {
-                0 => FrameShape::None,
-                1 => FrameShape::Circle,
-                2 => FrameShape::Square,
-                3 => FrameShape::Rounded,
-                4 => FrameShape::Hexagon,
-                5 => FrameShape::Octagon,
-                6 => FrameShape::Flower,
-                _ => FrameShape::Star,
-            };
-        }
-        if !self.params.locks.fold_count           { self.params.fold_count           = rng.gen_range(4.0_f32..=20.0).round(); }
-        if !self.params.locks.zoom                 { self.params.zoom                 = rng.gen_range(0.5_f32..=1.3); }
-        if !self.params.locks.rotation_speed_scale { self.params.rotation_speed_scale = rng.gen_range(0.3_f32..=2.5); }
-        if !self.params.locks.frame_size           { self.params.frame_size           = rng.gen_range(0.65_f32..=1.0); }
-        if !self.params.locks.frame_color_hue      { self.params.frame_color_hue      = rng.gen_range(0.0_f32..360.0); }
-        if !self.params.locks.colorize_hue         { self.params.colorize_hue         = rng.gen_range(0.0_f32..360.0); }
-        if !self.params.locks.colorize_intensity   { self.params.colorize_intensity   = rng.gen_range(0.2_f32..=0.9); }
-        if !self.params.locks.distortion_amplitude { self.params.distortion_amplitude = rng.gen_range(0.0_f32..=0.25); }
-        if !self.params.locks.distortion_frequency { self.params.distortion_frequency = rng.gen_range(1.0_f32..=6.0); }
-        if !self.params.locks.contrast             { self.params.contrast             = rng.gen_range(0.7_f32..=1.8); }
-        if !self.params.locks.contrast_passes      { self.params.contrast_passes      = rng.gen_range(1u32..=6); }
-        if !self.params.locks.saturation           { self.params.saturation           = rng.gen_range(0.6_f32..=1.6); }
-        if !self.params.locks.bass_zoom_strength   { self.params.bass_zoom_strength   = rng.gen_range(0.0_f32..=0.6); }
-        if !self.params.locks.invert_enabled       { self.params.invert_enabled       = rng.gen_bool(0.5); }
-        if !self.params.locks.colorize_enabled     { self.params.colorize_enabled     = rng.gen_bool(0.5); }
-        if !self.params.locks.distortion_enabled   { self.params.distortion_enabled   = rng.gen_bool(0.5); }
-        if !self.params.locks.midi_shake_enabled   { self.params.midi_shake_enabled   = rng.gen_bool(0.5); }
-        if !self.params.locks.audio_shake_enabled  { self.params.audio_shake_enabled  = rng.gen_bool(0.5); }
-        if !self.params.locks.phase_lock_enabled { self.params.phase_lock_enabled = rng.gen_bool(0.20); }
-        if !self.params.locks.phase_lock_kaleido { self.params.phase_lock_kaleido = rng.gen_bool(0.75); }
-        if !self.params.locks.phase_lock_shape   { self.params.phase_lock_shape   = rng.gen_bool(0.75); }
-        if !self.params.locks.phase_lock_scale   { self.params.phase_lock_scale   = rng.gen_bool(0.65); }
-        if !self.params.locks.phase_lock_scale_depth { self.params.phase_lock_scale_depth = rng.gen_range(0.04_f32..=0.20); }
-        if !self.params.locks.phase_lock_beats {
-            let roll: f32 = rng.gen();
-            self.params.phase_lock_beats = if roll < 0.55 { 1 } else if roll < 0.85 { 2 } else { 4 };
-        }
-        if !self.params.locks.audio_route_shape {
-            let roll: f32 = rng.gen();
-            self.params.audio_route_shape = if roll < 0.55 {
-                audio::BeatRoute::Combined
-            } else if roll < 0.75 {
-                audio::BeatRoute::Low
-            } else if roll < 0.85 {
-                audio::BeatRoute::Mid
-            } else if roll < 0.95 {
-                audio::BeatRoute::High
-            } else {
-                audio::BeatRoute::Broadband
-            };
-        }
-        if !self.params.locks.audio_route_kaleido {
-            let roll: f32 = rng.gen();
-            self.params.audio_route_kaleido = if roll < 0.55 {
-                audio::BeatRoute::Combined
-            } else if roll < 0.65 {
-                audio::BeatRoute::Low
-            } else if roll < 0.80 {
-                audio::BeatRoute::Mid
-            } else if roll < 0.95 {
-                audio::BeatRoute::High
-            } else {
-                audio::BeatRoute::Broadband
-            };
-        }
-        if !self.params.locks.audio_route_shake {
-            let roll: f32 = rng.gen();
-            self.params.audio_route_shake = if roll < 0.70 {
-                audio::BeatRoute::Combined
-            } else if roll < 0.92 {
-                audio::BeatRoute::Low
-            } else {
-                audio::BeatRoute::Mid
-            };
-        }
-        if !self.params.locks.audio_route_painter {
-            let roll: f32 = rng.gen();
-            self.params.audio_route_painter = if roll < 0.60 {
-                audio::BeatRoute::Combined
-            } else if roll < 0.78 {
-                audio::BeatRoute::Low
-            } else if roll < 0.88 {
-                audio::BeatRoute::Mid
-            } else if roll < 0.97 {
-                audio::BeatRoute::High
-            } else {
-                audio::BeatRoute::Broadband
-            };
-        }
-        if !self.params.locks.ribbons_enabled      { self.params.ribbons_enabled      = rng.gen_bool(0.5); }
-        if !self.params.locks.ribbons_intensity    { self.params.ribbons_intensity    = rng.gen_range(0.2_f32..=1.0); }
-        // DP angles reroll independently of enabled (per spec).
-        if !self.params.locks.distortion_plus_enabled { self.params.distortion_plus_enabled = rng.gen_bool(0.40); }
-        if !self.params.locks.distortion_plus_yaw     { self.params.distortion_plus_yaw     = rng.gen_range(-180.0_f32..=180.0); }
-        if !self.params.locks.distortion_plus_pitch   { self.params.distortion_plus_pitch   = rng.gen_range(-45.0_f32..=45.0); }
-        if !self.params.locks.distortion_plus_roll    { self.params.distortion_plus_roll    = rng.gen_range(-180.0_f32..=180.0); }
-        if !self.params.locks.palette_mode {
-            self.params.palette_mode = match rng.gen_range(0u8..7) {
-                0 => PaletteMode::Off,
-                1 => PaletteMode::Warm,
-                2 => PaletteMode::Cool,
-                3 => PaletteMode::Earth,
-                4 => PaletteMode::Neon,
-                5 => PaletteMode::Monochrome,
-                _ => PaletteMode::Harmony,
-            };
-        }
-        if !self.params.locks.palette_tint     { self.params.palette_tint     = rng.gen_range(0.0_f32..=1.0); }
-        if !self.params.locks.palette_mono_hue { self.params.palette_mono_hue = rng.gen_range(0.0_f32..=360.0); }
-        if !self.params.locks.blackhole_enabled       { self.params.blackhole_enabled       = rng.gen_bool(0.10); }
-        if !self.params.locks.blackhole_warp_strength { self.params.blackhole_warp_strength = rng.gen_range(0.85_f32..=0.98); }
-        if !self.params.locks.blackhole_warp_curve    { self.params.blackhole_warp_curve    = rng.gen_range(0.90_f32..=0.99); }
-        if !self.params.locks.blackhole_alpha_radius  { self.params.blackhole_alpha_radius  = rng.gen_range(0.3_f32..=1.0); }
-        if !self.params.locks.blackhole_wander_amount { self.params.blackhole_wander_amount = rng.gen_range(0.0_f32..=0.015); }
-        // Phantom: mutually exclusive with blackhole
-        if !self.params.locks.phantom_enabled {
-            self.params.phantom_enabled = if self.params.blackhole_enabled {
-                false
-            } else {
-                rng.gen_bool(0.15)
-            };
-        }
-        if !self.params.locks.phantom_delay_seconds { self.params.phantom_delay_seconds = rng.gen_range(0.5_f32..=3.0); }
-        if !self.params.locks.phantom_key_tolerance { self.params.phantom_key_tolerance = rng.gen_range(0.05_f32..=0.40); }
-        if !self.params.locks.phantom_key_softness  { self.params.phantom_key_softness  = rng.gen_range(0.02_f32..=0.15); }
-        if !self.params.locks.phantom_key_strength  { self.params.phantom_key_strength  = rng.gen_range(0.5_f32..=1.0); }
-        if !self.params.locks.phantom_opacity       { self.params.phantom_opacity       = rng.gen_range(0.5_f32..=1.0); }
-        if !self.params.locks.phantom_key_color {
-            let h = rng.gen_range(0.0_f32..360.0);
-            let (r, g, b) = hsv_to_rgb(h, 1.0, 1.0);
-            self.params.phantom_key_color = [r, g, b];
-        }
-        if !self.params.locks.color_harmony {
-            let roll: f32 = rng.gen();
-            self.params.color_harmony = if roll < 0.10 {
-                color::ColorHarmony::Monochromatic
-            } else if roll < 0.40 {
-                color::ColorHarmony::Analogous
-            } else if roll < 0.55 {
-                color::ColorHarmony::Complementary
-            } else if roll < 0.75 {
-                color::ColorHarmony::SplitComplementary
-            } else if roll < 0.90 {
-                color::ColorHarmony::Triadic
-            } else {
-                color::ColorHarmony::Tetradic
-            };
-        }
-        if !self.params.locks.color_anchor_hue {
-            self.params.color_anchor_hue = rng.gen_range(0.0_f32..360.0);
-        }
-        if !self.params.locks.color_temperature_bias {
-            let roll: f32 = rng.gen();
-            self.params.color_temperature_bias = if roll < 0.50 {
-                rng.gen_range(-0.2_f32..=0.2)
-            } else if roll < 0.75 {
-                rng.gen_range(0.3_f32..=0.7)
-            } else {
-                rng.gen_range(-0.7_f32..=-0.3)
-            };
-        }
-        if !self.params.locks.color_temperature_audio {
-            self.params.color_temperature_audio = if rng.gen_bool(0.30) {
-                let magnitude = rng.gen_range(0.2_f32..=0.8);
-                if rng.gen_bool(0.25) { -magnitude } else { magnitude }
-            } else {
-                0.0
-            };
-        }
-        if !self.params.locks.color_saturation_mode {
-            let roll: f32 = rng.gen();
-            self.params.color_saturation_mode = if roll < 0.40 {
-                color::SaturationMode::Free
-            } else if roll < 0.70 {
-                color::SaturationMode::Muted
-            } else if roll < 0.88 {
-                color::SaturationMode::Pure
-            } else {
-                color::SaturationMode::ChromaticGray
-            };
-        }
-        if !self.params.locks.color_saturation {
-            let r = self.params.color_saturation_mode.range();
-            self.params.color_saturation = rng.gen_range(r[0]..=r[1]);
-        }
-        if !self.params.locks.color_value_key {
-            let roll: f32 = rng.gen();
-            self.params.color_value_key = if roll < 0.40 {
-                color::ValueKey::Free
-            } else if roll < 0.70 {
-                color::ValueKey::Mid
-            } else if roll < 0.88 {
-                color::ValueKey::High
-            } else {
-                color::ValueKey::Low
-            };
-        }
-        if !self.params.locks.color_value {
-            let r = self.params.color_value_key.range();
-            self.params.color_value = rng.gen_range(r[0]..=r[1]);
-        }
-        if !self.params.locks.color_harmony_strength {
-            self.params.color_harmony_strength = rng.gen_range(0.3_f32..=0.85);
-        }
-        if !self.params.locks.color_phase_cycle_enabled {
-            self.params.color_phase_cycle_enabled = rng.gen_bool(0.25);
-        }
-        if !self.params.locks.color_phase_cycle_degrees && self.params.color_phase_cycle_enabled {
-            self.params.color_phase_cycle_degrees = rng.gen_range(90.0_f32..=360.0);
-        }
-        if !self.params.locks.applied_harmony_enabled {
-            self.params.applied_harmony_enabled = rng.gen_bool(0.25);
-        }
-        if !self.params.locks.bezold_enabled {
-            self.params.bezold_enabled = rng.gen_bool(0.20);
-        }
-        if !self.params.locks.bezold_strength && self.params.bezold_enabled {
-            self.params.bezold_strength = rng.gen_range(0.30_f32..=0.75);
-        }
-        if !self.params.locks.bezold_radius && self.params.bezold_enabled {
-            self.params.bezold_radius = rng.gen_range(2.0_f32..=5.0);
-        }
-        if !self.params.locks.micro_swirl_enabled {
-            self.params.micro_swirl_enabled = rng.gen_bool(0.30);
-        }
-        if !self.params.locks.micro_swirl_density && self.params.micro_swirl_enabled {
-            self.params.micro_swirl_density = rng.gen_range(6.0_f32..=16.0);
-        }
-        if !self.params.locks.micro_swirl_amplitude && self.params.micro_swirl_enabled {
-            self.params.micro_swirl_amplitude = rng.gen_range(0.5_f32..=1.2);
-        }
-        if !self.params.locks.micro_swirl_speed && self.params.micro_swirl_enabled {
-            self.params.micro_swirl_speed = rng.gen_range(0.2_f32..=0.6);
-        }
-        if !self.params.locks.explosion_enabled {
-            self.params.explosion_enabled = rng.gen_bool(0.20);
-        }
-        if !self.params.locks.explosion_interval_min && self.params.explosion_enabled {
-            self.params.explosion_interval_min = rng.gen_range(1.5_f32..=5.0);
-        }
-        if !self.params.locks.explosion_interval_max && self.params.explosion_enabled {
-            self.params.explosion_interval_max =
-                (self.params.explosion_interval_min + rng.gen_range(2.0_f32..=6.0)).min(12.0);
-        }
-        if !self.params.locks.explosion_chunk_count && self.params.explosion_enabled {
-            self.params.explosion_chunk_count = rng.gen_range(20_u32..=60);
-        }
-        if !self.params.locks.explosion_chunk_size && self.params.explosion_enabled {
-            self.params.explosion_chunk_size = rng.gen_range(0.025_f32..=0.07);
-        }
+    fn build_panel_resources(&self, n: usize) -> Vec<PanelExportResources> {
+        use rand::SeedableRng;
+        let baseline = self.params.clone();
+        let panel_params = generate_panel_params(&baseline, n);
+        panel_params.into_iter().enumerate().map(|(panel_idx, p)| {
+            PanelExportResources {
+                kaleido_buf: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Panel kaleido uniforms"),
+                    size: std::mem::size_of::<KaleidoUniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                shape_effects_buf: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Panel shape effects uniforms"),
+                    size: std::mem::size_of::<ShapeEffects>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                frame_buf: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Panel frame uniforms"),
+                    size: std::mem::size_of::<FrameUniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                transform_buf: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Panel transform uniforms"),
+                    size: std::mem::size_of::<Transform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                params: p,
+                random_elapsed:   0.0,
+                reactive_elapsed: 0.0,
+                party_elapsed:    0.0,
+                // XOR with panel_idx so each panel diverges; fixed base keeps reruns identical.
+                rng: rand::rngs::StdRng::seed_from_u64(0xABBA_DECE_u64 ^ panel_idx as u64),
+            }
+        }).collect()
     }
 
     fn rebuild_painter_fbo(&mut self, w: u32, h: u32) {
@@ -7543,6 +8192,319 @@ impl GpuState {
             }
         }
     }
+}
+
+fn randomize_params(params: &mut VisualParams, rng: &mut impl rand::Rng) {
+    use rand::Rng;
+    if !params.locks.painter_kind {
+        params.painter_kind = match rng.gen_range(0u8..7) {
+            0 => PainterKind::HueStripe,
+            1 => PainterKind::Spiral,
+            2 => PainterKind::Plasma,
+            3 => PainterKind::Skin,
+            4 => PainterKind::AudioPaint,
+            5 => PainterKind::PrintHead,
+            _ => PainterKind::Image,
+        };
+    }
+    if !params.locks.current_shape {
+        params.current_shape = match rng.gen_range(0u8..9) {
+            0 => ShapeKind::Cylinder,
+            1 => ShapeKind::Sphere,
+            2 => ShapeKind::Cube,
+            3 => ShapeKind::Tetrahedron,
+            4 => ShapeKind::Icosahedron,
+            5 => ShapeKind::Urchin,
+            6 => ShapeKind::Caltrop,
+            7 => ShapeKind::Myocyte,
+            _ => ShapeKind::PrimeHelix,
+        };
+    }
+    if !params.locks.frame_shape {
+        params.frame_shape = match rng.gen_range(0u8..8) {
+            0 => FrameShape::None,
+            1 => FrameShape::Circle,
+            2 => FrameShape::Square,
+            3 => FrameShape::Rounded,
+            4 => FrameShape::Hexagon,
+            5 => FrameShape::Octagon,
+            6 => FrameShape::Flower,
+            _ => FrameShape::Star,
+        };
+    }
+    if !params.locks.fold_count           { params.fold_count           = rng.gen_range(4.0_f32..=20.0).round(); }
+    if !params.locks.zoom                 { params.zoom                 = rng.gen_range(0.5_f32..=1.3); }
+    if !params.locks.rotation_speed_scale { params.rotation_speed_scale = rng.gen_range(0.3_f32..=2.5); }
+    if !params.locks.frame_size           { params.frame_size           = rng.gen_range(0.65_f32..=1.0); }
+    if !params.locks.frame_color_hue      { params.frame_color_hue      = rng.gen_range(0.0_f32..360.0); }
+    if !params.locks.colorize_hue         { params.colorize_hue         = rng.gen_range(0.0_f32..360.0); }
+    if !params.locks.colorize_intensity   { params.colorize_intensity   = rng.gen_range(0.2_f32..=0.9); }
+    if !params.locks.distortion_amplitude { params.distortion_amplitude = rng.gen_range(0.0_f32..=0.25); }
+    if !params.locks.distortion_frequency { params.distortion_frequency = rng.gen_range(1.0_f32..=6.0); }
+    if !params.locks.contrast             { params.contrast             = rng.gen_range(0.7_f32..=1.8); }
+    if !params.locks.contrast_passes      { params.contrast_passes      = rng.gen_range(1u32..=6); }
+    if !params.locks.saturation           { params.saturation           = rng.gen_range(0.6_f32..=1.6); }
+    if !params.locks.bass_zoom_strength   { params.bass_zoom_strength   = rng.gen_range(0.0_f32..=0.6); }
+    if !params.locks.invert_enabled       { params.invert_enabled       = rng.gen_bool(0.5); }
+    if !params.locks.colorize_enabled     { params.colorize_enabled     = rng.gen_bool(0.5); }
+    if !params.locks.distortion_enabled   { params.distortion_enabled   = rng.gen_bool(0.5); }
+    if !params.locks.midi_shake_enabled   { params.midi_shake_enabled   = rng.gen_bool(0.5); }
+    if !params.locks.audio_shake_enabled  { params.audio_shake_enabled  = rng.gen_bool(0.5); }
+    if !params.locks.phase_lock_enabled { params.phase_lock_enabled = rng.gen_bool(0.20); }
+    if !params.locks.phase_lock_kaleido { params.phase_lock_kaleido = rng.gen_bool(0.75); }
+    if !params.locks.phase_lock_shape   { params.phase_lock_shape   = rng.gen_bool(0.75); }
+    if !params.locks.phase_lock_scale   { params.phase_lock_scale   = rng.gen_bool(0.65); }
+    if !params.locks.phase_lock_scale_depth { params.phase_lock_scale_depth = rng.gen_range(0.04_f32..=0.20); }
+    if !params.locks.phase_lock_beats {
+        let roll: f32 = rng.gen();
+        params.phase_lock_beats = if roll < 0.55 { 1 } else if roll < 0.85 { 2 } else { 4 };
+    }
+    if !params.locks.audio_route_shape {
+        let roll: f32 = rng.gen();
+        params.audio_route_shape = if roll < 0.55 {
+            audio::BeatRoute::Combined
+        } else if roll < 0.75 {
+            audio::BeatRoute::Low
+        } else if roll < 0.85 {
+            audio::BeatRoute::Mid
+        } else if roll < 0.95 {
+            audio::BeatRoute::High
+        } else {
+            audio::BeatRoute::Broadband
+        };
+    }
+    if !params.locks.audio_route_kaleido {
+        let roll: f32 = rng.gen();
+        params.audio_route_kaleido = if roll < 0.55 {
+            audio::BeatRoute::Combined
+        } else if roll < 0.65 {
+            audio::BeatRoute::Low
+        } else if roll < 0.80 {
+            audio::BeatRoute::Mid
+        } else if roll < 0.95 {
+            audio::BeatRoute::High
+        } else {
+            audio::BeatRoute::Broadband
+        };
+    }
+    if !params.locks.audio_route_shake {
+        let roll: f32 = rng.gen();
+        params.audio_route_shake = if roll < 0.70 {
+            audio::BeatRoute::Combined
+        } else if roll < 0.92 {
+            audio::BeatRoute::Low
+        } else {
+            audio::BeatRoute::Mid
+        };
+    }
+    if !params.locks.audio_route_painter {
+        let roll: f32 = rng.gen();
+        params.audio_route_painter = if roll < 0.60 {
+            audio::BeatRoute::Combined
+        } else if roll < 0.78 {
+            audio::BeatRoute::Low
+        } else if roll < 0.88 {
+            audio::BeatRoute::Mid
+        } else if roll < 0.97 {
+            audio::BeatRoute::High
+        } else {
+            audio::BeatRoute::Broadband
+        };
+    }
+    if !params.locks.ribbons_enabled      { params.ribbons_enabled      = rng.gen_bool(0.5); }
+    if !params.locks.ribbons_intensity    { params.ribbons_intensity    = rng.gen_range(0.2_f32..=1.0); }
+    // DP angles reroll independently of enabled (per spec).
+    if !params.locks.distortion_plus_enabled { params.distortion_plus_enabled = rng.gen_bool(0.40); }
+    if !params.locks.distortion_plus_yaw     { params.distortion_plus_yaw     = rng.gen_range(-180.0_f32..=180.0); }
+    if !params.locks.distortion_plus_pitch   { params.distortion_plus_pitch   = rng.gen_range(-45.0_f32..=45.0); }
+    if !params.locks.distortion_plus_roll    { params.distortion_plus_roll    = rng.gen_range(-180.0_f32..=180.0); }
+    if !params.locks.palette_mode {
+        params.palette_mode = match rng.gen_range(0u8..7) {
+            0 => PaletteMode::Off,
+            1 => PaletteMode::Warm,
+            2 => PaletteMode::Cool,
+            3 => PaletteMode::Earth,
+            4 => PaletteMode::Neon,
+            5 => PaletteMode::Monochrome,
+            _ => PaletteMode::Harmony,
+        };
+    }
+    if !params.locks.palette_tint     { params.palette_tint     = rng.gen_range(0.0_f32..=1.0); }
+    if !params.locks.palette_mono_hue { params.palette_mono_hue = rng.gen_range(0.0_f32..=360.0); }
+    if !params.locks.blackhole_enabled       { params.blackhole_enabled       = rng.gen_bool(0.10); }
+    if !params.locks.blackhole_warp_strength { params.blackhole_warp_strength = rng.gen_range(0.85_f32..=0.98); }
+    if !params.locks.blackhole_warp_curve    { params.blackhole_warp_curve    = rng.gen_range(0.90_f32..=0.99); }
+    if !params.locks.blackhole_alpha_radius  { params.blackhole_alpha_radius  = rng.gen_range(0.3_f32..=1.0); }
+    if !params.locks.blackhole_wander_amount { params.blackhole_wander_amount = rng.gen_range(0.0_f32..=0.015); }
+    // Phantom: mutually exclusive with blackhole
+    if !params.locks.phantom_enabled {
+        params.phantom_enabled = if params.blackhole_enabled {
+            false
+        } else {
+            rng.gen_bool(0.15)
+        };
+    }
+    if !params.locks.phantom_delay_seconds { params.phantom_delay_seconds = rng.gen_range(0.5_f32..=3.0); }
+    if !params.locks.phantom_key_tolerance { params.phantom_key_tolerance = rng.gen_range(0.05_f32..=0.40); }
+    if !params.locks.phantom_key_softness  { params.phantom_key_softness  = rng.gen_range(0.02_f32..=0.15); }
+    if !params.locks.phantom_key_strength  { params.phantom_key_strength  = rng.gen_range(0.5_f32..=1.0); }
+    if !params.locks.phantom_opacity       { params.phantom_opacity       = rng.gen_range(0.5_f32..=1.0); }
+    if !params.locks.phantom_key_color {
+        let h = rng.gen_range(0.0_f32..360.0);
+        let (r, g, b) = hsv_to_rgb(h, 1.0, 1.0);
+        params.phantom_key_color = [r, g, b];
+    }
+    if !params.locks.color_harmony {
+        let roll: f32 = rng.gen();
+        params.color_harmony = if roll < 0.10 {
+            color::ColorHarmony::Monochromatic
+        } else if roll < 0.40 {
+            color::ColorHarmony::Analogous
+        } else if roll < 0.55 {
+            color::ColorHarmony::Complementary
+        } else if roll < 0.75 {
+            color::ColorHarmony::SplitComplementary
+        } else if roll < 0.90 {
+            color::ColorHarmony::Triadic
+        } else {
+            color::ColorHarmony::Tetradic
+        };
+    }
+    if !params.locks.color_anchor_hue {
+        params.color_anchor_hue = rng.gen_range(0.0_f32..360.0);
+    }
+    if !params.locks.color_temperature_bias {
+        let roll: f32 = rng.gen();
+        params.color_temperature_bias = if roll < 0.50 {
+            rng.gen_range(-0.2_f32..=0.2)
+        } else if roll < 0.75 {
+            rng.gen_range(0.3_f32..=0.7)
+        } else {
+            rng.gen_range(-0.7_f32..=-0.3)
+        };
+    }
+    if !params.locks.color_temperature_audio {
+        params.color_temperature_audio = if rng.gen_bool(0.30) {
+            let magnitude = rng.gen_range(0.2_f32..=0.8);
+            if rng.gen_bool(0.25) { -magnitude } else { magnitude }
+        } else {
+            0.0
+        };
+    }
+    if !params.locks.color_saturation_mode {
+        let roll: f32 = rng.gen();
+        params.color_saturation_mode = if roll < 0.40 {
+            color::SaturationMode::Free
+        } else if roll < 0.70 {
+            color::SaturationMode::Muted
+        } else if roll < 0.88 {
+            color::SaturationMode::Pure
+        } else {
+            color::SaturationMode::ChromaticGray
+        };
+    }
+    if !params.locks.color_saturation {
+        let r = params.color_saturation_mode.range();
+        params.color_saturation = rng.gen_range(r[0]..=r[1]);
+    }
+    if !params.locks.color_value_key {
+        let roll: f32 = rng.gen();
+        params.color_value_key = if roll < 0.40 {
+            color::ValueKey::Free
+        } else if roll < 0.70 {
+            color::ValueKey::Mid
+        } else if roll < 0.88 {
+            color::ValueKey::High
+        } else {
+            color::ValueKey::Low
+        };
+    }
+    if !params.locks.color_value {
+        let r = params.color_value_key.range();
+        params.color_value = rng.gen_range(r[0]..=r[1]);
+    }
+    if !params.locks.color_harmony_strength {
+        params.color_harmony_strength = rng.gen_range(0.3_f32..=0.85);
+    }
+    if !params.locks.color_phase_cycle_enabled {
+        params.color_phase_cycle_enabled = rng.gen_bool(0.25);
+    }
+    if !params.locks.color_phase_cycle_degrees && params.color_phase_cycle_enabled {
+        params.color_phase_cycle_degrees = rng.gen_range(90.0_f32..=360.0);
+    }
+    if !params.locks.applied_harmony_enabled {
+        params.applied_harmony_enabled = rng.gen_bool(0.25);
+    }
+    if !params.locks.bezold_enabled {
+        params.bezold_enabled = rng.gen_bool(0.20);
+    }
+    if !params.locks.bezold_strength && params.bezold_enabled {
+        params.bezold_strength = rng.gen_range(0.30_f32..=0.75);
+    }
+    if !params.locks.bezold_radius && params.bezold_enabled {
+        params.bezold_radius = rng.gen_range(2.0_f32..=5.0);
+    }
+    if !params.locks.micro_swirl_enabled {
+        params.micro_swirl_enabled = rng.gen_bool(0.30);
+    }
+    if !params.locks.micro_swirl_density && params.micro_swirl_enabled {
+        params.micro_swirl_density = rng.gen_range(6.0_f32..=16.0);
+    }
+    if !params.locks.micro_swirl_amplitude && params.micro_swirl_enabled {
+        params.micro_swirl_amplitude = rng.gen_range(0.5_f32..=1.2);
+    }
+    if !params.locks.micro_swirl_speed && params.micro_swirl_enabled {
+        params.micro_swirl_speed = rng.gen_range(0.2_f32..=0.6);
+    }
+    if !params.locks.explosion_enabled {
+        params.explosion_enabled = rng.gen_bool(0.20);
+    }
+    if !params.locks.explosion_interval_min && params.explosion_enabled {
+        params.explosion_interval_min = rng.gen_range(1.5_f32..=5.0);
+    }
+    if !params.locks.explosion_interval_max && params.explosion_enabled {
+        params.explosion_interval_max =
+            (params.explosion_interval_min + rng.gen_range(2.0_f32..=6.0)).min(12.0);
+    }
+    if !params.locks.explosion_chunk_count && params.explosion_enabled {
+        params.explosion_chunk_count = rng.gen_range(20_u32..=60);
+    }
+    if !params.locks.explosion_chunk_size && params.explosion_enabled {
+        params.explosion_chunk_size = rng.gen_range(0.025_f32..=0.07);
+    }
+}
+
+fn generate_panel_params(baseline: &VisualParams, n: usize) -> Vec<VisualParams> {
+    let mut rng = rand::thread_rng();
+    (0..n).map(|_| {
+        let mut p = baseline.clone();
+        randomize_params(&mut p, &mut rng);
+        p
+    }).collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PanelRect { x: u32, y: u32, w: u32, h: u32 }
+
+fn grid_layout(n: usize, frame_w: u32, frame_h: u32) -> Vec<PanelRect> {
+    let (cols, rows): (u32, u32) = match n {
+        1  => (1, 1),
+        2  => (2, 1),
+        3  => (3, 1),
+        4  => (2, 2),
+        6  => (3, 2),
+        9  => (3, 3),
+        12 => (3, 4),
+        n  => panic!("unsupported grid panel count: {n}"),
+    };
+    let pw = frame_w / cols;
+    let ph = frame_h / rows;
+    (0..n as u32).map(|i| PanelRect {
+        x: (i % cols) * pw,
+        y: (i / cols) * ph,
+        w: pw,
+        h: ph,
+    }).collect()
 }
 
 struct FpsCounter {
@@ -7971,6 +8933,12 @@ impl ApplicationHandler for App {
                     KeyCode::KeyF => {
                         gpu.params.distortion_frequency = (gpu.params.distortion_frequency + 0.5).min(8.0);
                         log::info!("distortion_frequency = {:.1}", gpu.params.distortion_frequency);
+                    }
+                    KeyCode::KeyG => {
+                        gpu.grid_export_n = match gpu.grid_export_n {
+                            None => { log::info!("Grid export: ON (N=4, 2×2)"); Some(4) }
+                            Some(_) => { log::info!("Grid export: OFF (single-panel)"); None }
+                        };
                     }
                     KeyCode::KeyK if !gpu.params.locks.phase_lock_enabled => {
                         gpu.params.phase_lock_enabled = !gpu.params.phase_lock_enabled;
@@ -8636,6 +9604,13 @@ impl ApplicationHandler for App {
                                 LockTarget::MicroSwirlDensity    => gpu.params.locks.micro_swirl_density   = !gpu.params.locks.micro_swirl_density,
                                 LockTarget::MicroSwirlAmplitude  => gpu.params.locks.micro_swirl_amplitude = !gpu.params.locks.micro_swirl_amplitude,
                                 LockTarget::MicroSwirlSpeed      => gpu.params.locks.micro_swirl_speed     = !gpu.params.locks.micro_swirl_speed,
+                                LockTarget::DepthShadeEnabled    => gpu.params.locks.depth_shade_enabled   = !gpu.params.locks.depth_shade_enabled,
+                                LockTarget::DepthShadeIntensity  => gpu.params.locks.depth_shade_intensity = !gpu.params.locks.depth_shade_intensity,
+                                LockTarget::DepthShadeLightX     => gpu.params.locks.depth_shade_light_x   = !gpu.params.locks.depth_shade_light_x,
+                                LockTarget::DepthShadeLightY     => gpu.params.locks.depth_shade_light_y   = !gpu.params.locks.depth_shade_light_y,
+                                LockTarget::DepthShadeLightZ     => gpu.params.locks.depth_shade_light_z   = !gpu.params.locks.depth_shade_light_z,
+                                LockTarget::DepthShadeSoftness   => gpu.params.locks.depth_shade_softness  = !gpu.params.locks.depth_shade_softness,
+                                LockTarget::DepthShadeFlatness   => gpu.params.locks.depth_shade_flatness  = !gpu.params.locks.depth_shade_flatness,
                                 LockTarget::ExplosionEnabled     => gpu.params.locks.explosion_enabled      = !gpu.params.locks.explosion_enabled,
                                 LockTarget::ExplosionIntervalMin => gpu.params.locks.explosion_interval_min = !gpu.params.locks.explosion_interval_min,
                                 LockTarget::ExplosionIntervalMax => gpu.params.locks.explosion_interval_max = !gpu.params.locks.explosion_interval_max,
@@ -8663,9 +9638,16 @@ impl ApplicationHandler for App {
                         ParamChange::EchoDelayWhite(v)   => gpu.params.echo_delay_white_s = v,
                         ParamChange::EchoDelayColor(v)   => gpu.params.echo_delay_color_s = v,
                         ParamChange::TriggerExport => {
+                            let grid_n = gpu.grid_export_n;
                             match gpu.start_export() {
-                                Ok(()) => log::info!("Export started via Export button"),
-                                Err(e) => log::error!("Export failed to start: {}", e),
+                                Ok(()) => {
+                                    if let Some(n) = grid_n {
+                                        log::info!("Export started: grid mode ON ({n}-panel 2×2)");
+                                    } else {
+                                        log::info!("Export started: single-panel");
+                                    }
+                                }
+                                Err(e) => log::error!("Export failed to start: {e}"),
                             }
                         }
                         ParamChange::SetAudioSourceMode(v) => {
@@ -8714,6 +9696,13 @@ impl ApplicationHandler for App {
                         ParamChange::MicroSwirlDensity(v)    => gpu.params.micro_swirl_density   = v,
                         ParamChange::MicroSwirlAmplitude(v)  => gpu.params.micro_swirl_amplitude = v,
                         ParamChange::MicroSwirlSpeed(v)      => gpu.params.micro_swirl_speed     = v,
+                        ParamChange::DepthShadeEnabled(v)    => gpu.params.depth_shade_enabled   = v,
+                        ParamChange::DepthShadeIntensity(v)  => gpu.params.depth_shade_intensity = v,
+                        ParamChange::DepthShadeLightX(v)     => gpu.params.depth_shade_light_x   = v,
+                        ParamChange::DepthShadeLightY(v)     => gpu.params.depth_shade_light_y   = v,
+                        ParamChange::DepthShadeLightZ(v)     => gpu.params.depth_shade_light_z   = v,
+                        ParamChange::DepthShadeSoftness(v)   => gpu.params.depth_shade_softness  = v,
+                        ParamChange::DepthShadeFlatness(v)   => gpu.params.depth_shade_flatness  = v,
                         ParamChange::ExplosionEnabled(v)     => gpu.params.explosion_enabled      = v,
                         ParamChange::ExplosionIntervalMin(v) => gpu.params.explosion_interval_min = v,
                         ParamChange::ExplosionIntervalMax(v) => gpu.params.explosion_interval_max = v,
@@ -8733,6 +9722,17 @@ impl ApplicationHandler for App {
                             bundle.apply(&mut gpu.params, &locks);
                             gpu.last_bundle_applied = Some(bundle);
                             log::info!("Random bundle: {}", bundle.name());
+                        }
+                        ParamChange::SetGridExportN(n) => {
+                            gpu.grid_export_n = n;
+                            match n {
+                                Some(n) => log::info!("Grid export: ON ({n}-panel) via UI"),
+                                None    => log::info!("Grid export: OFF (single-panel) via UI"),
+                            }
+                        }
+                        ParamChange::SetGridRandomInterval(v) => {
+                            gpu.params.grid_random_interval_s = v.clamp(0.0, 10.0);
+                            log::info!("Grid random interval = {:.1}s", gpu.params.grid_random_interval_s);
                         }
                     }
                 }
@@ -8945,6 +9945,14 @@ mod tests {
             micro_swirl_density:   12.0,
             micro_swirl_amplitude: 0.9,
             micro_swirl_speed:     0.4,
+            depth_shade_enabled:   true,
+            depth_shade_intensity: 0.6,
+            depth_shade_light_x:   0.5,
+            depth_shade_light_y:  -0.5,
+            depth_shade_light_z:   0.6,
+            depth_shade_softness:  0.3,
+            depth_shade_flatness:  0.8,
+            grid_random_interval_s: 3.0,
             explosion_enabled:      true,
             explosion_interval_min: 2.0,
             explosion_interval_max: 6.0,
