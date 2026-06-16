@@ -2373,9 +2373,12 @@ struct GpuState {
     prime_helix_grid:       Option<cell::CellGrid>,
     prime_helix_influencer: Box<dyn influencer::Influencer>,
 
-    // SDF lyric-text overlay (Slice 1).
+    // SDF lyric-text overlay — atlas + pipeline (shared by live and export paths).
     text_atlas: Option<text::atlas::TextAtlas>,
     text_pass:  Option<text::pass::TextPass>,
+    // Live-path lyric sampler — runs continuously during preview.
+    live_lyric_corpus:  Option<text::corpus::LyricCorpus>,
+    live_lyric_sampler: Option<text::corpus::LyricSampler>,
 }
 
 impl GpuState {
@@ -4089,6 +4092,27 @@ impl GpuState {
             }
         };
 
+        // Build the SDF text pipeline at startup so glyphs can render during live preview.
+        let text_pass: Option<text::pass::TextPass> = text_atlas.as_ref().map(|atlas| {
+            let p = text::pass::TextPass::new(&device, config.format, atlas);
+            p.write_default_uniforms(&queue);
+            p
+        });
+
+        // Live lyric corpus + sampler — same env var as export, but runs continuously.
+        let live_lyric_corpus: Option<text::corpus::LyricCorpus> = {
+            let lyric = std::env::var("ABSTRAKT_LYRIC_TEXT")
+                .unwrap_or_else(|_| "abstrakt".to_string());
+            Some(text::corpus::LyricCorpus::from_text(&lyric))
+        };
+        let live_lyric_sampler: Option<text::corpus::LyricSampler> =
+            live_lyric_corpus.as_ref()
+                .filter(|c| !c.is_empty())
+                .map(|_| {
+                    log::info!("LyricCorpus: live reactive surfacing enabled");
+                    text::corpus::LyricSampler::new()
+                });
+
         Self {
             surface, device, queue, config, size,
             uniforms_buffer,
@@ -4207,7 +4231,9 @@ impl GpuState {
             prime_helix_influencer: Box::new(influencer::NoOpInfluencer),
 
             text_atlas,
-            text_pass: None, // built lazily at first export start
+            text_pass,
+            live_lyric_corpus,
+            live_lyric_sampler,
         }
     }
 
@@ -5227,6 +5253,78 @@ impl GpuState {
             pass.set_pipeline(&self.shape_effects_pipeline);
             pass.set_bind_group(0, &self.shape_effects_post_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        // Lyric glyph pre-fold inject — LIVE path.
+        // Renders audio-reactive glyphs into shape_post (LoadOp::Load) so the
+        // kaleido fold in Pass 3 maps them into petals, not the black-gap region.
+        {
+            let live_beat = self.shader_beat_decay;
+            let live_bands = self.bands_smoothed;
+            let sat_r    = self.params.color_saturation_mode.range();
+            let val_r    = self.params.color_value_key.range();
+            let swatches = color::palette_from_harmony(
+                self.params.color_harmony,
+                self.params.color_anchor_hue,
+                (sat_r[0] + sat_r[1]) * 0.5,
+                (val_r[0] + val_r[1]) * 0.5,
+                8,
+            );
+            if let (Some(corpus), Some(sampler)) =
+                (&self.live_lyric_corpus, self.live_lyric_sampler.as_mut())
+            {
+                sampler.update(shader_time, live_beat, live_bands, 1.0 / 60.0,
+                               corpus, &swatches);
+            }
+
+            struct LiveGlyphDraw {
+                ch: char, cx: f32, cy: f32, font_px: f32,
+                rotation: f32, flip_x: bool, flip_y: bool,
+                color_r: f32, color_g: f32, color_b: f32,
+                alpha: f32, frag_seed: u32, legibility: f32,
+            }
+            let live_base_px = self.size.height as f32 / 15.0;
+            let live_draws: Vec<LiveGlyphDraw> = self.live_lyric_sampler.as_ref()
+                .map(|s| {
+                    s.fragments(shader_time, live_beat)
+                        .flat_map(|(frag, leg)| {
+                            let frag_seed = frag.seed;
+                            frag.glyphs.iter().map(move |g| LiveGlyphDraw {
+                                ch: g.glyph_char, cx: g.abs_x, cy: g.abs_y,
+                                font_px: live_base_px * g.scale,
+                                rotation: g.rotation, flip_x: g.flip_x, flip_y: g.flip_y,
+                                color_r: g.color[0], color_g: g.color[1], color_b: g.color[2],
+                                alpha: g.alpha * leg, frag_seed, legibility: leg,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if !live_draws.is_empty() {
+                let live_w = self.size.width;
+                let live_h = self.size.height;
+                let shape_post_target = &self.shape_post_view;
+                if let (Some(tpass), Some(atlas)) =
+                    (self.text_pass.as_mut(), self.text_atlas.as_ref())
+                {
+                    for d in &live_draws {
+                        tpass.render_glyph(
+                            &mut encoder, shape_post_target, &self.queue, atlas,
+                            d.ch, d.font_px, live_w, live_h,
+                            d.cx, d.cy, d.rotation, d.flip_x, d.flip_y,
+                            text::pass::TextUniforms {
+                                color_r: d.color_r, color_g: d.color_g,
+                                color_b: d.color_b, color_a: d.alpha,
+                                legibility: d.legibility,
+                                seed:       d.frag_seed as f32,
+                                warp_time:  shader_time,
+                                _pad2:      0.0,
+                            },
+                        );
+                    }
+                }
+            }
         }
 
         // Pass 2.5: distortion plus (optional equirectangular rotation → dp FBO)
@@ -7450,6 +7548,83 @@ impl GpuState {
             pass.draw(0..3, 0..1);
         }
 
+        // Lyric glyph pre-fold inject — EXPORT path.
+        // Advance sampler + render glyphs into exp_shape_post_view (LoadOp::Load)
+        // so Pass 3 kaleido folds them into the petals.
+        {
+            let beat_decay = self.export_state.as_ref()
+                .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
+            let bands = self.export_state.as_ref()
+                .map(|e| e.export_bands_smoothed).unwrap_or([0.0; 8]);
+            let base_font_px = off_h as f32 / 15.0;
+            let sat_r    = self.params.color_saturation_mode.range();
+            let val_r    = self.params.color_value_key.range();
+            let swatches = color::palette_from_harmony(
+                self.params.color_harmony,
+                self.params.color_anchor_hue,
+                (sat_r[0] + sat_r[1]) * 0.5,
+                (val_r[0] + val_r[1]) * 0.5,
+                8,
+            );
+            if let Some(exp) = self.export_state.as_mut() {
+                if let (Some(sampler), Some(corpus)) =
+                    (exp.lyric_sampler.as_mut(), exp.lyric_corpus.as_ref())
+                {
+                    sampler.update(frame_time, beat_decay, bands, 1.0 / fps as f32,
+                                   corpus, &swatches);
+                }
+            }
+
+            let beat_for_leg = self.export_state.as_ref()
+                .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
+            struct ExpGlyphDraw {
+                ch: char, cx: f32, cy: f32, font_px: f32,
+                rotation: f32, flip_x: bool, flip_y: bool,
+                color_r: f32, color_g: f32, color_b: f32,
+                alpha: f32, frag_seed: u32, legibility: f32,
+            }
+            let exp_glyph_draws: Vec<ExpGlyphDraw> = self.export_state.as_ref()
+                .and_then(|e| e.lyric_sampler.as_ref())
+                .map(|s| {
+                    s.fragments(frame_time, beat_for_leg)
+                        .flat_map(|(frag, leg)| {
+                            let frag_seed = frag.seed;
+                            frag.glyphs.iter().map(move |g| ExpGlyphDraw {
+                                ch: g.glyph_char, cx: g.abs_x, cy: g.abs_y,
+                                font_px: base_font_px * g.scale,
+                                rotation: g.rotation, flip_x: g.flip_x, flip_y: g.flip_y,
+                                color_r: g.color[0], color_g: g.color[1], color_b: g.color[2],
+                                alpha: g.alpha * leg, frag_seed, legibility: leg,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if !exp_glyph_draws.is_empty() {
+                let exp_post_target = &exp_shape_post_view;
+                if let (Some(tpass), Some(atlas)) =
+                    (self.text_pass.as_mut(), self.text_atlas.as_ref())
+                {
+                    for d in &exp_glyph_draws {
+                        tpass.render_glyph(
+                            &mut enc, exp_post_target, &self.queue, atlas,
+                            d.ch, d.font_px, off_w, off_h,
+                            d.cx, d.cy, d.rotation, d.flip_x, d.flip_y,
+                            text::pass::TextUniforms {
+                                color_r: d.color_r, color_g: d.color_g,
+                                color_b: d.color_b, color_a: d.alpha,
+                                legibility: d.legibility,
+                                seed:       d.frag_seed as f32,
+                                warp_time:  frame_time,
+                                _pad2:      0.0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
         // Pass 2.5: distortion plus → export-res dp view (optional)
         if let Some(ref dp_view) = exp_dp_view {
             let exp_dp_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -7822,76 +7997,6 @@ impl GpuState {
                 } else { false }
             } else { false }
         } else { false };
-
-        // Export Pass 5.6: audio-reactive SDF lyric-text overlay.
-        //
-        // Step 1 — advance the sampler (spawns/expires fragments on beat edges).
-        {
-            let beat_decay = self.export_state.as_ref()
-                .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
-            let bands = self.export_state.as_ref()
-                .map(|e| e.export_bands_smoothed).unwrap_or([0.0; 8]);
-            let dt = 1.0 / fps as f32;
-            if let Some(exp) = self.export_state.as_mut() {
-                if let (Some(sampler), Some(corpus)) =
-                    (exp.lyric_sampler.as_mut(), exp.lyric_corpus.as_ref())
-                {
-                    sampler.update(frame_time, beat_decay, bands, dt, corpus);
-                }
-            }
-        }
-
-        // Step 2 — snapshot fragment draw data into an owned Vec (releases all borrows).
-        let beat_for_leg = self.export_state.as_ref()
-            .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
-        let frag_draws: Vec<(String, f32, f32, f32, [f32; 4], u32, f32)> =
-            self.export_state.as_ref()
-                .and_then(|e| e.lyric_sampler.as_ref())
-                .map(|s| {
-                    s.fragments(frame_time, beat_for_leg)
-                        .map(|(f, leg)| (
-                            f.text.clone(), f.base_x, f.base_y,
-                            f.scale, f.color, f.seed, leg,
-                        ))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-        // Step 3 — render each fragment additively over the final composite target.
-        if !frag_draws.is_empty() {
-            let exp_text_view;
-            let text_target: &wgpu::TextureView = if use_explosion_overlay {
-                exp_text_view = self.export_explosion_tex.as_ref().unwrap().0
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                &exp_text_view
-            } else if self.params.micro_swirl_enabled {
-                &self.micro_swirl.view
-            } else if self.params.bezold_enabled {
-                &self.bezold.view
-            } else {
-                &self.offline_target.as_ref().unwrap().view
-            };
-
-            if let (Some(pass), Some(atlas)) =
-                (self.text_pass.as_mut(), self.text_atlas.as_ref())
-            {
-                for (text, cx, by, scale, color, seed, leg) in &frag_draws {
-                    let font_px = off_h as f32 * scale;
-                    pass.render_fragment(
-                        &mut enc, text_target, &self.queue, atlas,
-                        text, font_px, off_w, off_h, *cx, *by,
-                        text::pass::TextUniforms {
-                            color_r: color[0], color_g: color[1],
-                            color_b: color[2], color_a: color[3],
-                            legibility: *leg,
-                            seed:       *seed as f32,
-                            warp_time:  frame_time,
-                            _pad2:      0.0,
-                        },
-                    );
-                }
-            }
-        }
 
         // Readback: copy final post-process output → staging buffer.
         // Source priority: export_explosion_tex > micro_swirl > bezold > offline_target.

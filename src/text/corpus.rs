@@ -2,7 +2,8 @@
 //!
 //! Slice 1: `LyricCorpus` — deterministic line/word accessor.
 //! Slice 2: `LyricSampler` — spawns `ActiveFragment`s on beat onsets, each
-//!          carrying a legibility envelope (abstract blob → crisp glyph → dissolve).
+//!          holding per-character `GlyphInstance` data with wild scale/rotation/
+//!          flip variation drawn from the current harmony palette.
 
 // ── Corpus ────────────────────────────────────────────────────────────────────
 
@@ -56,28 +57,46 @@ fn pcg_f32(seed: u32) -> f32 {
     (pcg_hash(seed) >> 8) as f32 / (1u32 << 24) as f32
 }
 
+// ── Per-character variation ───────────────────────────────────────────────────
+
+/// One glyph in an active fragment — carries its own transform and color.
+pub struct GlyphInstance {
+    pub glyph_char: char,
+    /// Absolute NDC center position (anti-clip clamped at spawn time).
+    pub abs_x:      f32,
+    pub abs_y:      f32,
+    /// Scale relative to the fragment's base_font_px (log-distributed [0.25, 3.0]).
+    pub scale:      f32,
+    /// Rotation in radians, full 2π.
+    pub rotation:   f32,
+    pub flip_x:     bool,
+    pub flip_y:     bool,
+    /// RGB from the current harmony palette.
+    pub color:      [f32; 3],
+    /// Per-glyph alpha [0.35, 1.0]; multiplied by fragment legibility at draw time.
+    pub alpha:      f32,
+}
+
 // ── Fragment ──────────────────────────────────────────────────────────────────
 
-/// One active lyric fragment on screen.
+/// One active lyric fragment — owns a set of individually varied glyphs.
 pub struct ActiveFragment {
-    pub text:       String,
     pub spawn_time: f32,
     pub lifetime:   f32,
-    /// Horizontal center in NDC (−1..1).
+    /// Logical anchor (used for logging; glyph abs positions are pre-computed).
     pub base_x:     f32,
-    /// Baseline y in NDC (−1..1).
     pub base_y:     f32,
-    /// Font size as fraction of screen height (e.g. 0.07 → 7 % of height in px).
-    pub scale:      f32,
-    pub color:      [f32; 4],
     /// Deterministic seed — fed to the warp shader for per-fragment variation.
     pub seed:       u32,
+    pub glyphs:     Vec<GlyphInstance>,
 }
 
 // ── Sampler ───────────────────────────────────────────────────────────────────
 
 const BEAT_THRESHOLD: f32 = 0.45;
 const MAX_ACTIVE:     usize = 4;
+/// Maximum glyphs with scale > 2.0 across all active fragments at any moment.
+const GIANT_CAP:      usize = 2;
 
 pub struct LyricSampler {
     active:          Vec<ActiveFragment>,
@@ -96,14 +115,19 @@ impl LyricSampler {
         }
     }
 
-    /// Advance state one export frame.
+    /// Advance state one frame.
+    ///
+    /// `swatches` — harmony palette from `color::palette_from_harmony`.
+    /// Glyph positions scatter freely across [-1,1] with no edge clamp; the
+    /// kaleido fold maps every position in the shape_post texture into petals.
     pub fn update(
         &mut self,
-        frame_time:  f32,
-        beat_decay:  f32,
-        bands:       [f32; 8],
-        _dt:         f32,
-        corpus:      &LyricCorpus,
+        frame_time: f32,
+        beat_decay: f32,
+        _bands:     [f32; 8],
+        _dt:        f32,
+        corpus:     &LyricCorpus,
+        swatches:   &[[f32; 3]],
     ) {
         // Expire fragments whose lifetime has elapsed.
         self.active.retain(|f| frame_time - f.spawn_time < f.lifetime);
@@ -112,59 +136,94 @@ impl LyricSampler {
         let rising = self.prev_beat_decay < BEAT_THRESHOLD && beat_decay >= BEAT_THRESHOLD;
         self.prev_beat_decay = beat_decay;
 
-        if rising && self.active.len() < MAX_ACTIVE && !corpus.is_empty() {
-            let seed = self.seed_counter;
-            self.seed_counter = seed.wrapping_add(0x9E37_79B9);
-
-            // Every 3rd fragment is a single word; the rest are full lines.
-            let text = if self.next_idx % 3 == 2 {
-                let wi = pcg_hash(seed.wrapping_add(17)) as usize;
-                corpus.word(wi).to_string()
-            } else {
-                corpus.fragment(self.next_idx as usize).to_string()
-            };
-            self.next_idx = self.next_idx.wrapping_add(1);
-
-            // Deterministic scatter: position, size, lifetime.
-            let cx    = pcg_f32(seed)                    * 1.4  - 0.7;   // [−0.7, 0.7]
-            let by    = pcg_f32(seed.wrapping_add(1))   * 1.1  - 0.65;  // [−0.65, 0.45]
-            let scale = 0.05 + pcg_f32(seed.wrapping_add(2)) * 0.07;    // [0.05, 0.12]
-            let life  = 2.5  + pcg_f32(seed.wrapping_add(3)) * 3.5;     // [2.5, 6.0]
-
-            // Tint by dominant band → soft hue shift.
-            let dom = bands
-                .iter()
-                .cloned()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let hue = dom as f32 / 8.0;
-            let (r, g, b) = hsv_to_rgb(hue, 0.40, 1.0);
-
-            self.active.push(ActiveFragment {
-                text,
-                spawn_time: frame_time,
-                lifetime:   life,
-                base_x:     cx,
-                base_y:     by,
-                scale,
-                color: [r, g, b, 0.88],
-                seed,
-            });
-
-            log::debug!(
-                "LyricSampler: spawned {:?} at ({:.2},{:.2}) scale={:.3} life={:.1}s",
-                &self.active.last().unwrap().text, cx, by, scale, life
-            );
+        if !rising || self.active.len() >= MAX_ACTIVE || corpus.is_empty() {
+            return;
         }
+
+        let seed = self.seed_counter;
+        self.seed_counter = seed.wrapping_add(0x9E37_79B9);
+
+        // Every 3rd fragment is a single word; others are full lines.
+        let text = if self.next_idx % 3 == 2 {
+            let wi = pcg_hash(seed.wrapping_add(17)) as usize;
+            corpus.word(wi).to_string()
+        } else {
+            corpus.fragment(self.next_idx as usize).to_string()
+        };
+        self.next_idx = self.next_idx.wrapping_add(1);
+
+        let life     = 2.5 + pcg_f32(seed.wrapping_add(3)) * 3.5;   // [2.5, 6.0]
+        let anchor_x = pcg_f32(seed.wrapping_add(10)) * 1.4 - 0.7;  // [-0.7, 0.7]
+        let anchor_y = pcg_f32(seed.wrapping_add(11)) * 1.1 - 0.65; // [-0.65, 0.45]
+
+        // Count giants already on screen to enforce GIANT_CAP across all fragments.
+        let existing_giants: usize = self.active.iter()
+            .flat_map(|f| f.glyphs.iter())
+            .filter(|g| g.scale > 2.0)
+            .count();
+        let mut giant_budget = GIANT_CAP.saturating_sub(existing_giants);
+
+        // Build per-character GlyphInstances.
+        let chars: Vec<char> = text.chars().collect();
+        let mut glyphs = Vec::with_capacity(chars.len());
+
+        for (ci, &ch) in chars.iter().enumerate() {
+            let gs = seed.wrapping_add(100 + ci as u32 * 7);
+
+            // Log-distributed scale in [0.25, 3.0].
+            let t         = pcg_f32(gs);
+            let ln_min    = 0.25_f32.ln();
+            let ln_max    = 3.0_f32.ln();
+            let raw_scale = (ln_min + t * (ln_max - ln_min)).exp();
+
+            let scale = if raw_scale > 2.0 {
+                if giant_budget > 0 { giant_budget -= 1; raw_scale } else { 2.0 }
+            } else {
+                raw_scale
+            };
+
+            let rotation = pcg_f32(gs.wrapping_add(1)) * std::f32::consts::TAU;
+            let flip_x   = pcg_f32(gs.wrapping_add(2)) < 0.35;
+            let flip_y   = pcg_f32(gs.wrapping_add(3)) < 0.35;
+            let alpha    = 0.35 + pcg_f32(gs.wrapping_add(4)) * 0.65; // [0.35, 1.0]
+
+            // Color from harmony palette; fall back to white.
+            let color = if swatches.is_empty() {
+                [1.0f32, 1.0, 1.0]
+            } else {
+                let si = pcg_hash(gs.wrapping_add(5)) as usize % swatches.len();
+                swatches[si]
+            };
+
+            // Scatter glyphs loosely around the fragment anchor.
+            let scatter_x = (pcg_f32(gs.wrapping_add(6)) - 0.5) * 0.8; // [-0.4, 0.4]
+            let scatter_y = (pcg_f32(gs.wrapping_add(7)) - 0.5) * 0.5; // [-0.25, 0.25]
+            let abs_x = anchor_x + scatter_x;
+            let abs_y = anchor_y + scatter_y;
+            // No edge clamp — pre-fold, glyphs scatter freely across the full
+            // shape_post texture.  The kaleido fold maps every position into petals.
+
+            glyphs.push(GlyphInstance { glyph_char: ch, abs_x, abs_y, scale, rotation,
+                                        flip_x, flip_y, color, alpha });
+        }
+
+        log::debug!(
+            "LyricSampler: spawned {} glyphs at anchor ({:.2},{:.2}) life={:.1}s",
+            glyphs.len(), anchor_x, anchor_y, life
+        );
+
+        self.active.push(ActiveFragment {
+            spawn_time: frame_time, lifetime: life,
+            base_x: anchor_x, base_y: anchor_y,
+            seed, glyphs,
+        });
     }
 
     /// Iterate active fragments with their current legibility in [0, 1].
     pub fn fragments(
         &self,
-        frame_time:  f32,
-        beat_decay:  f32,
+        frame_time: f32,
+        beat_decay: f32,
     ) -> impl Iterator<Item = (&ActiveFragment, f32)> {
         self.active.iter().map(move |f| {
             let leg = fragment_legibility(f, frame_time, beat_decay);
@@ -196,23 +255,4 @@ fn fragment_legibility(frag: &ActiveFragment, frame_time: f32, beat_decay: f32) 
 fn smoothstep01(x: f32) -> f32 {
     let t = x.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-// ── Colour helpers ────────────────────────────────────────────────────────────
-
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
-    let h6 = (h * 6.0).rem_euclid(6.0);
-    let i  = h6.floor() as u32;
-    let f  = h6 - i as f32;
-    let p  = v * (1.0 - s);
-    let q  = v * (1.0 - s * f);
-    let t  = v * (1.0 - s * (1.0 - f));
-    match i % 6 {
-        0 => (v, t, p),
-        1 => (q, v, p),
-        2 => (p, v, t),
-        3 => (p, q, v),
-        4 => (t, p, v),
-        _ => (v, p, q),
-    }
 }

@@ -327,6 +327,77 @@ impl TextPass {
         self.render_with_pipeline(enc, target, &self.pipeline_add);
     }
 
+    /// Render one SDF glyph with a CPU-side 2D transform (rotate + flip).
+    ///
+    /// The four quad corners are rotated around `(center_x, center_y)` on the
+    /// CPU and passed as pre-transformed NDC positions — no matrix uniforms
+    /// needed.  Alpha-over blend (pipeline_alpha) composites cleanly over other
+    /// glyphs.
+    pub fn render_glyph(
+        &mut self,
+        enc:      &mut wgpu::CommandEncoder,
+        target:   &wgpu::TextureView,
+        queue:    &wgpu::Queue,
+        atlas:    &TextAtlas,
+        ch:       char,
+        font_px:  f32,
+        screen_w: u32,
+        screen_h: u32,
+        center_x: f32,
+        center_y: f32,
+        rotation: f32,
+        flip_x:   bool,
+        flip_y:   bool,
+        uniforms: TextUniforms,
+    ) {
+        let ch = if atlas.glyphs.contains_key(&ch) { ch } else { ' ' };
+        let g = match atlas.glyphs.get(&ch) { Some(g) => *g, None => return };
+
+        let s        = font_px / atlas.raster_px;
+        let px_ndcx  = 2.0 / screen_w as f32;
+        let px_ndcy  = 2.0 / screen_h as f32;
+        let cell_w   = CELL as f32 * s * px_ndcx;
+        let above    = atlas.baseline_y_cell as f32 * s * px_ndcy;
+        let below    = (CELL as f32 - atlas.baseline_y_cell as f32) * s * px_ndcy;
+
+        // Quad half-extents centred on (center_x, center_y).
+        let hw = cell_w  * 0.5;
+        let hh = (above + below) * 0.5;
+
+        // UV coords: apply flip by swapping atlas edges.
+        let (u_l, u_r) = if flip_x { (g.uv[2], g.uv[0]) } else { (g.uv[0], g.uv[2]) };
+        // v_top = small v (top of atlas cell), v_bot = large v (bottom of atlas cell).
+        // In NDC, y↑ = screen top → atlas top → small v.
+        let (v_top, v_bot) = if flip_y { (g.uv[3], g.uv[1]) } else { (g.uv[1], g.uv[3]) };
+
+        // Rotate a local-space point into NDC.
+        let (cos_r, sin_r) = (rotation.cos(), rotation.sin());
+        let rot = |lx: f32, ly: f32| -> (f32, f32) {
+            (center_x + lx * cos_r - ly * sin_r,
+             center_y + lx * sin_r + ly * cos_r)
+        };
+
+        // 4 corners → 6 verts (two CCW triangles).
+        let (bl_x, bl_y) = rot(-hw, -hh); // bottom-left
+        let (br_x, br_y) = rot( hw, -hh); // bottom-right
+        let (tr_x, tr_y) = rot( hw,  hh); // top-right
+        let (tl_x, tl_y) = rot(-hw,  hh); // top-left
+
+        let verts = [
+            TextVertex { pos_x: bl_x, pos_y: bl_y, uv_x: u_l, uv_y: v_bot },
+            TextVertex { pos_x: br_x, pos_y: br_y, uv_x: u_r, uv_y: v_bot },
+            TextVertex { pos_x: tr_x, pos_y: tr_y, uv_x: u_r, uv_y: v_top },
+            TextVertex { pos_x: bl_x, pos_y: bl_y, uv_x: u_l, uv_y: v_bot },
+            TextVertex { pos_x: tr_x, pos_y: tr_y, uv_x: u_r, uv_y: v_top },
+            TextVertex { pos_x: tl_x, pos_y: tl_y, uv_x: u_l, uv_y: v_top },
+        ];
+
+        queue.write_buffer(&self.vert_buf, 0, bytemuck::cast_slice(&verts));
+        self.vert_count = 6;
+        queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&[uniforms]));
+        self.render_with_pipeline(enc, target, &self.pipeline_alpha);
+    }
+
     fn render_with_pipeline(
         &self,
         enc:      &mut wgpu::CommandEncoder,
