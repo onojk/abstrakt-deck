@@ -107,6 +107,8 @@ pub enum MenuAction {
     ToggleRecording,
     TogglePanels,
     GenerateQbist(f32),
+    /// Rebuild the live lyric corpus from this text (empty → DEFAULT_CORPUS).
+    ApplyLyrics(String),
 }
 
 #[derive(Debug)]
@@ -236,6 +238,10 @@ pub struct MenuBar {
     pub qbist_detail: f32,
     pub player_info: Option<PlayerInfo>,
     pub export_progress: Option<ExportProgress>,
+    /// Editable lyric text in the Lyrics box — not applied until the user clicks Apply.
+    pub lyric_input_buffer: String,
+    /// Short status line under the Lyrics box ("Applied: N lines", load errors, …).
+    pub lyric_status: String,
 }
 
 impl MenuBar {
@@ -267,6 +273,11 @@ impl MenuBar {
             qbist_detail: 0.5,
             player_info: None,
             export_progress: None,
+            // Seed the box with the same source the live corpus uses at startup,
+            // so it opens showing the current lyrics rather than empty.
+            lyric_input_buffer: std::env::var("ABSTRAKT_LYRIC_TEXT")
+                .unwrap_or_else(|_| crate::text::corpus::DEFAULT_CORPUS.to_string()),
+            lyric_status: String::new(),
         }
     }
 
@@ -366,6 +377,9 @@ impl MenuBar {
         let skin_aspect = self.skin_thumbnail_aspect;
         let mut current_crop = self.current_crop_y_offset;
         let mut current_qbist_detail = self.qbist_detail;
+        // Lyric box state moved out for the egui closure; written back below.
+        let mut lyric_buf    = std::mem::take(&mut self.lyric_input_buffer);
+        let mut lyric_status = std::mem::take(&mut self.lyric_status);
         let player_info_snap = self.player_info.clone();
         let export_progress_snap = self.export_progress;
         let mut frame_actions: Vec<MenuAction> = Vec::new();
@@ -461,6 +475,9 @@ impl MenuBar {
                             Self::audio_section(ui, current_params, &mut frame_changes,
                                 shader_bpm, shader_beat_phase, shader_bpm_confidence);
                             ui.separator();
+                            Self::lyrics_section(ui, &mut lyric_buf, &mut lyric_status,
+                                &mut frame_actions);
+                            ui.separator();
                             Self::skin_section_static(
                                 ui,
                                 skin_thumb.as_ref(),
@@ -510,6 +527,8 @@ impl MenuBar {
 
         self.current_crop_y_offset = current_crop;
         self.qbist_detail = current_qbist_detail;
+        self.lyric_input_buffer = lyric_buf;
+        self.lyric_status = lyric_status;
         self.pending_actions.append(&mut frame_actions);
         self.pending_param_changes.append(&mut frame_changes);
 
@@ -561,6 +580,69 @@ impl MenuBar {
             button
         };
         ui.add(button)
+    }
+
+    /// Lyrics input: a multiline paste box, a Load .txt… picker, and an Apply
+    /// button that rebuilds the live lyric corpus (via MenuAction::ApplyLyrics).
+    fn lyrics_section(
+        ui:      &mut egui::Ui,
+        buffer:  &mut String,
+        status:  &mut String,
+        actions: &mut Vec<MenuAction>,
+    ) {
+        ui.collapsing("Lyrics", |ui| {
+            ui.label(egui::RichText::new(
+                "Text the glyph stream draws from. Paste a song or load a .txt, then Apply."
+            ).small().weak());
+            ui.add_space(4.0);
+
+            // Multiline paste box: ~10 visible rows, scrolls internally, no length cap.
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .id_salt("lyrics_box_scroll")
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(buffer)
+                            .desired_rows(10)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("paste lyrics here…"),
+                    );
+                });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Load .txt…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Text", &["txt"])
+                        .set_title("Load lyrics text file")
+                        .pick_file()
+                    {
+                        match std::fs::read_to_string(&path) {
+                            Ok(contents) => {
+                                *buffer = contents;
+                                *status = format!("Loaded {} (click Apply)", path.display());
+                            }
+                            Err(e) => { *status = format!("Load failed: {e}"); }
+                        }
+                    }
+                }
+
+                if ui.button("Apply").clicked() {
+                    if buffer.trim().is_empty() {
+                        *status = "Empty input — using default corpus".to_string();
+                    } else {
+                        let n = buffer.lines().filter(|l| !l.trim().is_empty()).count();
+                        *status = format!("Applied: {n} lines");
+                    }
+                    actions.push(MenuAction::ApplyLyrics(buffer.clone()));
+                }
+            });
+
+            if !status.is_empty() {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(status.as_str()).small().weak());
+            }
+        });
     }
 
     fn bundles_section(

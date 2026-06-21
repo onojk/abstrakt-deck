@@ -9553,6 +9553,25 @@ impl ApplicationHandler for App {
                             });
                             self.qbist_pending = Some(rx);
                         }
+                        MenuAction::ApplyLyrics(input) => {
+                            // Empty/whitespace-only → fall back to DEFAULT_CORPUS so the
+                            // user can't accidentally blank the glyph stream.
+                            let corpus = if input.trim().is_empty() {
+                                log::info!("[lyrics] empty input — using DEFAULT_CORPUS");
+                                text::corpus::LyricCorpus::from_text(text::corpus::DEFAULT_CORPUS)
+                            } else {
+                                text::corpus::LyricCorpus::from_text(&input)
+                            };
+                            // Fresh sampler re-reads the new corpus from the top and drops
+                            // already-spawned old-text fragments for an immediate switch.
+                            gpu.live_lyric_sampler = if corpus.is_empty() {
+                                None
+                            } else {
+                                Some(text::corpus::LyricSampler::new())
+                            };
+                            gpu.live_lyric_corpus = Some(corpus);
+                            log::info!("[lyrics] applied new live corpus");
+                        }
                     }
                 }
 
