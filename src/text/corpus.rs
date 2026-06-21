@@ -5,6 +5,42 @@
 //!          holding per-character `GlyphInstance` data with wild scale/rotation/
 //!          flip variation drawn from the current harmony palette.
 
+// ── Default corpus ──────────────────────────────────────────────────────────────
+
+/// Built-in fallback corpus used when `ABSTRAKT_LYRIC_TEXT` is unset, at BOTH the
+/// live and export load sites (they reference this same const so they can't drift).
+///
+/// Short, lowercase, atmospheric phrases — no punctuation needed (the font is an
+/// a–z alien-script substitution). Many lines with several words each so both
+/// `fragment()` (whole line) and `word()` (single word) vary widely.
+pub const DEFAULT_CORPUS: &str = "\
+slow tide of light
+the room breathes without us
+soft static under glass
+we drift between the signals
+amber dust on the lens
+a pulse beneath the floor
+nothing arrives and nothing leaves
+warm noise folds inward
+the horizon hums in violet
+half remembered rooms
+echoes thin as paper
+a current pulls us under
+gravity loosens its grip
+quiet machines dreaming
+the dark is full of motion
+every shadow has a tone
+we orbit a fading sun
+memory leaks through the seams
+glass towers melt to vapor
+the sky exhales slowly
+faint orbits of the heart
+let the silence widen
+all surfaces turn liquid
+a low hymn of dust and air
+the signal bends toward home
+dissolving into the hum";
+
 // ── Corpus ────────────────────────────────────────────────────────────────────
 
 pub struct LyricCorpus {
@@ -73,8 +109,11 @@ pub struct GlyphInstance {
     pub flip_y:     bool,
     /// RGB from the current harmony palette.
     pub color:      [f32; 3],
-    /// Per-glyph alpha [0.35, 1.0]; multiplied by fragment legibility at draw time.
+    /// Per-glyph alpha [0.35, 1.0]; multiplied by the lifetime envelope at draw time.
     pub alpha:      f32,
+    /// Per-glyph horizontal stretch [STRETCH_MIN, STRETCH_MAX] — letters elongate
+    /// into strands under the directional smear.
+    pub stretch_x:  f32,
 }
 
 // ── Fragment ──────────────────────────────────────────────────────────────────
@@ -93,16 +132,28 @@ pub struct ActiveFragment {
 
 // ── Sampler ───────────────────────────────────────────────────────────────────
 
-const BEAT_THRESHOLD: f32 = 0.45;
-const MAX_ACTIVE:     usize = 4;
+/// Beat rising-edge that triggers a spawn surge. Lower = spawns on softer hits.
+const BEAT_THRESHOLD: f32 = 0.30;
+/// Max fragments alive at once. Higher = denser stream.
+const MAX_ACTIVE:     usize = 8;
 /// Maximum glyphs with scale > 2.0 across all active fragments at any moment.
 const GIANT_CAP:      usize = 2;
+/// Timer-spawn floor (seconds): a fragment spawns at least this often even with
+/// no beats, so text keeps flowing through quiet passages — in addition to the
+/// beat rising-edge surges.
+const TIMER_SPAWN_INTERVAL: f32 = 0.5;
+
+/// Per-glyph horizontal-stretch range. Each glyph elongates by a random factor
+/// in [STRETCH_MIN, STRETCH_MAX] so letters read as strands under the smear.
+const STRETCH_MIN: f32 = 1.3;
+const STRETCH_MAX: f32 = 2.2;
 
 pub struct LyricSampler {
     active:          Vec<ActiveFragment>,
     next_idx:        u32,
     seed_counter:    u32,
     prev_beat_decay: f32,
+    last_spawn_time: f32,
 }
 
 impl LyricSampler {
@@ -112,6 +163,7 @@ impl LyricSampler {
             next_idx:        0,
             seed_counter:    0xDEAD_BEEF,
             prev_beat_decay: 0.0,
+            last_spawn_time: -999.0,
         }
     }
 
@@ -132,11 +184,13 @@ impl LyricSampler {
         // Expire fragments whose lifetime has elapsed.
         self.active.retain(|f| frame_time - f.spawn_time < f.lifetime);
 
-        // Spawn on rising edge of beat_decay crossing BEAT_THRESHOLD.
+        // Spawn on a beat rising edge (surge on hits) OR when the timer floor
+        // elapses (steady flow through quiet passages).
         let rising = self.prev_beat_decay < BEAT_THRESHOLD && beat_decay >= BEAT_THRESHOLD;
+        let timer_spawn = frame_time - self.last_spawn_time >= TIMER_SPAWN_INTERVAL;
         self.prev_beat_decay = beat_decay;
 
-        if !rising || self.active.len() >= MAX_ACTIVE || corpus.is_empty() {
+        if (!rising && !timer_spawn) || self.active.len() >= MAX_ACTIVE || corpus.is_empty() {
             return;
         }
 
@@ -203,8 +257,11 @@ impl LyricSampler {
             // No edge clamp — pre-fold, glyphs scatter freely across the full
             // shape_post texture.  The kaleido fold maps every position into petals.
 
+            // Per-glyph horizontal stretch → strand-like elongation.
+            let stretch_x = STRETCH_MIN + pcg_f32(gs.wrapping_add(8)) * (STRETCH_MAX - STRETCH_MIN);
+
             glyphs.push(GlyphInstance { glyph_char: ch, abs_x, abs_y, scale, rotation,
-                                        flip_x, flip_y, color, alpha });
+                                        flip_x, flip_y, color, alpha, stretch_x });
         }
 
         log::debug!(
@@ -212,6 +269,7 @@ impl LyricSampler {
             glyphs.len(), anchor_x, anchor_y, life
         );
 
+        self.last_spawn_time = frame_time;
         self.active.push(ActiveFragment {
             spawn_time: frame_time, lifetime: life,
             base_x: anchor_x, base_y: anchor_y,
@@ -234,22 +292,28 @@ impl LyricSampler {
     pub fn is_empty(&self) -> bool { self.active.is_empty() }
 }
 
-// ── Legibility envelope ───────────────────────────────────────────────────────
+// ── Lifetime envelope ───────────────────────────────────────────────────────
 
-fn fragment_legibility(frag: &ActiveFragment, frame_time: f32, beat_decay: f32) -> f32 {
+/// Fraction of lifetime spent fading IN from black (smoothstep).
+const ENV_FADE_IN:  f32 = 0.20;
+/// Fraction of lifetime spent fading OUT to black (smoothstep).
+/// The middle (1 − IN − OUT = 0.50) holds at full brightness.
+const ENV_FADE_OUT: f32 = 0.30;
+
+/// Emerge-from-black → hold → dissolve-to-black brightness envelope in [0,1].
+/// Multiplies glyph alpha only (hue/rainbow color is untouched), so glyphs
+/// always materialise out of and melt back into darkness — never pop.
+/// `beat_decay` is intentionally ignored: the envelope is purely time-based so
+/// the emerge/dissolve always reaches true black at the ends.
+fn fragment_legibility(frag: &ActiveFragment, frame_time: f32, _beat_decay: f32) -> f32 {
     let t = ((frame_time - frag.spawn_time) / frag.lifetime).clamp(0.0, 1.0);
-
-    // Ramp up 0→25%, hold 25→65%, ramp down 65→100% of lifetime.
-    let base = if t < 0.25 {
-        smoothstep01(t / 0.25)
-    } else if t < 0.65 {
-        1.0f32
+    if t < ENV_FADE_IN {
+        smoothstep01(t / ENV_FADE_IN)
+    } else if t < 1.0 - ENV_FADE_OUT {
+        1.0
     } else {
-        1.0 - smoothstep01((t - 0.65) / 0.35)
-    };
-
-    // Beat sharpening: a strong hit momentarily pushes legibility toward 1.
-    (base * (0.6 + 0.4 * beat_decay)).clamp(0.0, 1.0)
+        1.0 - smoothstep01((t - (1.0 - ENV_FADE_OUT)) / ENV_FADE_OUT)
+    }
 }
 
 fn smoothstep01(x: f32) -> f32 {

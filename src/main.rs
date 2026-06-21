@@ -4102,7 +4102,7 @@ impl GpuState {
         // Live lyric corpus + sampler — same env var as export, but runs continuously.
         let live_lyric_corpus: Option<text::corpus::LyricCorpus> = {
             let lyric = std::env::var("ABSTRAKT_LYRIC_TEXT")
-                .unwrap_or_else(|_| "abstrakt".to_string());
+                .unwrap_or_else(|_| text::corpus::DEFAULT_CORPUS.to_string());
             Some(text::corpus::LyricCorpus::from_text(&lyric))
         };
         let live_lyric_sampler: Option<text::corpus::LyricSampler> =
@@ -5277,24 +5277,18 @@ impl GpuState {
                                corpus, &swatches);
             }
 
-            struct LiveGlyphDraw {
-                ch: char, cx: f32, cy: f32, font_px: f32,
-                rotation: f32, flip_x: bool, flip_y: bool,
-                color_r: f32, color_g: f32, color_b: f32,
-                alpha: f32, frag_seed: u32, legibility: f32,
-            }
             let live_base_px = self.size.height as f32 / 15.0;
-            let live_draws: Vec<LiveGlyphDraw> = self.live_lyric_sampler.as_ref()
+            let live_draws: Vec<text::pass::GlyphDraw> = self.live_lyric_sampler.as_ref()
                 .map(|s| {
                     s.fragments(shader_time, live_beat)
                         .flat_map(|(frag, leg)| {
-                            let frag_seed = frag.seed;
-                            frag.glyphs.iter().map(move |g| LiveGlyphDraw {
-                                ch: g.glyph_char, cx: g.abs_x, cy: g.abs_y,
+                            frag.glyphs.iter().map(move |g| text::pass::GlyphDraw {
+                                ch: g.glyph_char, center_x: g.abs_x, center_y: g.abs_y,
                                 font_px: live_base_px * g.scale,
                                 rotation: g.rotation, flip_x: g.flip_x, flip_y: g.flip_y,
-                                color_r: g.color[0], color_g: g.color[1], color_b: g.color[2],
-                                alpha: g.alpha * leg, frag_seed, legibility: leg,
+                                stretch_x: g.stretch_x,
+                                // alpha folds in the emerge/hold/dissolve envelope (leg).
+                                color: [g.color[0], g.color[1], g.color[2], g.alpha * leg],
                             })
                         })
                         .collect()
@@ -5308,21 +5302,11 @@ impl GpuState {
                 if let (Some(tpass), Some(atlas)) =
                     (self.text_pass.as_mut(), self.text_atlas.as_ref())
                 {
-                    for d in &live_draws {
-                        tpass.render_glyph(
-                            &mut encoder, shape_post_target, &self.queue, atlas,
-                            d.ch, d.font_px, live_w, live_h,
-                            d.cx, d.cy, d.rotation, d.flip_x, d.flip_y,
-                            text::pass::TextUniforms {
-                                color_r: d.color_r, color_g: d.color_g,
-                                color_b: d.color_b, color_a: d.alpha,
-                                legibility: d.legibility,
-                                seed:       d.frag_seed as f32,
-                                warp_time:  shader_time,
-                                _pad2:      0.0,
-                            },
-                        );
-                    }
+                    tpass.render_glyphs(
+                        &mut encoder, shape_post_target, &self.queue, atlas,
+                        &live_draws, live_w, live_h,
+                        shader_time, text::pass::SMEAR_STRENGTH,
+                    );
                 }
             }
         }
@@ -6099,7 +6083,7 @@ impl GpuState {
         // Build text pipeline (once) and initialise corpus + sampler for this export run.
         {
             let lyric = std::env::var("ABSTRAKT_LYRIC_TEXT")
-                .unwrap_or_else(|_| "abstrakt".to_string());
+                .unwrap_or_else(|_| text::corpus::DEFAULT_CORPUS.to_string());
             if let Some(atlas) = &self.text_atlas {
                 if self.text_pass.is_none() {
                     let pass = text::pass::TextPass::new(
@@ -7577,24 +7561,18 @@ impl GpuState {
 
             let beat_for_leg = self.export_state.as_ref()
                 .map(|e| e.offline_analyzer.beat_decay).unwrap_or(0.0);
-            struct ExpGlyphDraw {
-                ch: char, cx: f32, cy: f32, font_px: f32,
-                rotation: f32, flip_x: bool, flip_y: bool,
-                color_r: f32, color_g: f32, color_b: f32,
-                alpha: f32, frag_seed: u32, legibility: f32,
-            }
-            let exp_glyph_draws: Vec<ExpGlyphDraw> = self.export_state.as_ref()
+            let exp_glyph_draws: Vec<text::pass::GlyphDraw> = self.export_state.as_ref()
                 .and_then(|e| e.lyric_sampler.as_ref())
                 .map(|s| {
                     s.fragments(frame_time, beat_for_leg)
                         .flat_map(|(frag, leg)| {
-                            let frag_seed = frag.seed;
-                            frag.glyphs.iter().map(move |g| ExpGlyphDraw {
-                                ch: g.glyph_char, cx: g.abs_x, cy: g.abs_y,
+                            frag.glyphs.iter().map(move |g| text::pass::GlyphDraw {
+                                ch: g.glyph_char, center_x: g.abs_x, center_y: g.abs_y,
                                 font_px: base_font_px * g.scale,
                                 rotation: g.rotation, flip_x: g.flip_x, flip_y: g.flip_y,
-                                color_r: g.color[0], color_g: g.color[1], color_b: g.color[2],
-                                alpha: g.alpha * leg, frag_seed, legibility: leg,
+                                stretch_x: g.stretch_x,
+                                // alpha folds in the emerge/hold/dissolve envelope (leg).
+                                color: [g.color[0], g.color[1], g.color[2], g.alpha * leg],
                             })
                         })
                         .collect()
@@ -7606,21 +7584,11 @@ impl GpuState {
                 if let (Some(tpass), Some(atlas)) =
                     (self.text_pass.as_mut(), self.text_atlas.as_ref())
                 {
-                    for d in &exp_glyph_draws {
-                        tpass.render_glyph(
-                            &mut enc, exp_post_target, &self.queue, atlas,
-                            d.ch, d.font_px, off_w, off_h,
-                            d.cx, d.cy, d.rotation, d.flip_x, d.flip_y,
-                            text::pass::TextUniforms {
-                                color_r: d.color_r, color_g: d.color_g,
-                                color_b: d.color_b, color_a: d.alpha,
-                                legibility: d.legibility,
-                                seed:       d.frag_seed as f32,
-                                warp_time:  frame_time,
-                                _pad2:      0.0,
-                            },
-                        );
-                    }
+                    tpass.render_glyphs(
+                        &mut enc, exp_post_target, &self.queue, atlas,
+                        &exp_glyph_draws, off_w, off_h,
+                        frame_time, text::pass::SMEAR_STRENGTH,
+                    );
                 }
             }
         }
