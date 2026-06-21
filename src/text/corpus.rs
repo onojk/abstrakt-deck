@@ -133,15 +133,15 @@ pub struct ActiveFragment {
 // ── Sampler ───────────────────────────────────────────────────────────────────
 
 /// Beat rising-edge that triggers a spawn surge. Lower = spawns on softer hits.
-const BEAT_THRESHOLD: f32 = 0.30;
+const BEAT_THRESHOLD: f32 = 0.24;
 /// Max fragments alive at once. Higher = denser stream.
-const MAX_ACTIVE:     usize = 8;
+const MAX_ACTIVE:     usize = 14;
 /// Maximum glyphs with scale > 2.0 across all active fragments at any moment.
 const GIANT_CAP:      usize = 2;
 /// Timer-spawn floor (seconds): a fragment spawns at least this often even with
 /// no beats, so text keeps flowing through quiet passages — in addition to the
 /// beat rising-edge surges.
-const TIMER_SPAWN_INTERVAL: f32 = 0.5;
+const TIMER_SPAWN_INTERVAL: f32 = 0.28;
 
 /// Per-glyph horizontal-stretch range. Each glyph elongates by a random factor
 /// in [STRETCH_MIN, STRETCH_MAX] so letters read as strands under the smear.
