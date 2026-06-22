@@ -75,6 +75,11 @@ const RECURSE_CHILD_RATIO: f32 = 0.50;
 
 // ── Contrast coloring ───────────────────────────────────────────────────────
 
+/// DEBUG: force EVERY mark (all four types) to bright red on black so mark
+/// placement is clearly visible on-device through the fold. Set false to restore
+/// the real contrast coloring below (which stays fully intact behind this flag).
+const DEBUG_RED: bool = true; // TODO: set false to restore real contrast coloring
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // both modes are selectable via CONTRAST_MODE below
 enum ContrastMode {
@@ -109,6 +114,16 @@ const PULSE_GAIN: f32 = 0.15;
 /// Compute (inner, outer) RGB for a mark given its region base hue and a
 /// brightness multiplier (used to make some dots dimmer/brighter within a mark).
 fn mark_colors(base_hue_deg: f32, bright: f32) -> (Vec3, Vec3) {
+    // DEBUG override: bright-red emissive core + dark-red halo for every mark.
+    // Keeps the bright-core/dark-halo shape and the per-dot `bright` scaling so
+    // dots-within-dots still read; only the hue is forced. Real coloring below is
+    // untouched and resumes when DEBUG_RED is false.
+    if DEBUG_RED {
+        let core = Vec3::new((1.0 * bright).min(1.0), 0.0, 0.0);
+        let halo = Vec3::new(0.15, 0.0, 0.0);
+        return (core, halo);
+    }
+
     let mark_hue = match CONTRAST_MODE {
         ContrastMode::Complementary => base_hue_deg + 180.0,
         ContrastMode::ValueContrast => base_hue_deg,
