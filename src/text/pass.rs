@@ -10,9 +10,30 @@
 use bytemuck::{Pod, Zeroable};
 use super::atlas::{TextAtlas, CELL};
 
-/// Max glyph quads drawn in one frame. 8 active fragments × longest line ≈ 270,
-/// so 1024 leaves comfortable headroom.
-const MAX_QUADS: usize = 1024;
+/// Each live glyph is drawn as GLYPH_LAYERS stacked quads (same atlas cell, varied
+/// size/offset/brightness) for depth & texture — see `build_glyph_quad`.
+const GLYPH_LAYERS: usize = 3;
+
+/// Per-layer size scale (back layer biggest, front layer smallest).
+const GLYPH_LAYER_SCALE: [f32; GLYPH_LAYERS] = [1.30, 1.00, 0.72];
+
+/// Per-layer position offset in glyph-local quad-size units (fraction of the full
+/// quad width/height). Scaled by the glyph's own size so big and small glyphs
+/// separate proportionally, not absolutely. Small misregistration → visible
+/// separation, not a blur. Reduce if it reads messy through the kaleido fold.
+const GLYPH_LAYER_OFFSET: [(f32, f32); GLYPH_LAYERS] =
+    [(0.06, 0.05), (0.0, 0.0), (-0.05, -0.04)];
+
+/// Per-layer brightness multiplier on the glyph's EXISTING rgb (hue & alpha kept).
+/// Back layer dim → front layer is the bright crisp core.
+const GLYPH_LAYER_BRIGHTNESS: [f32; GLYPH_LAYERS] = [0.45, 0.80, 1.0];
+
+/// Verts emitted per glyph: GLYPH_LAYERS quads × 6 verts.
+const VERTS_PER_GLYPH: usize = GLYPH_LAYERS * 6;
+
+/// Max glyph quads drawn in one frame. With MAX_ACTIVE≈14 fragments × longest line
+/// × GLYPH_LAYERS layers, worst case is well under 3072; 3072 leaves headroom.
+const MAX_QUADS: usize = 3072;
 const MAX_VERTS: usize = MAX_QUADS * 6;
 
 /// Default directional-smear strength in atlas-UV space. The smear is hard-clamped
@@ -204,9 +225,9 @@ impl TextPass {
     ) {
         if draws.is_empty() { return; }
 
-        let mut verts: Vec<TextVertex> = Vec::with_capacity(draws.len() * 6);
+        let mut verts: Vec<TextVertex> = Vec::with_capacity(draws.len() * VERTS_PER_GLYPH);
         for d in draws {
-            if verts.len() + 6 > MAX_VERTS { break; }
+            if verts.len() + VERTS_PER_GLYPH > MAX_VERTS { break; }
             if let Some(quad) = build_glyph_quad(atlas, d, screen_w, screen_h) {
                 verts.extend_from_slice(&quad);
             }
@@ -236,14 +257,18 @@ impl TextPass {
     }
 }
 
-/// Build one glyph's 6 vertices (two CCW triangles), with CPU-side anisotropic
-/// stretch, rotation and flip. Returns None for glyphs absent from the atlas.
+/// Build one glyph as GLYPH_LAYERS stacked quads (18 verts total) — the SAME atlas
+/// cell tripled with varied size/offset/brightness for depth & texture. Layers are
+/// emitted back-to-front (biggest/dimmest first, small/bright core last) so they
+/// composite correctly under the shared alpha blend. CPU-side anisotropic stretch,
+/// rotation and flip apply to every layer. Returns None for glyphs absent from the
+/// atlas.
 fn build_glyph_quad(
     atlas: &TextAtlas,
     d:     &GlyphDraw,
     screen_w: u32,
     screen_h: u32,
-) -> Option<[TextVertex; 6]> {
+) -> Option<[TextVertex; VERTS_PER_GLYPH]> {
     let ch = if atlas.glyphs.contains_key(&d.ch) { d.ch } else { ' ' };
     let g = *atlas.glyphs.get(&ch)?;
 
@@ -254,7 +279,7 @@ fn build_glyph_quad(
     let above   = atlas.baseline_y_cell as f32 * s * px_ndcy;
     let below   = (CELL as f32 - atlas.baseline_y_cell as f32) * s * px_ndcy;
 
-    // Half-extents: x stretched into a strand, y left at natural height.
+    // Base half-extents (layer scale 1.0): x stretched into a strand, y natural.
     let hw = cell_w * 0.5 * d.stretch_x;
     let hh = (above + below) * 0.5;
 
@@ -263,26 +288,47 @@ fn build_glyph_quad(
     let (v_top, v_bot) = if d.flip_y { (g.uv[3], g.uv[1]) } else { (g.uv[1], g.uv[3]) };
 
     // Glyph's atlas cell rect (sorted), passed through for the in-cell smear clamp.
+    // Identical for all layers so the smear stays clamped to the same letter.
     let cell = [g.uv[0], g.uv[1], g.uv[2], g.uv[3]];
 
     let (cos_r, sin_r) = (d.rotation.cos(), d.rotation.sin());
+    // Map a glyph-local point through rotation into NDC about the glyph center.
     let rot = |lx: f32, ly: f32| -> [f32; 2] {
         [d.center_x + lx * cos_r - ly * sin_r,
          d.center_y + lx * sin_r + ly * cos_r]
     };
 
-    let bl = rot(-hw, -hh);
-    let br = rot( hw, -hh);
-    let tr = rot( hw,  hh);
-    let tl = rot(-hw,  hh);
+    // Full base quad dimensions — layer offsets are expressed as fractions of these
+    // so misregistration scales with the glyph's own size.
+    let (full_w, full_h) = (hw * 2.0, hh * 2.0);
 
-    let col = d.color;
-    Some([
-        TextVertex { pos: bl, uv: [u_l, v_bot], col, cell },
-        TextVertex { pos: br, uv: [u_r, v_bot], col, cell },
-        TextVertex { pos: tr, uv: [u_r, v_top], col, cell },
-        TextVertex { pos: bl, uv: [u_l, v_bot], col, cell },
-        TextVertex { pos: tr, uv: [u_r, v_top], col, cell },
-        TextVertex { pos: tl, uv: [u_l, v_top], col, cell },
-    ])
+    let mut out = [TextVertex { pos: [0.0; 2], uv: [0.0; 2], col: [0.0; 4], cell };
+                   VERTS_PER_GLYPH];
+
+    for l in 0..GLYPH_LAYERS {
+        let scale = GLYPH_LAYER_SCALE[l];
+        let (hw_l, hh_l) = (hw * scale, hh * scale);
+        // Offset in glyph-local space (pre-rotation), scaled by the base glyph size.
+        let (off_x, off_y) = GLYPH_LAYER_OFFSET[l];
+        let (ox, oy) = (off_x * full_w, off_y * full_h);
+
+        let bl = rot(ox - hw_l, oy - hh_l);
+        let br = rot(ox + hw_l, oy - hh_l);
+        let tr = rot(ox + hw_l, oy + hh_l);
+        let tl = rot(ox - hw_l, oy + hh_l);
+
+        // Keep hue & alpha (the lifetime envelope rides in .a); only value differs.
+        let b = GLYPH_LAYER_BRIGHTNESS[l];
+        let col = [d.color[0] * b, d.color[1] * b, d.color[2] * b, d.color[3]];
+
+        let base = l * 6;
+        out[base    ] = TextVertex { pos: bl, uv: [u_l, v_bot], col, cell };
+        out[base + 1] = TextVertex { pos: br, uv: [u_r, v_bot], col, cell };
+        out[base + 2] = TextVertex { pos: tr, uv: [u_r, v_top], col, cell };
+        out[base + 3] = TextVertex { pos: bl, uv: [u_l, v_bot], col, cell };
+        out[base + 4] = TextVertex { pos: tr, uv: [u_r, v_top], col, cell };
+        out[base + 5] = TextVertex { pos: tl, uv: [u_l, v_top], col, cell };
+    }
+
+    Some(out)
 }
