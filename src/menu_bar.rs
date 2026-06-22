@@ -717,6 +717,7 @@ impl MenuBar {
                                 crate::ShapeKind::Caltrop,
                                 crate::ShapeKind::Myocyte,
                                 crate::ShapeKind::PrimeHelix,
+                                crate::ShapeKind::Accents,
                             ] {
                                 ui.selectable_value(&mut shape, v, v.name());
                             }

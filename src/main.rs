@@ -1156,6 +1156,7 @@ impl Preset {
             "Caltrop"     => ShapeKind::Caltrop,
             "Myocyte"     => ShapeKind::Myocyte,
             "PrimeHelix"  => ShapeKind::PrimeHelix,
+            "Accents"     => ShapeKind::Accents,
             _             => ShapeKind::Cylinder,
         };
         params.fold_count = self.fold_count;
@@ -2372,6 +2373,10 @@ struct GpuState {
     // PrimeHelix: lazily allocated semiprime cylinder grid + beat-driven influencer.
     prime_helix_grid:       Option<cell::CellGrid>,
     prime_helix_influencer: Box<dyn influencer::Influencer>,
+
+    // Accents: lazily allocated decorative fine-marking grid + size-pulse influencer.
+    accents_grid:       Option<cell::CellGrid>,
+    accents_influencer: Box<dyn influencer::Influencer>,
 
     // SDF lyric-text overlay — atlas + pipeline (shared by live and export paths).
     text_atlas: Option<text::atlas::TextAtlas>,
@@ -4230,6 +4235,9 @@ impl GpuState {
             prime_helix_grid:       None,
             prime_helix_influencer: Box::new(influencer::NoOpInfluencer),
 
+            accents_grid:       None,
+            accents_influencer: Box::new(influencer::NoOpInfluencer),
+
             text_atlas,
             text_pass,
             live_lyric_corpus,
@@ -4780,7 +4788,7 @@ impl GpuState {
                 contrast:        self.params.contrast,
                 saturation:      self.params.saturation,
                 contrast_passes: if matches!(self.params.current_shape,
-                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix) { 1.0 }
+                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix | ShapeKind::Accents) { 1.0 }
                                  else { self.params.contrast_passes as f32 },
             }]),
         );
@@ -5190,6 +5198,32 @@ impl GpuState {
             }
         }
 
+        // Accents: lazy grid allocation + camera rotation + influencer step
+        if self.params.current_shape == ShapeKind::Accents {
+            self.myocyte_renderer.camera.tick_auto_rotation(dt);
+            if self.accents_grid.is_none() {
+                let grid = influencer::accents::build_accents_grid();
+                log::info!("[accents] allocated decorative grid: {} splats", grid.cells.len());
+                self.accents_grid = Some(grid);
+                self.accents_influencer = Box::new(influencer::accents::Accents::new());
+                log::info!("[accents] Accents influencer active");
+            }
+            if let Some(grid) = self.accents_grid.as_mut() {
+                let audio = influencer::AudioSnapshot {
+                    bands:                self.bands_smoothed,
+                    beat_decay_low:       self.shader_beat_decay_low,
+                    beat_decay_mid:       self.shader_beat_decay_mid,
+                    beat_decay_high:      self.shader_beat_decay_high,
+                    beat_decay_broadband: self.shader_beat_decay_broadband,
+                    beat_decay_max:       self.shader_beat_decay,
+                    beat_phase:           self.shader_beat_phase,
+                    bpm:                  self.shader_bpm,
+                    bpm_confidence:       self.shader_bpm_confidence,
+                };
+                self.accents_influencer.step_with_audio(grid, &audio, dt);
+            }
+        }
+
         // Pass 2: shape → shape FBO
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -5220,6 +5254,11 @@ impl GpuState {
                 }
                 ShapeKind::PrimeHelix => {
                     if let Some(grid) = self.prime_helix_grid.as_ref() {
+                        self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                    }
+                }
+                ShapeKind::Accents => {
+                    if let Some(grid) = self.accents_grid.as_ref() {
                         self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
                     }
                 }
@@ -6658,7 +6697,7 @@ impl GpuState {
                                 contrast:        p_params.contrast,
                                 saturation:      p_params.saturation,
                                 contrast_passes: if matches!(shape,
-                                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix)
+                                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix | ShapeKind::Accents)
                                                  { 1.0 } else { p_params.contrast_passes as f32 },
                             }]));
                         self.queue.write_buffer(&pbuf.frame_buf, 0,
@@ -6876,6 +6915,12 @@ impl GpuState {
                             ShapeKind::PrimeHelix => {
                                 // TODO grid v1: same singleton issue as Myocyte above.
                                 if let Some(g) = self.prime_helix_grid.as_ref() {
+                                    self.myocyte_renderer.render(g, &self.queue, &mut pass, panel_aspect);
+                                }
+                            }
+                            ShapeKind::Accents => {
+                                // TODO grid v1: same singleton issue as Myocyte above.
+                                if let Some(g) = self.accents_grid.as_ref() {
                                     self.myocyte_renderer.render(g, &self.queue, &mut pass, panel_aspect);
                                 }
                             }
@@ -7169,7 +7214,7 @@ impl GpuState {
                 contrast:        self.params.contrast,
                 saturation:      self.params.saturation,
                 contrast_passes: if matches!(self.params.current_shape,
-                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix) { 1.0 }
+                                     ShapeKind::Myocyte | ShapeKind::PrimeHelix | ShapeKind::Accents) { 1.0 }
                                  else { self.params.contrast_passes as f32 },
             }]));
         let (fr, fg, fb) = hsv_to_rgb(self.params.frame_color_hue, 0.85, 1.0);
@@ -7485,6 +7530,11 @@ impl GpuState {
                 }
                 ShapeKind::PrimeHelix => {
                     if let Some(grid) = self.prime_helix_grid.as_ref() {
+                        self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
+                    }
+                }
+                ShapeKind::Accents => {
+                    if let Some(grid) = self.accents_grid.as_ref() {
                         self.myocyte_renderer.render(grid, &self.queue, &mut pass, aspect);
                     }
                 }

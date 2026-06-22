@@ -38,6 +38,7 @@ pub enum ShapeKind {
     Caltrop,
     Myocyte,
     PrimeHelix,
+    Accents,
 }
 
 impl ShapeKind {
@@ -51,7 +52,8 @@ impl ShapeKind {
             ShapeKind::Urchin      => ShapeKind::Caltrop,
             ShapeKind::Caltrop     => ShapeKind::Myocyte,
             ShapeKind::Myocyte     => ShapeKind::PrimeHelix,
-            ShapeKind::PrimeHelix  => ShapeKind::Cylinder,
+            ShapeKind::PrimeHelix  => ShapeKind::Accents,
+            ShapeKind::Accents     => ShapeKind::Cylinder,
         }
     }
 
@@ -66,6 +68,7 @@ impl ShapeKind {
             ShapeKind::Caltrop     => "Caltrop",
             ShapeKind::Myocyte     => "Myocyte",
             ShapeKind::PrimeHelix  => "PrimeHelix",
+            ShapeKind::Accents     => "Accents",
         }
     }
 
@@ -80,6 +83,7 @@ impl ShapeKind {
             ShapeKind::Caltrop     => 1.2,
             ShapeKind::Myocyte     => 1.0,
             ShapeKind::PrimeHelix  => 1.0,
+            ShapeKind::Accents     => 1.0,
         }
     }
 
@@ -112,6 +116,7 @@ impl ShapeKind {
             }
             ShapeKind::Myocyte     => [0.0, 1.0, 0.0],
             ShapeKind::PrimeHelix  => [0.0, 1.0, 0.0],
+            ShapeKind::Accents     => [0.0, 1.0, 0.0],
         }
     }
 
@@ -126,6 +131,7 @@ impl ShapeKind {
             ShapeKind::Caltrop     => 20.0,
             ShapeKind::Myocyte     => 30.0,
             ShapeKind::PrimeHelix  => 35.0,
+            ShapeKind::Accents     => 40.0,
         }
     }
 
@@ -140,6 +146,7 @@ impl ShapeKind {
             ShapeKind::Caltrop     => 0.55,
             ShapeKind::Myocyte     => 1.0,
             ShapeKind::PrimeHelix  => 1.0,
+            ShapeKind::Accents     => 1.0,
         }
     }
 }

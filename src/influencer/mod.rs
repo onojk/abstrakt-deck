@@ -5,6 +5,7 @@
 // CellGrid. Deck ships with NoOpInfluencer as a placeholder; phase 3+
 // will wire in GrayScott and Authored influencers.
 
+pub mod accents;
 pub mod audio_cells;
 pub mod audio_wheel;
 pub mod authored;
