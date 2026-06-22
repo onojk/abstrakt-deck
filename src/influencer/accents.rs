@@ -78,7 +78,7 @@ const RECURSE_CHILD_RATIO: f32 = 0.50;
 /// DEBUG: force EVERY mark (all four types) to bright red on black so mark
 /// placement is clearly visible on-device through the fold. Set false to restore
 /// the real contrast coloring below (which stays fully intact behind this flag).
-const DEBUG_RED: bool = true; // TODO: set false to restore real contrast coloring
+pub const DEBUG_RED: bool = true; // TODO: set false to restore real contrast coloring
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // both modes are selectable via CONTRAST_MODE below

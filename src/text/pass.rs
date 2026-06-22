@@ -7,8 +7,13 @@
 //! directional smear of the SDF sample, clamped to the per-vertex cell so it can
 //! never bleed into a neighbour glyph.
 
+use std::f32::consts::{FRAC_PI_2, TAU};
 use bytemuck::{Pod, Zeroable};
 use super::atlas::{TextAtlas, CELL};
+use crate::color::{rgb_to_hsv, hsv_to_rgb};
+// Reuse the SAME debug flag the standalone Accents shape uses, so flipping it in
+// one place governs both paths.
+use crate::influencer::accents::DEBUG_RED;
 
 /// Each live glyph is drawn as GLYPH_LAYERS stacked quads (same atlas cell, varied
 /// size/offset/brightness) for depth & texture — see `build_glyph_quad`.
@@ -31,9 +36,35 @@ const GLYPH_LAYER_BRIGHTNESS: [f32; GLYPH_LAYERS] = [0.45, 0.80, 1.0];
 /// Verts emitted per glyph: GLYPH_LAYERS quads × 6 verts.
 const VERTS_PER_GLYPH: usize = GLYPH_LAYERS * 6;
 
-/// Max glyph quads drawn in one frame. With MAX_ACTIVE≈14 fragments × longest line
-/// × GLYPH_LAYERS layers, worst case is well under 3072; 3072 leaves headroom.
-const MAX_QUADS: usize = 3072;
+// ── Glyph-attached accent marks ──────────────────────────────────────────────
+// Every live glyph also emits ONE small accent cluster (dot-row / dots-in-dots /
+// oblong tick / recursive, cycled by glyph index) riding on the glyph's position,
+// appended to the SAME batch AFTER the glyph layers so it lands on top. The four
+// mark types mirror the standalone Accents shape (src/influencer/accents.rs); the
+// shared DEBUG_RED flag is reused from there. Marks sample the parent glyph's SDF
+// cell, so they have the same guaranteed visibility as the glyph itself.
+
+/// Cluster size as a fraction of the parent glyph's size — detail ON the glyph,
+/// never bigger than it.
+const ACCENT_GLYPH_SCALE: f32 = 0.45;
+
+/// Dots in a dot-row mark.
+const ACCENT_DOTROW_DOTS: usize = 5;
+/// Satellites in a recursive mark (each also gets one smaller grandchild).
+const ACCENT_RECURSE_SATELLITES: usize = 4;
+
+/// Marks emitted by the WORST-CASE cluster type (recursive):
+/// 1 center + ACCENT_RECURSE_SATELLITES satellites + ACCENT_RECURSE_SATELLITES
+/// grandchildren = 9 marks. Every other type emits fewer.
+const ACCENT_MARKS_MAX: usize = 1 + ACCENT_RECURSE_SATELLITES * 2;
+/// Verts a single accent cluster can append, worst case (6 verts per mark quad).
+const ACCENT_VERTS_PER_GLYPH: usize = ACCENT_MARKS_MAX * 6;
+
+/// Max glyph quads drawn in one frame. Each live glyph now costs
+/// VERTS_PER_GLYPH (18) + ACCENT_VERTS_PER_GLYPH (54) = 72 verts, so the buffer
+/// must be ~4× the old layers-only size. 12288 quads = 73728 verts holds ~1024
+/// fully-accented glyphs — same glyph headroom the old 3072/18432 gave for layers.
+const MAX_QUADS: usize = 12288;
 const MAX_VERTS: usize = MAX_QUADS * 6;
 
 /// Default directional-smear strength in atlas-UV space. The smear is hard-clamped
@@ -225,11 +256,17 @@ impl TextPass {
     ) {
         if draws.is_empty() { return; }
 
-        let mut verts: Vec<TextVertex> = Vec::with_capacity(draws.len() * VERTS_PER_GLYPH);
-        for d in draws {
-            if verts.len() + VERTS_PER_GLYPH > MAX_VERTS { break; }
+        let mut verts: Vec<TextVertex> =
+            Vec::with_capacity(draws.len() * (VERTS_PER_GLYPH + ACCENT_VERTS_PER_GLYPH));
+        for (gi, d) in draws.iter().enumerate() {
+            // Reserve room for BOTH the glyph layers AND its accent cluster, so a
+            // cluster is never half-written or silently dropped past the cap.
+            if verts.len() + VERTS_PER_GLYPH + ACCENT_VERTS_PER_GLYPH > MAX_VERTS { break; }
             if let Some(quad) = build_glyph_quad(atlas, d, screen_w, screen_h) {
                 verts.extend_from_slice(&quad);
+                // Accent cluster AFTER the 3 glyph layers → composites on top of
+                // the bright glyph core instead of being painted over.
+                emit_accent_cluster(&mut verts, atlas, d, screen_w, screen_h, gi);
             }
         }
         if verts.is_empty() { return; }
@@ -331,4 +368,123 @@ fn build_glyph_quad(
     }
 
     Some(out)
+}
+
+// ── Accent-mark emit (glyph-attached) ────────────────────────────────────────
+
+/// Accent (core, halo) colors for a glyph, inheriting the glyph's faded alpha so
+/// accents emerge/dissolve WITH the glyph. DEBUG_RED forces bright-red core +
+/// dark-red halo; otherwise a contrast hue (parent hue + 0.5 wrapped), bright
+/// core / dark halo. Mirrors `mark_colors` in src/influencer/accents.rs.
+fn accent_colors(parent: [f32; 4]) -> ([f32; 4], [f32; 4]) {
+    let a = parent[3]; // inherit the glyph's lifetime-envelope alpha
+    if DEBUG_RED {
+        ([1.0, 0.0, 0.0, a], [0.15, 0.0, 0.0, a])
+    } else {
+        let (h, _s, _v) = rgb_to_hsv([parent[0], parent[1], parent[2]]);
+        let ch = h + 180.0; // +0.5 of the hue wheel; hsv_to_rgb wraps for us
+        let core = hsv_to_rgb(ch, 1.0, 1.0);
+        let halo = hsv_to_rgb(ch, 1.0, 0.15);
+        ([core[0], core[1], core[2], a], [halo[0], halo[1], halo[2], a])
+    }
+}
+
+/// Push one accent mark: a small quad sampling the parent glyph's SDF cell (so it
+/// has the same guaranteed visibility as the glyph), centered at NDC (cx, cy),
+/// half-extents (half_w, half_h), rotated by `angle`.
+#[allow(clippy::too_many_arguments)]
+fn push_accent_mark(
+    verts: &mut Vec<TextVertex>,
+    cx: f32, cy: f32, half_w: f32, half_h: f32, angle: f32,
+    uv: (f32, f32, f32, f32),   // (u_l, u_r, v_top, v_bot)
+    col: [f32; 4],
+    cell: [f32; 4],
+) {
+    let (c, s) = (angle.cos(), angle.sin());
+    let rot = |lx: f32, ly: f32| -> [f32; 2] { [cx + lx * c - ly * s, cy + lx * s + ly * c] };
+    let (u_l, u_r, v_top, v_bot) = uv;
+    let bl = rot(-half_w, -half_h);
+    let br = rot( half_w, -half_h);
+    let tr = rot( half_w,  half_h);
+    let tl = rot(-half_w,  half_h);
+    verts.push(TextVertex { pos: bl, uv: [u_l, v_bot], col, cell });
+    verts.push(TextVertex { pos: br, uv: [u_r, v_bot], col, cell });
+    verts.push(TextVertex { pos: tr, uv: [u_r, v_top], col, cell });
+    verts.push(TextVertex { pos: bl, uv: [u_l, v_bot], col, cell });
+    verts.push(TextVertex { pos: tr, uv: [u_r, v_top], col, cell });
+    verts.push(TextVertex { pos: tl, uv: [u_l, v_top], col, cell });
+}
+
+/// Emit ONE accent cluster anchored at the glyph `d`, appended to `verts`. Mark
+/// TYPE cycles by `glyph_index` so the field varies across the frame. Never emits
+/// more than ACCENT_VERTS_PER_GLYPH verts (worst case = recursive). No-op if the
+/// glyph is absent from the atlas.
+fn emit_accent_cluster(
+    verts: &mut Vec<TextVertex>,
+    atlas: &TextAtlas,
+    d:     &GlyphDraw,
+    screen_w: u32,
+    screen_h: u32,
+    glyph_index: usize,
+) {
+    let ch = if atlas.glyphs.contains_key(&d.ch) { d.ch } else { ' ' };
+    let g = match atlas.glyphs.get(&ch) { Some(g) => *g, None => return };
+
+    // Recompute the parent glyph's NDC half-extents (same formulas as build_glyph_quad).
+    let s       = d.font_px / atlas.raster_px;
+    let px_ndcx = 2.0 / screen_w as f32;
+    let px_ndcy = 2.0 / screen_h as f32;
+    let cell_w  = CELL as f32 * s * px_ndcx;
+    let above   = atlas.baseline_y_cell as f32 * s * px_ndcy;
+    let below   = (CELL as f32 - atlas.baseline_y_cell as f32) * s * px_ndcy;
+    let hw = cell_w * 0.5 * d.stretch_x;
+    let hh = (above + below) * 0.5;
+
+    // Parent glyph UV rect (base orientation) + cell rect for the smear clamp.
+    let uv   = (g.uv[0], g.uv[2], g.uv[1], g.uv[3]); // (u_l, u_r, v_top, v_bot)
+    let cell = [g.uv[0], g.uv[1], g.uv[2], g.uv[3]];
+
+    let (core, halo) = accent_colors(d.color);
+
+    // One NDC length scale for cluster geometry, proportional to glyph size.
+    let unit = ACCENT_GLYPH_SCALE * 0.5 * (hw + hh);
+    let dh   = 0.5 * unit; // accent dot half-extent
+    let (cx, cy) = (d.center_x, d.center_y);
+    let ang = d.rotation; // glyph's own axis = "screen-tangent"
+    let (tc, ts) = (ang.cos(), ang.sin());
+
+    match glyph_index % 4 {
+        0 => {
+            // DOT-ROW: a short line of dots stepping along the glyph tangent.
+            for i in 0..ACCENT_DOTROW_DOTS {
+                let t = i as f32 - (ACCENT_DOTROW_DOTS as f32 - 1.0) * 0.5;
+                let along = t * 0.7 * unit;
+                push_accent_mark(verts, cx + along * tc, cy + along * ts,
+                                 dh, dh, ang, uv, core, cell);
+            }
+        }
+        1 => {
+            // DOTS-IN-DOTS: large dim dot with a small bright dot centered inside.
+            push_accent_mark(verts, cx, cy, dh * 1.7, dh * 1.7, ang, uv, halo, cell);
+            push_accent_mark(verts, cx, cy, dh * 0.75, dh * 0.75, ang, uv, core, cell);
+        }
+        2 => {
+            // OBLONG TICK: one elongated mark oriented perpendicular (radial) to
+            // the tangent, so it reads as a stroke crossing the glyph.
+            push_accent_mark(verts, cx, cy, unit * 1.6, dh * 0.5, ang + FRAC_PI_2,
+                             uv, core, cell);
+        }
+        _ => {
+            // RECURSIVE: a center dot with satellites, each satellite + 1 grandchild.
+            push_accent_mark(verts, cx, cy, dh, dh, ang, uv, core, cell);
+            for sidx in 0..ACCENT_RECURSE_SATELLITES {
+                let a = ang + sidx as f32 / ACCENT_RECURSE_SATELLITES as f32 * TAU;
+                let (ac, as_) = (a.cos(), a.sin());
+                push_accent_mark(verts, cx + ac * 1.2 * unit, cy + as_ * 1.2 * unit,
+                                 dh * 0.6, dh * 0.6, ang, uv, core, cell);
+                push_accent_mark(verts, cx + ac * 1.9 * unit, cy + as_ * 1.9 * unit,
+                                 dh * 0.35, dh * 0.35, ang, uv, core, cell);
+            }
+        }
+    }
 }
