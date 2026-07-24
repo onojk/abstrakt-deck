@@ -1,3 +1,21 @@
+abstrakt-deck (0.1.8-1) noble; urgency=medium
+
+  * Repack the orig tarball to include the vendored *.snap test fixtures
+    (codespan-reporting's insta snapshots). The 0.1.7 orig excluded them via an
+    over-broad "*.snap" tar pattern (GNU tar '*' matches '/'), so cargo's
+    offline checksum verification failed right after configure with "failed to
+    calculate checksum ... No such file or directory". New upstream version
+    because Launchpad already holds the (broken) 0.1.7 orig.
+  * Restore debian/cargo-checksum.json required by dh-cargo's configure step;
+    cargo.pm copies it to .cargo-checksum.json during dh_auto_configure. It was
+    dropped for 0.1.7-1, so that buildd failed at configure with
+    "cp: cannot stat 'debian/cargo-checksum.json'".
+  * debian/rules: drop --locked from the build. dh_auto_configure removes
+    Cargo.lock, so the offline build regenerates it from the vendored sources
+    (which pin the exact versions), reproducing the committed v3 lock.
+
+ -- onojk <onojk123@gmail.com>  Fri, 24 Jul 2026 00:20:00 -0700
+
 abstrakt-deck (0.1.7-1) noble; urgency=medium
 
   * Fix noble (Ubuntu 24.04, rustc 1.75) MSRV build failures with a fresh,

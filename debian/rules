@@ -8,7 +8,10 @@ override_dh_auto_build:
 	# declare rust-version >= 1.76 but compile cleanly on noble's rustc 1.75.
 	# The pinned versions are chosen so they actually build on 1.75; this flag
 	# only suppresses cargo's advisory rust-version gate.
-	cargo build --offline --locked --release --ignore-rust-version
+	# No --locked: dh_auto_configure (dh-cargo cargo.pm) removes Cargo.lock, so
+	# the offline build regenerates it from the vendored sources (which pin the
+	# exact versions), reproducing the committed v3 lock.
+	cargo build --offline --release --ignore-rust-version
 
 override_dh_auto_test:
 	# Skip test runner during package build
