@@ -1,3 +1,15 @@
+abstrakt-deck (0.1.8-2) noble; urgency=medium
+
+  * Override dh_clean to preserve vendored *.orig/*.rej files
+    (dh_clean -X.orig -X.rej). The buildd runs "fakeroot debian/rules clean"
+    before building, and dh_clean deletes *.orig/*.rej as patch detritus --
+    wiping every vendored crate's Cargo.toml.orig, which is listed in its
+    .cargo-checksum.json, so cargo's offline checksum verification then fails
+    with "failed to calculate checksum ... Cargo.toml.orig: No such file".
+    Reuses the unchanged 0.1.8 orig tarball.
+
+ -- onojk <onojk123@gmail.com>  Fri, 24 Jul 2026 01:05:00 -0700
+
 abstrakt-deck (0.1.8-1) noble; urgency=medium
 
   * Repack the orig tarball to include the vendored *.snap test fixtures

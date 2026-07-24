@@ -15,3 +15,11 @@ override_dh_auto_build:
 
 override_dh_auto_test:
 	# Skip test runner during package build
+
+override_dh_clean:
+	# Preserve vendored *.orig / *.rej files. dh_clean deletes "*.orig" and
+	# "*.rej" as quilt patch detritus, but every vendored crate ships a
+	# Cargo.toml.orig listed in its .cargo-checksum.json; deleting them breaks
+	# cargo's offline checksum verification on the buildd. -X excludes any
+	# filename containing the item from deletion.
+	dh_clean -X.orig -X.rej
