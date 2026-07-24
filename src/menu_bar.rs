@@ -78,6 +78,13 @@ pub enum LockTarget {
     MicroSwirlDensity,
     MicroSwirlAmplitude,
     MicroSwirlSpeed,
+    DepthShadeEnabled,
+    DepthShadeIntensity,
+    DepthShadeLightX,
+    DepthShadeLightY,
+    DepthShadeLightZ,
+    DepthShadeSoftness,
+    DepthShadeFlatness,
     ExplosionEnabled,
     ExplosionIntervalMin,
     ExplosionIntervalMax,
@@ -206,6 +213,13 @@ pub enum ParamChange {
     MicroSwirlDensity(f32),
     MicroSwirlAmplitude(f32),
     MicroSwirlSpeed(f32),
+    DepthShadeEnabled(bool),
+    DepthShadeIntensity(f32),
+    DepthShadeLightX(f32),
+    DepthShadeLightY(f32),
+    DepthShadeLightZ(f32),
+    DepthShadeSoftness(f32),
+    DepthShadeFlatness(f32),
     ExplosionEnabled(bool),
     ExplosionIntervalMin(f32),
     ExplosionIntervalMax(f32),
@@ -215,6 +229,8 @@ pub enum ParamChange {
     ExplosionFlyoutDur(f32),
     ApplyBundle(crate::bundles::BundleId),
     ApplyRandomBundle,
+    SetGridExportN(Option<usize>),
+    SetGridRandomInterval(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +384,7 @@ impl MenuBar {
         shader_beat_phase: f32,
         shader_bpm_confidence: f32,
         last_bundle: Option<crate::bundles::BundleId>,
+        grid_export_n: Option<usize>,
     ) {
         let raw_input = self.state.take_egui_input(window);
 
@@ -450,6 +467,16 @@ impl MenuBar {
                             ui.close_menu();
                         }
                     });
+
+                    // Grid mode status indicator (right-aligned, visible at all times when ON)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(n) = grid_export_n {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 0),
+                                format!("⊞ GRID: ON ({n}-panel)"),
+                            );
+                        }
+                    });
                 });
             });
 
@@ -500,6 +527,7 @@ impl MenuBar {
                                 current_params,
                                 player_info_snap.as_ref(),
                                 export_progress_snap,
+                                grid_export_n,
                                 &mut frame_changes,
                             );
                             ui.separator();
@@ -516,6 +544,8 @@ impl MenuBar {
                             Self::bezold_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::micro_swirl_section(ui, current_params, &mut frame_changes);
+                            ui.separator();
+                            Self::depth_shade_section(ui, current_params, &mut frame_changes);
                             ui.separator();
                             Self::explosion_section(ui, current_params, &mut frame_changes);
                             ui.separator();
@@ -1786,6 +1816,140 @@ impl MenuBar {
         });
     }
 
+    fn depth_shade_section(
+        ui: &mut egui::Ui,
+        params: &crate::VisualParams,
+        changes: &mut Vec<ParamChange>,
+    ) {
+        ui.collapsing("Depth Shade", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Lit-bump overlay — treats the Micro Swirl displacement as a heightfield \
+                     and shades it with a directional light. Requires Micro Swirl to be on."
+                ).small().weak()
+            );
+
+            ui.horizontal(|ui| {
+                if Self::lock_button(ui, params.locks.depth_shade_enabled).clicked() {
+                    changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeEnabled));
+                }
+                ui.add_enabled_ui(!params.locks.depth_shade_enabled, |ui| {
+                    let mut v = params.depth_shade_enabled;
+                    if ui.checkbox(&mut v, "Enable").changed() {
+                        changes.push(ParamChange::DepthShadeEnabled(v));
+                    }
+                });
+            });
+
+            if !params.micro_swirl_enabled && params.depth_shade_enabled {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "⚠ Enable Micro Swirl (U) for shading to appear",
+                );
+            }
+
+            ui.add_enabled_ui(params.depth_shade_enabled, |ui| {
+                ui.indent("depth_shade_indent", |ui| {
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.depth_shade_intensity).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeIntensity));
+                        }
+                        ui.add_enabled_ui(!params.locks.depth_shade_intensity, |ui| {
+                            let mut v = params.depth_shade_intensity;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.0..=1.0)
+                                    .text("Shadow intensity")
+                                    .step_by(0.01)
+                            ).changed() {
+                                changes.push(ParamChange::DepthShadeIntensity(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.depth_shade_light_x).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeLightX));
+                        }
+                        ui.add_enabled_ui(!params.locks.depth_shade_light_x, |ui| {
+                            let mut v = params.depth_shade_light_x;
+                            if ui.add(
+                                egui::Slider::new(&mut v, -1.0..=1.0)
+                                    .text("Light X")
+                                    .step_by(0.01)
+                            ).changed() {
+                                changes.push(ParamChange::DepthShadeLightX(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.depth_shade_light_y).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeLightY));
+                        }
+                        ui.add_enabled_ui(!params.locks.depth_shade_light_y, |ui| {
+                            let mut v = params.depth_shade_light_y;
+                            if ui.add(
+                                egui::Slider::new(&mut v, -1.0..=1.0)
+                                    .text("Light Y")
+                                    .step_by(0.01)
+                            ).changed() {
+                                changes.push(ParamChange::DepthShadeLightY(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.depth_shade_light_z).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeLightZ));
+                        }
+                        ui.add_enabled_ui(!params.locks.depth_shade_light_z, |ui| {
+                            let mut v = params.depth_shade_light_z;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.1..=2.0)
+                                    .text("Light depth")
+                                    .step_by(0.05)
+                            ).changed() {
+                                changes.push(ParamChange::DepthShadeLightZ(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.depth_shade_softness).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeSoftness));
+                        }
+                        ui.add_enabled_ui(!params.locks.depth_shade_softness, |ui| {
+                            let mut v = params.depth_shade_softness;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.01..=1.0)
+                                    .text("Softness")
+                                    .step_by(0.01)
+                            ).changed() {
+                                changes.push(ParamChange::DepthShadeSoftness(v));
+                            }
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if Self::lock_button(ui, params.locks.depth_shade_flatness).clicked() {
+                            changes.push(ParamChange::ToggleLock(LockTarget::DepthShadeFlatness));
+                        }
+                        ui.add_enabled_ui(!params.locks.depth_shade_flatness, |ui| {
+                            let mut v = params.depth_shade_flatness;
+                            if ui.add(
+                                egui::Slider::new(&mut v, 0.1..=3.0)
+                                    .text("Flatness")
+                                    .step_by(0.05)
+                            ).changed() {
+                                changes.push(ParamChange::DepthShadeFlatness(v));
+                            }
+                        });
+                    });
+                });
+            });
+        });
+    }
+
     fn explosion_section(
         ui: &mut egui::Ui,
         params: &crate::VisualParams,
@@ -2342,6 +2506,7 @@ impl MenuBar {
         params: &crate::VisualParams,
         player_info: Option<&PlayerInfo>,
         export_progress: Option<ExportProgress>,
+        grid_export_n: Option<usize>,
         changes: &mut Vec<ParamChange>,
     ) {
         ui.collapsing("Export", |ui| {
@@ -2467,6 +2632,55 @@ impl MenuBar {
                         );
                     }
                 });
+            });
+
+            ui.separator();
+
+            // ── Grid Export ───────────────────────────────────────────────────────
+            ui.collapsing("Grid Export (G key)", |ui| {
+                let mut grid_on = grid_export_n.is_some();
+                if ui.checkbox(&mut grid_on, "Grid export mode")
+                    .on_hover_text(
+                        "Tile N independently-randomized panels into a split-screen export. \
+                         Press G to toggle. Params are fixed at export start — not animated."
+                    )
+                    .changed()
+                {
+                    let n = if grid_on { Some(4_usize) } else { None };
+                    changes.push(ParamChange::SetGridExportN(n));
+                }
+                if grid_on {
+                    let current_n = grid_export_n.unwrap_or(4);
+                    ui.horizontal(|ui| {
+                        ui.label("Panel count  N");
+                        egui::ComboBox::from_id_salt("grid_panel_count")
+                            .selected_text(format!("{current_n}"))
+                            .show_ui(ui, |ui| {
+                                for &n in &[1_usize, 2, 4, 6, 9, 12] {
+                                    if ui.selectable_label(current_n == n, format!("{n}")).clicked() {
+                                        changes.push(ParamChange::SetGridExportN(Some(n)));
+                                    }
+                                }
+                            });
+                    });
+                    let mut interval = params.grid_random_interval_s;
+                    if ui.add(egui::Slider::new(&mut interval, 0.0..=10.0)
+                            .text("Random count interval (s)")
+                            .custom_formatter(|v, _| {
+                                if v <= 0.0 { "off".to_string() } else { format!("{v:.1}s") }
+                            }))
+                        .on_hover_text("How often the panel count re-rolls mid-export. 0 = off (count fixed at start).")
+                        .changed()
+                    {
+                        changes.push(ParamChange::SetGridRandomInterval(interval));
+                    }
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 200, 0),
+                        format!("GRID MODE ON — {current_n} panels"),
+                    );
+                } else {
+                    ui.label("Grid mode OFF — exports single-panel.");
+                }
             });
 
             ui.separator();

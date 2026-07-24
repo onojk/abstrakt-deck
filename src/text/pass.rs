@@ -10,10 +10,6 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 use bytemuck::{Pod, Zeroable};
 use super::atlas::{TextAtlas, CELL};
-use crate::color::{rgb_to_hsv, hsv_to_rgb};
-// Reuse the SAME debug flag the standalone Accents shape uses, so flipping it in
-// one place governs both paths.
-use crate::influencer::accents::DEBUG_RED;
 
 /// Each live glyph is drawn as GLYPH_LAYERS stacked quads (same atlas cell, varied
 /// size/offset/brightness) for depth & texture — see `build_glyph_quad`.
@@ -372,21 +368,21 @@ fn build_glyph_quad(
 
 // ── Accent-mark emit (glyph-attached) ────────────────────────────────────────
 
+/// Off-white accent coloring. Core is a bright warm/neutral off-white; halo a
+/// dimmer light-gray. Nudge warmer/cooler/brighter here to retune ALL glyph
+/// accents (the 4 mark types and their micro dots) in one place.
+const ACCENT_OFFWHITE_CORE: [f32; 3] = [0.95, 0.94, 0.90];
+const ACCENT_OFFWHITE_HALO: [f32; 3] = [0.45, 0.45, 0.42];
+
 /// Accent (core, halo) colors for a glyph, inheriting the glyph's faded alpha so
-/// accents emerge/dissolve WITH the glyph. DEBUG_RED forces bright-red core +
-/// dark-red halo; otherwise a contrast hue (parent hue + 0.5 wrapped), bright
-/// core / dark halo. Mirrors `mark_colors` in src/influencer/accents.rs.
+/// accents emerge/dissolve WITH the glyph. All glyph-attached accent marks render
+/// light OFF-WHITE — bright core, dimmer halo — keeping the bright-core/dim-halo
+/// structure. Independent of the standalone Accents shape's coloring.
 fn accent_colors(parent: [f32; 4]) -> ([f32; 4], [f32; 4]) {
     let a = parent[3]; // inherit the glyph's lifetime-envelope alpha
-    if DEBUG_RED {
-        ([1.0, 0.0, 0.0, a], [0.15, 0.0, 0.0, a])
-    } else {
-        let (h, _s, _v) = rgb_to_hsv([parent[0], parent[1], parent[2]]);
-        let ch = h + 180.0; // +0.5 of the hue wheel; hsv_to_rgb wraps for us
-        let core = hsv_to_rgb(ch, 1.0, 1.0);
-        let halo = hsv_to_rgb(ch, 1.0, 0.15);
-        ([core[0], core[1], core[2], a], [halo[0], halo[1], halo[2], a])
-    }
+    let c = ACCENT_OFFWHITE_CORE;
+    let h = ACCENT_OFFWHITE_HALO;
+    ([c[0], c[1], c[2], a], [h[0], h[1], h[2], a])
 }
 
 /// Push one accent mark: a small quad sampling the parent glyph's SDF cell (so it
