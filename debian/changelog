@@ -1,3 +1,16 @@
+abstrakt-deck (0.1.8-3) noble; urgency=medium
+
+  * Override dh_auto_install to install the built binary directly. dh-cargo's
+    install step runs a fresh `cargo install` that re-resolves WITHOUT our
+    override_dh_auto_build --ignore-rust-version, so the advisory MSRV gate
+    fires again at install time (epaint_default_fonts 0.29.1 declares
+    rust-version 1.76 but compiles on 1.75). The binary is already built, so
+    install target/$(DEB_HOST_RUST_TYPE)/release/abstrakt-deck straight into
+    the package (dh-cargo builds with --target, hence the triple subdir).
+    Reuses the unchanged 0.1.8 orig tarball.
+
+ -- onojk <onojk123@gmail.com>  Fri, 24 Jul 2026 01:35:00 -0700
+
 abstrakt-deck (0.1.8-2) noble; urgency=medium
 
   * Override dh_clean to preserve vendored *.orig/*.rej files

@@ -13,6 +13,18 @@ override_dh_auto_build:
 	# exact versions), reproducing the committed v3 lock.
 	cargo build --offline --release --ignore-rust-version
 
+override_dh_auto_install:
+	# dh-cargo's default install runs `cargo install`, a FRESH cargo invocation
+	# that re-resolves without our --ignore-rust-version and re-trips the
+	# advisory MSRV gate (e.g. epaint_default_fonts 0.29.1 declares rust-version
+	# 1.76 but compiles fine on 1.75). The binary was already built by
+	# override_dh_auto_build, so install it directly. Locate it with find: the
+	# dh-cargo wrapper may build with --target (-> target/<triple>/release/) or
+	# without (-> target/release/), so match either.
+	install -Dm755 \
+		"$$(find target -type f -name abstrakt-deck -path '*release/abstrakt-deck' | head -n1)" \
+		debian/abstrakt-deck/usr/bin/abstrakt-deck
+
 override_dh_auto_test:
 	# Skip test runner during package build
 
