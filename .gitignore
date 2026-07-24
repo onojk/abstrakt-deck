@@ -15,3 +15,10 @@ abstrakt-deck-all-code.txt
 abstrakt-deck-source.txt
 /*-allcode.txt
 /*_code.txt
+
+# Flatpak local build artifacts
+flatpak/builddir/
+flatpak/.flatpak-builder/
+flatpak/repo/
+flatpak/build.log
+flatpak/*.log
