@@ -8,5 +8,5 @@ Icon=io.github.onojk.abstrakt_deck
 Terminal=false
 Categories=AudioVideo;Player;
 Keywords=visualizer;kaleidoscope;audio;music;reactive;
-StartupWMClass=abstrakt-deck
+StartupWMClass=io.github.onojk.abstrakt_deck
 StartupNotify=true

@@ -8828,9 +8828,22 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() { return; }
 
-        let attrs = Window::default_attributes()
+        // App id matching the Flatpak / .desktop file, so the window
+        // associates with our .desktop entry and icon (Wayland app_id, X11
+        // WM_CLASS). Keep in sync with the .desktop StartupWMClass.
+        const APP_ID: &str = "io.github.onojk.abstrakt_deck";
+        #[allow(unused_mut)]
+        let mut attrs = Window::default_attributes()
             .with_title("abstrakt-deck")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            // general name -> Wayland app_id / X11 WM_CLASS res_class.
+            attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, "");
+            attrs = WindowAttributesExtX11::with_name(attrs, APP_ID, "abstrakt-deck");
+        }
         let window = Arc::new(
             event_loop.create_window(attrs).expect("Failed to create window"),
         );
