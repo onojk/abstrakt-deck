@@ -1357,11 +1357,11 @@ fn fs_main(in: Vary) -> @location(0) vec4<f32> {
             label: None, bind_group_layouts: &[&bgl], push_constant_ranges: &[],
         })),
         vertex: wgpu::VertexState {
-            module: &shader, entry_point: Some("vs_main"),
+            module: &shader, entry_point: "vs_main",
             buffers: &[], compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader, entry_point: Some("fs_main"),
+            module: &shader, entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 blend: None,
@@ -2985,11 +2985,11 @@ impl GpuState {
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &dp_shader, entry_point: Some("vs_main"),
+                    module: &dp_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &dp_shader, entry_point: Some("fs_main"),
+                    module: &dp_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3216,11 +3216,11 @@ impl GpuState {
                     label: Some(kind.name()),
                     layout: Some(&painter_pipeline_layout),
                     vertex: wgpu::VertexState {
-                        module: &module, entry_point: Some("vs_main"),
+                        module: &module, entry_point: "vs_main",
                         buffers: &[], compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &module, entry_point: Some("fs_main"),
+                        module: &module, entry_point: "fs_main",
                         targets: &[Some(wgpu::ColorTargetState {
                             format: wgpu::TextureFormat::Rgba8Unorm,
                             blend: Some(wgpu::BlendState::REPLACE),
@@ -3349,11 +3349,11 @@ impl GpuState {
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &skin_shader, entry_point: Some("vs_main"),
+                    module: &skin_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &skin_shader, entry_point: Some("fs_main"),
+                    module: &skin_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3421,11 +3421,11 @@ impl GpuState {
                 label: Some("AudioPaint pipeline"),
                 layout: Some(&audio_painter_layout),
                 vertex: wgpu::VertexState {
-                    module: &ap_shader, entry_point: Some("vs_main"),
+                    module: &ap_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &ap_shader, entry_point: Some("fs_main"),
+                    module: &ap_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3450,11 +3450,11 @@ impl GpuState {
                 label: Some("PrintHead pipeline"),
                 layout: Some(&print_head_painter_layout),
                 vertex: wgpu::VertexState {
-                    module: &ph_shader, entry_point: Some("vs_main"),
+                    module: &ph_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &ph_shader, entry_point: Some("fs_main"),
+                    module: &ph_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3535,11 +3535,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&skin_bgl, &applied_harmony_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &img_shader, entry_point: Some("vs_main"),
+                    module: &img_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &img_shader, entry_point: Some("fs_main"),
+                    module: &img_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3569,11 +3569,11 @@ impl GpuState {
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &shape_shader, entry_point: Some("vs_main"),
+                    module: &shape_shader, entry_point: "vs_main",
                     buffers: &[Vertex::LAYOUT], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shape_shader, entry_point: Some("fs_main"),
+                    module: &shape_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3611,11 +3611,11 @@ impl GpuState {
                     push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &shape_effects_shader, entry_point: Some("vs_main"),
+                    module: &shape_effects_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shape_effects_shader, entry_point: Some("fs_main"),
+                    module: &shape_effects_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3643,11 +3643,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&kaleido_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &kaleido_shader, entry_point: Some("vs_main"),
+                    module: &kaleido_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &kaleido_shader, entry_point: Some("fs_main"),
+                    module: &kaleido_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3675,11 +3675,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&frame_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &frame_shader, entry_point: Some("vs_main"),
+                    module: &frame_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &frame_shader, entry_point: Some("fs_main"),
+                    module: &frame_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: config.format, // final pass → sRGB swapchain
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3707,11 +3707,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&spin_trail_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &spin_trail_shader, entry_point: Some("vs_main"),
+                    module: &spin_trail_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &spin_trail_shader, entry_point: Some("fs_main"),
+                    module: &spin_trail_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3739,11 +3739,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&blit_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &blit_shader, entry_point: Some("vs_main"),
+                    module: &blit_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &blit_shader, entry_point: Some("fs_main"),
+                    module: &blit_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: config.format,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3854,11 +3854,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&ribbon_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &ribbon_shader, entry_point: Some("vs_main"),
+                    module: &ribbon_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &ribbon_shader, entry_point: Some("fs_main"),
+                    module: &ribbon_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba16Float,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -3885,11 +3885,11 @@ impl GpuState {
                     label: None, bind_group_layouts: &[&skin_bgl], push_constant_ranges: &[],
                 })),
                 vertex: wgpu::VertexState {
-                    module: &ribbon_composite_shader, entry_point: Some("vs_main"),
+                    module: &ribbon_composite_shader, entry_point: "vs_main",
                     buffers: &[], compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &ribbon_composite_shader, entry_point: Some("fs_main"),
+                    module: &ribbon_composite_shader, entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: PAINTER_FORMAT,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -3993,11 +3993,11 @@ impl GpuState {
                 label: None, bind_group_layouts: &[&feedback_bgl], push_constant_ranges: &[],
             })),
             vertex: wgpu::VertexState {
-                module: &feedback_shader, entry_point: Some("vs_main"),
+                module: &feedback_shader, entry_point: "vs_main",
                 buffers: &[], compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &feedback_shader, entry_point: Some("fs_main"),
+                module: &feedback_shader, entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -4057,11 +4057,11 @@ impl GpuState {
                 label: None, bind_group_layouts: &[&palette_bgl], push_constant_ranges: &[],
             })),
             vertex: wgpu::VertexState {
-                module: &palette_shader, entry_point: Some("vs_main"),
+                module: &palette_shader, entry_point: "vs_main",
                 buffers: &[], compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &palette_shader, entry_point: Some("fs_main"),
+                module: &palette_shader, entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: PAINTER_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),

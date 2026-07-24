@@ -1410,7 +1410,7 @@ mod tests {
             let beat_idx = i / chunks_per_beat;
             let is_on_beat = i % chunks_per_beat == 0;
             let flux = if is_on_beat {
-                if beat_idx.is_multiple_of(2) { 4.0 } else { 10.0 }
+                if beat_idx % 2 == 0 { 4.0 } else { 10.0 }
             } else {
                 0.1
             };

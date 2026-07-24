@@ -1,0 +1,25 @@
+Source: abstrakt-deck
+Section: utils
+Priority: optional
+Maintainer: onojk <onojk123@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-cargo,
+               cargo,
+               rustc,
+               pkgconf,
+               libasound2-dev,
+               libfontconfig-dev,
+               libx11-dev,
+               libxcb1-dev,
+               libxcursor-dev,
+               libxrandr-dev,
+               libxi-dev,
+               libwayland-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/onojk/abstrakt-deck
+
+Package: abstrakt-deck
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Abstrakt Deck application
+ An egui-based application packaged for Ubuntu.

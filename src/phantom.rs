@@ -105,11 +105,11 @@ impl PhantomAlpha {
             label: Some("Phantom capture pipeline"),
             layout: Some(&capture_layout),
             vertex: wgpu::VertexState {
-                module: &capture_shader, entry_point: Some("vs_main"),
+                module: &capture_shader, entry_point: "vs_main",
                 buffers: &[], compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &capture_shader, entry_point: Some("fs_main"),
+                module: &capture_shader, entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: ring_format,
                     blend: None,
@@ -188,11 +188,11 @@ impl PhantomAlpha {
             label: Some("Phantom composite pipeline"),
             layout: Some(&composite_layout),
             vertex: wgpu::VertexState {
-                module: &composite_shader, entry_point: Some("vs_main"),
+                module: &composite_shader, entry_point: "vs_main",
                 buffers: &[], compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &composite_shader, entry_point: Some("fs_main"),
+                module: &composite_shader, entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: swapchain_format,
                     blend: None,
@@ -230,7 +230,7 @@ impl PhantomAlpha {
         device: &wgpu::Device,
         scene_view: &wgpu::TextureView,
     ) {
-        if !self.frame_counter.is_multiple_of(CAPTURE_STRIDE) { return; }
+        if self.frame_counter % CAPTURE_STRIDE != 0 { return; }
 
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Phantom capture BG"),
@@ -325,7 +325,7 @@ impl PhantomAlpha {
     /// Advance ring-buffer state — call once per render loop, after queue.submit().
     pub fn advance_frame(&mut self) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        if self.frame_counter.is_multiple_of(CAPTURE_STRIDE) {
+        if self.frame_counter % CAPTURE_STRIDE == 0 {
             self.write_head = (self.write_head + 1) % RING_SIZE;
         }
     }

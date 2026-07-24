@@ -1,0 +1,31 @@
+abstrakt-deck (0.1.7-1) noble; urgency=medium
+
+  * Fix noble (Ubuntu 24.04, rustc 1.75) MSRV build failures with a fresh,
+    fully-vendored dependency tree that compiles offline on rustc 1.75:
+    - Pin idna_adapter to 1.1.0, dropping the icu2 / zerotrie stack
+      (zerotrie 0.2.4 requires rustc 1.82).
+    - Pin rfd to 0.15.0 (ashpd 0.9 -> zbus 4.4) instead of 0.15.x with
+      ashpd 0.11 -> zbus 5.x (which requires rustc >= 1.85).
+    - Pin the wasi chain (wasi 0.14.2, getrandom 0.3.x) to drop wasip2 /
+      wit-bindgen 0.57 (edition 2024, unparseable by cargo 1.75).
+    - Pin coreaudio-sys to 0.2.16 and wayland-scanner to 0.31.10
+      (quick-xml 0.39, which builds on 1.75; 0.41 uses 1.76 std APIs).
+    - Downgrade the graphics stack to egui/egui-wgpu/egui-winit 0.29 and
+      wgpu 22.1: wgpu 23 uses ptr_from_ref (std, stabilised in rustc 1.76),
+      so it cannot compile on 1.75.
+    - Regenerate Cargo.lock as lockfile v3 and re-vendor so the vendored
+      sources match; no crate in the tree uses edition 2024.
+  * Adapt application source to the egui 0.29 / wgpu 22 API and to rustc
+    1.75: wgpu VertexState/FragmentState entry_point is &str (not
+    Option<&str>); replace u32::is_multiple_of (rustc 1.87) with % checks.
+  * debian/rules: build with --ignore-rust-version. A few pinned deps
+    (egui 0.29, naga 22, ...) declare rust-version >= 1.76 but compile
+    cleanly on 1.75; the flag only suppresses cargo's advisory MSRV gate.
+
+ -- onojk <onojk123@gmail.com>  Thu, 23 Jul 2026 22:30:00 -0700
+
+abstrakt-deck (0.1.6-1) noble; urgency=medium
+
+  * Downgrade ICU crates to v1.5.0 for Rust 1.75 (Ubuntu 24.04 MSRV) compatibility.
+
+ -- onojk <onojk123@gmail.com>  Thu, 23 Jul 2026 21:52:00 -0700

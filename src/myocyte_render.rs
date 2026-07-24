@@ -105,13 +105,13 @@ impl MyocyteRenderer {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module:              &shader,
-                entry_point:         Some("vs_main"),
+                entry_point:         "vs_main",
                 buffers:             &[],  // procedural — no vertex buffers
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module:      &shader,
-                entry_point: Some("fs_main"),
+                entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: shape_fbo_format,
                     blend: Some(wgpu::BlendState {

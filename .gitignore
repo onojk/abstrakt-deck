@@ -1,5 +1,12 @@
 /target
 
+# Vendored crate sources: ~1.2 GB, regenerable with `cargo vendor`, and shipped
+# in the Debian orig tarball — never commit to git.
+/vendor
+
+# Snap build artifacts
+*.snap
+
 # Concatenated code-dump files — never commit these
 abstrakt-deck-allcode.txt
 abstrakt-deck-code.txt

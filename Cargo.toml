@@ -2,6 +2,7 @@
 name = "abstrakt-deck"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 authors = ["Jonathan Kendall"]
 description = "Native Linux desktop audio-reactive kaleidoscope visualizer"
 
@@ -10,7 +11,9 @@ description = "Native Linux desktop audio-reactive kaleidoscope visualizer"
 winit = "0.30"
 
 # Modern graphics API
-wgpu = "23.0"
+# pinned to 22.x: wgpu 23 uses ptr_from_ref (std, stabilized in Rust 1.76), so it
+# cannot compile on noble's rustc 1.75. wgpu 22 is the highest that builds on 1.75.
+wgpu = "22.1"
 
 # Async runtime (wgpu requires it)
 pollster = "0.4"
@@ -40,15 +43,17 @@ serde_json = "1.0"
 dirs = "5.0"
 chrono = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-rfd = "0.15"
+rfd = "=0.15.0"  # pinned: 0.15.1+ pulls ashpd 0.10/0.11 -> zbus 5.x (MSRV > 1.75)
 rand = "0.8"
 symphonia = { version = "0.5", features = ["all"] }
 fontdue = "0.9"
 
 # GUI menu bar
-egui = "0.30"
-egui-wgpu = "0.30"
-egui-winit = "0.30"
+# pinned to 0.29.x: egui 0.30 requires Rust 1.80, and egui-wgpu 0.30 pins wgpu 23
+# (Rust 1.76). 0.29 uses wgpu 22 and builds on noble's rustc 1.75.
+egui = "0.29"
+egui-wgpu = "0.29"
+egui-winit = "0.29"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@ --buildsystem=cargo
+
+override_dh_auto_build:
+	# --ignore-rust-version: several deps (egui/egui-wgpu 0.29, naga 22, ...)
+	# declare rust-version >= 1.76 but compile cleanly on noble's rustc 1.75.
+	# The pinned versions are chosen so they actually build on 1.75; this flag
+	# only suppresses cargo's advisory rust-version gate.
+	cargo build --offline --locked --release --ignore-rust-version
+
+override_dh_auto_test:
+	# Skip test runner during package build
