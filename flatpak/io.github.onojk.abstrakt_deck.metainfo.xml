@@ -20,6 +20,20 @@
     </ul>
   </description>
   <launchable type="desktop-id">io.github.onojk.abstrakt_deck.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/onojk/abstrakt-deck/main/screenshots/1.png</image>
+      <caption>Kaleidoscope mandala with the Visualizer parameters panel</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/onojk/abstrakt-deck/main/screenshots/2.png</image>
+      <caption>Audio-reactive starburst scene</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/onojk/abstrakt-deck/main/screenshots/3.png</image>
+      <caption>Floral kaleidoscope pattern</caption>
+    </screenshot>
+  </screenshots>
   <developer id="io.github.onojk">
     <name>Jonathan Kendall</name>
   </developer>
