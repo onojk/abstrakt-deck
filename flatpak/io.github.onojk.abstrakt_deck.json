@@ -73,7 +73,7 @@
                     "type": "git",
                     "url": "https://github.com/onojk/abstrakt_deck.git",
                     "tag": "v0.1.8",
-                    "commit": "6f5081c57d0375305625782c994c605478606048"
+                    "commit": "7800bcaa603fda3f3544ad5ab97f2de4e79af68a"
                 },
                 "cargo-sources.json",
                 {
