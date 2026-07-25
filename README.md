@@ -1,6 +1,6 @@
 # abstrakt-deck
 
-[![CI](https://github.com/onojk/abstrakt-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/onojk/abstrakt-deck/actions/workflows/ci.yml)
+[![CI](https://github.com/onojk/abstrakt_deck/actions/workflows/ci.yml/badge.svg)](https://github.com/onojk/abstrakt_deck/actions/workflows/ci.yml)
 
 Native Linux desktop kaleidoscope visualizer and 4K music video generator built with Rust + wgpu. Load any audio file (or use live mic), configure the visualizer with parameter sliders, locks, and three autonomous chaos modes — then export a 4K UHD music video with synced audio in a single click. Multi-shape 3D geometry wrapped with procedural or image painters, folded through configurable kaleido symmetry, with audio-driven beat detection and bass-energy reactivity. Sister project to [abstrakt-engine](https://github.com/onojk/abstrakt-engine) (the Android version).
 
@@ -121,7 +121,7 @@ System libraries:
 
 ## Build and run
 
-    git clone https://github.com/onojk/abstrakt-deck.git
+    git clone https://github.com/onojk/abstrakt_deck.git
     cd abstrakt-deck
     cargo run --release
 

@@ -71,7 +71,7 @@
             "sources": [
                 {
                     "type": "git",
-                    "url": "https://github.com/onojk/abstrakt-deck.git",
+                    "url": "https://github.com/onojk/abstrakt_deck.git",
                     "tag": "v0.1.8",
                     "commit": "6f5081c57d0375305625782c994c605478606048"
                 },

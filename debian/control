@@ -16,7 +16,7 @@ Build-Depends: debhelper-compat (= 13),
                libxi-dev,
                libwayland-dev
 Standards-Version: 4.6.2
-Homepage: https://github.com/onojk/abstrakt-deck
+Homepage: https://github.com/onojk/abstrakt_deck
 
 Package: abstrakt-deck
 Architecture: any

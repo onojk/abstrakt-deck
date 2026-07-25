@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: abstrakt-deck
-Source: https://github.com/onojk/abstrakt-deck
+Source: https://github.com/onojk/abstrakt_deck
 
 Files: *
 Copyright: 2026 onojk <onojk123@gmail.com>
